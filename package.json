@@ -1,0 +1,34 @@
+{
+  "name": "command_base",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mosteast/command_base.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/mosteast/command_base/issues"
+  },
+  "homepage": "https://github.com/mosteast/command_base#readme",
+  "dependencies": {
+    "@mosteast/command": "^0.1.4",
+    "@mosteast/print_helper": "^0.1.1",
+    "@types/fs-extra": "^8.0.1",
+    "@types/inquirer": "^6.5.0",
+    "@types/lodash": "^4.14.149",
+    "@types/shelljs": "^0.8.6",
+    "@types/yargs": "^15.0.3",
+    "fs-extra": "^8.1.0",
+    "inquirer": "^7.0.4",
+    "lodash": "^4.17.15",
+    "shelljs": "^0.8.3",
+    "yargs": "^15.1.0"
+  }
+}
