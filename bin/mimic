@@ -1,31 +1,45 @@
 #!/usr/bin/env node
 
 const { cd, pwd } = require('shelljs')
-const { basename, resolve } = require('path')
+const { basename, resolve, dirname } = require('path')
 const { trim } = require('lodash')
 const { command } = require('@mosteast/command')
 
-require('yargs').command({
-  command: '$0 <repo_uri> [dir] [--keep_origin] [--keep_branch]',
-  describe: 'Clone and parenting a repository',
-  async handler({ repo_uri, dir, keep_origin, keep_branch }) {
-    const wd = pwd().toString()
-    const repo = basename(trim(repo_uri, '/'), '.git')
+require('yargs')
+  .command({
+    command: '$0 <repo_uri> [dir_path] [--create_remote] [--keep_origin] [--keep_branch]',
+    describe: 'Clone and parenting a repository',
+    async handler({ repo_uri, dir_path, create_remote, keep_origin, keep_branch }) {
+      const wd = pwd().toString()
+      const repo = basename(trim(repo_uri, '/'), '.git')
+      let dir
 
-    if (!dir) {
-      dir = resolve(wd, repo)
-    }
+      if (!dir_path) {
+        dir_path = resolve(wd, repo)
+        dir = repo
+      } else {
+        dir = trim(dir_path, '/').split('/').pop()
+      }
 
-    await command(`hub clone ${repo_uri} ${dir}`)
+      await command(`hub clone ${repo_uri} ${dir_path}`)
 
-    cd(dir)
+      cd(dir_path)
 
-    if (!keep_origin) {
-      await command(`git remote rename origin parent`)
-    }
+      if (!keep_origin) {
+        await command(`git remote rename origin parent`)
+      }
 
-    if (!keep_branch) {
-      await command(`git branch -m master parent`)
-    }
-  },
-}).argv
+      if (!keep_branch) {
+        await command(`git branch -m master parent`)
+        await command(`git checkout -b master`)
+      }
+
+      if (create_remote) {
+        let remote = ''
+        if (typeof create_remote === 'string') {
+          remote = create_remote
+        }
+        await command(`hub create ${remote}`)
+      }
+    },
+  }).argv
