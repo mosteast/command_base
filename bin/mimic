@@ -1,14 +1,35 @@
 #!/usr/bin/env node
 
 const { cd, pwd } = require('shelljs')
-const { basename, resolve, dirname } = require('path')
+const { basename, resolve } = require('path')
 const { trim } = require('lodash')
 const { command } = require('@mosteast/command')
+
+const N_parent = 'parent'
 
 require('yargs')
   .command({
     command: '$0 <repo_uri> [dir_path] [--create_remote] [--keep_origin] [--keep_branch]',
     describe: 'Clone and parenting a repository',
+    builder(argv) {
+      return argv.options({
+        create_remote: {
+          type: 'boolean',
+          default: false,
+          describe: 'Whether to create remote repository in github',
+        },
+        keep_origin: {
+          type: 'boolean',
+          default: false,
+          describe: `Whether rename origin to ${N_parent}`,
+        },
+        keep_branch: {
+          type: 'boolean',
+          default: false,
+          describe: `Whether rename branch to ${N_parent}`,
+        },
+      })
+    },
     async handler({ repo_uri, dir_path, create_remote, keep_origin, keep_branch }) {
       const wd = pwd().toString()
       const repo = basename(trim(repo_uri, '/'), '.git')
@@ -26,11 +47,11 @@ require('yargs')
       cd(dir_path)
 
       if (!keep_origin) {
-        await command(`git remote rename origin parent`)
+        await command(`git remote rename origin ${N_parent}`)
       }
 
       if (!keep_branch) {
-        await command(`git branch -m master parent`)
+        await command(`git branch -m master ${N_parent}`)
         await command(`git checkout -b master`)
       }
 
