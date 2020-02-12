@@ -14,8 +14,7 @@ require('yargs')
     builder(argv) {
       return argv.options({
         create_remote: {
-          type: 'boolean',
-          default: false,
+          type: 'string',
           describe: 'Whether to create remote repository in github',
         },
         keep_origin: {

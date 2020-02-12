@@ -1,0 +1,33 @@
+#!/usr/bin/env node
+
+const { command } = require('@mosteast/command')
+
+require('yargs')
+  .command({
+    command: '$0',
+    describe: 'Merge current branch with parent',
+    builder(argv) {
+      return argv
+        .positional('remote', {
+          type: 'string',
+          describe: 'Remote name',
+          default: 'parent',
+        })
+        .positional('branch', {
+          type: 'string',
+          describe: 'Remote branch',
+          default: 'master',
+        })
+        .options({
+          edit: {
+            type: 'boolean',
+            default: false,
+            describe: 'Edit merge commit or not',
+          },
+        })
+    },
+    async handler({ remote, branch, edit }) {
+      await command(`git pull ${remote} ${branch} ${edit && '--no-edit'}`)
+    },
+  })
+  .argv
