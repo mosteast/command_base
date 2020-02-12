@@ -27,7 +27,7 @@ require('yargs')
         })
     },
     async handler({ remote, branch, edit }) {
-      await command(`git pull ${remote} ${branch} ${edit && '--no-edit'}`)
+      await command(`git pull ${remote} ${branch} ${edit ? '' : '--no-edit'}`)
     },
   })
   .argv
