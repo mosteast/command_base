@@ -1,0 +1,28 @@
+#!/usr/bin/env node
+
+const { command } = require('@mosteast/command')
+
+const N_version = {
+  major: 'major',
+  minor: 'minor',
+  patch: 'patch',
+}
+
+require('yargs')
+  .command({
+    command: '$0 <version_type>',
+    describe: 'Publish npm package',
+    builder(argv) {
+      return argv
+        .positional('version_type', {
+          type: 'string',
+          default: N_version.patch,
+          choices: Object.values(N_version),
+        })
+    },
+    async handler(args) {
+      await command(`npm version ${args.version_type} && npm run build && cd build && npm publish --registry http://registry.npmjs.org --access public && cd .. && git push`)
+    },
+  })
+  .demandCommand()
+  .argv

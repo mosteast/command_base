@@ -22,7 +22,6 @@
     "@mosteast/print_helper": "^0.1.1",
     "@types/fs-extra": "^8.0.1",
     "@types/inquirer": "^6.5.0",
-    "@types/lodash": "^4.14.149",
     "@types/shelljs": "^0.8.6",
     "@types/yargs": "^15.0.3",
     "fs-extra": "^8.1.0",
@@ -30,5 +29,8 @@
     "lodash": "^4.17.15",
     "shelljs": "^0.8.3",
     "yargs": "^15.1.0"
+  },
+  "devDependencies": {
+    "@types/lodash": "^4.14.149"
   }
 }
