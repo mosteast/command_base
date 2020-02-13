@@ -7,6 +7,8 @@ function install_nginx() {
 
   sudo yum install nginx
 
+  sudo systemctl start nginx
+
   nginx -v
 
   if [ $? -eq 0 ]; then
@@ -24,19 +26,30 @@ function config_nginx() {
     _conf=$_def_conf
   fi
 
-  echo ''
+  _template_url='https://raw.githubusercontent.com/mosteast/command_base/master/lib/centos/8/template/template.nginx.conf'
+  curl -o $_conf $_template_url
 
-  # Get default conf file
-  if [ -f '/etc/nginx/nginx.conf' ]; then
-    echo 'Set port for nginx to listen:'
-    read -r base_port
-    if [ "$base_port" ]; then
-      curl "http://0.0.0.0:$base_port"
-      if [ $? -eq 0 ]; then
-
-      fi
-    fi
+  if [ $? -ne 0 ]; then
+    echo 'Template file fail to download'
+    exit 1
   fi
+
+  echo "Please input following variables"
+  echo "domain (www.xxx.com):"
+  read -r _domain
+  echo "port_expose (number):"
+  read -r _port_expose
+  echo "proxy_url: (http://0.0.0.0:3000)"
+  read -r _proxy_url
+
+  sed "s/{{domain}}/$_domain/g" $_conf
+  sed "s/{{port_expose}}/$_port_expose/g" $_conf
+  sed "s/{{proxy_url}}/$_proxy_url/g" $_conf
 }
 
-sudo systemctl start nginx
+function run() {
+  install_nginx
+  config_nginx
+}
+
+run
