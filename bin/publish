@@ -10,14 +10,23 @@ const N_version = {
 
 require('yargs')
   .command({
-    command: '$0 <version_type>',
+    command: '$0 [version_type]',
     describe: 'Publish npm package',
     builder(argv) {
       return argv
         .positional('version_type', {
           type: 'string',
+          describe: 'Version type',
           default: N_version.patch,
           choices: Object.values(N_version),
+        })
+        .options({
+          skip_version: {
+            type: 'boolean',
+            alias: 's',
+            describe: 'Skip version tagging',
+            default: false,
+          },
         })
     },
     async handler(args) {
