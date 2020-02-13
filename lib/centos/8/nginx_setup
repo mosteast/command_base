@@ -1,55 +1,77 @@
 #!/usr/bin/env sh
 
-function install_nginx() {
+install_nginx() {
   sudo yum install epel-release
-
   sudo yum update -y
-
   sudo yum install nginx
-
   sudo systemctl start nginx
 
-  nginx -v
-
-  if [ $? -eq 0 ]; then
+  if [ $(nginx -v) ]; then
     echo 'nginx installed'
   fi
 }
 
-function config_nginx() {
+config_nginx() {
   _def_conf=/etc/nginx/conf.d/main.conf
+  echo
   echo "You can specify config file path (default: $_def_conf):"
   read -r _conf
 
-  if [ ! $_conf ]; then
+  if [ ! "$_conf" ]; then
     echo "Will use default path: $_def_conf"
     _conf=$_def_conf
   fi
 
   _template_url='https://raw.githubusercontent.com/mosteast/command_base/master/lib/centos/8/template/template.nginx.conf'
-  curl -o $_conf $_template_url
 
-  if [ $? -ne 0 ]; then
+  if ! curl -o $_conf https://raw.githubusercontent.com/mosteast/command_base/master/lib/centos/8/template/template.nginx.conf; then
     echo 'Template file fail to download'
     exit 1
   fi
 
+  echo
   echo "Please input following variables"
   echo "domain (www.xxx.com):"
   read -r _domain
   echo "port_expose (number):"
   read -r _port_expose
-  echo "proxy_url: (http://0.0.0.0:3000)"
+  echo "proxy_url: (http://host:port):"
   read -r _proxy_url
 
-  sed "s/{{domain}}/$_domain/g" $_conf
-  sed "s/{{port_expose}}/$_port_expose/g" $_conf
-  sed "s/{{proxy_url}}/$_proxy_url/g" $_conf
+  sed -ie "s%{{domain}}%$_domain%g" $_conf
+  sed -ie "s%{{port_expose}}%$_port_expose%g" $_conf
+  sed -ie "s%{{proxy_url}}%$_proxy_url%g" $_conf
+  echo
+  echo "Generated config file:"
+  echo $_conf
+  echo
+  cat $_conf
+  echo
 }
 
-function run() {
+restart_nginx() {
+  systemctl restart nginx
+}
+
+enable_nginx() {
+  systemctl enable nginx
+}
+
+run() {
   install_nginx
   config_nginx
+
+  read -rp "Restart nginx (y/N)?" choice
+  case "$choice" in
+  y | Y) restart_nginx ;;
+  *) echo "no" ;;
+  esac
+
+  read -rp "Auto start nginx when system boots (y/N)?" choice
+  case "$choice" in
+  y | Y) enable_nginx ;;
+  *) echo "no" ;;
+  esac
 }
 
 run
