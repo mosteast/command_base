@@ -57,6 +57,8 @@ enable_nginx() {
   systemctl enable nginx
 }
 
+
+
 run() {
   install_nginx
   config_nginx
