@@ -1,0 +1,42 @@
+#!/usr/bin/env sh
+
+function install_nginx() {
+  sudo yum install epel-release
+
+  sudo yum update -y
+
+  sudo yum install nginx
+
+  nginx -v
+
+  if [ $? -eq 0 ]; then
+    echo 'nginx installed'
+  fi
+}
+
+function config_nginx() {
+  _def_conf=/etc/nginx/conf.d/main.conf
+  echo "You can specify config file path (default: $_def_conf):"
+  read -r _conf
+
+  if [ ! $_conf ]; then
+    echo "Will use default path: $_def_conf"
+    _conf=$_def_conf
+  fi
+
+  echo ''
+
+  # Get default conf file
+  if [ -f '/etc/nginx/nginx.conf' ]; then
+    echo 'Set port for nginx to listen:'
+    read -r base_port
+    if [ "$base_port" ]; then
+      curl "http://0.0.0.0:$base_port"
+      if [ $? -eq 0 ]; then
+
+      fi
+    fi
+  fi
+}
+
+sudo systemctl start nginx
