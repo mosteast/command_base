@@ -7,6 +7,7 @@ const { command } = require('@mosteast/command')
 
 const N_parent = 'parent'
 
+// Precondition: github CLI installed
 require('yargs')
   .command({
     command: '$0 <repo_uri> [dir_path] [--create_remote] [--keep_origin] [--keep_branch]',
