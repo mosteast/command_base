@@ -8,7 +8,8 @@ const N_version = {
   patch: 'patch',
 }
 
-// Precondition: oh-my-zsh installed
+// Precondition:
+// The last command `git push` need to set `git config --global push.default current`
 require('yargs')
   .command({
     command: '$0 [version_type]',
@@ -31,7 +32,6 @@ require('yargs')
         })
     },
     async handler(args) {
-      // The last command need to set `git config --global push.default current`
       await command(`npm version ${args.version_type} && npm run build && cd build && npm publish --registry http://registry.npmjs.org --access public && cd .. && git push`)
     },
   })
