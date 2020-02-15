@@ -31,7 +31,8 @@ require('yargs')
         })
     },
     async handler(args) {
-      await command(`npm version ${args.version_type} && npm run build && cd build && npm publish --registry http://registry.npmjs.org --access public && cd .. && `)
+      // The last command need to set `git config --global push.default current`
+      await command(`npm version ${args.version_type} && npm run build && cd build && npm publish --registry http://registry.npmjs.org --access public && cd .. && git push`)
     },
   })
   .demandCommand()
