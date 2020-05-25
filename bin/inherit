@@ -4,7 +4,7 @@ const { command } = require('@mosteast/command')
 
 require('yargs')
   .command({
-    command: '$0',
+    command: '$0 [remote] [branch]',
     describe: 'Merge current branch with parent',
     builder(argv) {
       return argv

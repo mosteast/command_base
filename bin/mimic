@@ -42,7 +42,7 @@ require('yargs')
         dir = trim(dir_path, '/').split('/').pop()
       }
 
-      await command(`hub clone ${repo_uri} ${dir_path}`)
+      await command(`hub clone ${repo_uri} "${dir_path}"`)
 
       cd(dir_path)
 
