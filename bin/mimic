@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 
-const { cd, pwd } = require('shelljs')
-const { basename, resolve } = require('path')
-const { trim } = require('lodash')
-const { command } = require('@mosteast/command')
+const { cd, pwd } = require('shelljs');
+const { basename, resolve } = require('path');
+const { trim } = require('lodash');
+const { command } = require('@mosteast/command');
 
-const N_parent = 'parent'
+const N_parent = 'parent';
 
 // Precondition: github CLI installed
 require('yargs')
@@ -32,43 +32,43 @@ require('yargs')
           default: false,
           describe: `Whether rename branch to ${N_parent}`,
         },
-      })
+      });
     },
     async handler({ repo_uri, dir_path, branch, create_remote, keep_origin, keep_branch }) {
-      const wd = pwd().toString()
-      const repo = basename(trim(repo_uri, '/'), '.git')
-      let dir
+      const wd = pwd().toString();
+      const repo = basename(trim(repo_uri, '/'), '.git');
+      let dir;
 
       if (!dir_path) {
-        dir_path = resolve(wd, repo)
-        dir = repo
+        dir_path = resolve(wd, repo);
+        dir = repo;
       } else {
-        dir = trim(dir_path, '/').split('/').pop()
+        dir = trim(dir_path, '/').split('/').pop();
       }
 
       if (branch) {
-        branch = `--single-branch --branch ${branch}`
+        branch = `--single-branch --branch ${branch}`;
       }
 
-      await command(`hub clone ${branch} ${repo_uri} "${dir_path}"`)
+      await command(`gh repo clone ${repo_uri} "${dir_path}" -- ${branch}`);
 
-      cd(dir_path)
+      cd(dir_path);
 
       if (!keep_origin) {
-        await command(`git remote rename origin ${N_parent}`)
+        await command(`git remote rename origin ${N_parent}`);
       }
 
       if (!keep_branch) {
-        await command(`git branch -m master ${N_parent}`)
-        await command(`git checkout -b master`)
+        await command(`git branch -m master ${N_parent}`);
+        await command(`git checkout -b master`);
       }
 
       if (create_remote) {
-        let remote = ''
+        let remote = '';
         if (typeof create_remote === 'string') {
-          remote = create_remote
+          remote = create_remote;
         }
-        await command(`hub create ${remote}`)
+        await command(`gh repo create ${remote}`);
       }
     },
-  }).argv
+  }).argv;
