@@ -11,7 +11,12 @@ const N_parent = 'parent';
 require('yargs')
   .command({
     command: '$0 <repo_uri> [dir_path] [--branch] [--create_remote] [--keep_origin] [--keep_branch]',
-    describe: 'Clone and parenting a repository',
+    describe: `Clone and parenting a repository
+Example:
+
+mimic mosteast/giao foo --branch feature.rds --create_remote mosteast/foo
+
+`,
     builder(argv) {
       return argv.options({
         branch: {
