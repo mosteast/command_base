@@ -15,7 +15,6 @@ require('yargs')
 Example:
 
 mimic mosteast/giao foo --branch feature.rds --create_remote mosteast/foo
-
 `,
     builder(argv) {
       return argv.options({
