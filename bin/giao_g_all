@@ -1,0 +1,12 @@
+#!/usr/bin/env zsh
+
+source ~/.zshrc
+
+for d in ~/code_base/giao.*; do
+  if [ -d "$d" ]; then
+    echo "$d"
+    cd "$d" || exit
+    g
+    echo ''
+  fi
+done
