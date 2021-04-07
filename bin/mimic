@@ -54,7 +54,7 @@ mimic mosteast/giao foo --branch feature.rds --create_remote mosteast/foo
         branch = `--single-branch --branch ${branch}`;
       }
 
-      await command(`gh repo clone ${repo_uri} "${dir_path}" -- ${branch} --recurse-submodules`);
+      await command(`gh repo clone ${repo_uri} "${dir_path}" -- ${branch} --recursive`);
 
       cd(dir_path);
 
