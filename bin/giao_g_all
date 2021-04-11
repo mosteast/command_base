@@ -2,11 +2,15 @@
 
 source ~/.zshrc
 
+_report=/tmp/giao_g_all.report.txt
+
 for d in ~/code_base/mosteast/{giao,giao_web_angular}.*; do
   if [ -d "$d" ]; then
     echo "$d"
     cd "$d" || exit
-    g
+    g >>$_report 2>&1 &
     echo ''
   fi
 done
+
+cat $_report
