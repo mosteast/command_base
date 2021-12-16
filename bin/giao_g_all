@@ -2,7 +2,7 @@
 
 source ~/.zshrc
 
-for d in ~/code_base/mosteast/{giao,giao_web_angular}.*; do
+for d in ~/code_base/mosteast/{giao,giao_web_angular,giao_web_react}.*; do
   if [ -d "$d" ]; then
     echo "$d"
     cd "$d" || exit
