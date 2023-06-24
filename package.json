@@ -2,21 +2,22 @@
   "name": "command_base",
   "version": "1.0.1",
   "description": "",
-  "main": "index.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+  "keywords": [],
+  "homepage": "https://github.com/mosteast/command_base#readme",
+  "bugs": {
+    "url": "https://github.com/mosteast/command_base/issues"
   },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/mosteast/command_base.git"
   },
-  "keywords": [],
-  "author": "",
   "license": "ISC",
-  "bugs": {
-    "url": "https://github.com/mosteast/command_base/issues"
+  "author": "",
+  "main": "index.js",
+  "scripts": {
+    "format": "npx sort-package-json && git diff --name-only | xargs -r npx prettier --write",
+    "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "homepage": "https://github.com/mosteast/command_base#readme",
   "dependencies": {
     "@mosteast/command": "^0.1.4",
     "@mosteast/print_helper": "^0.1.1",
