@@ -1,7 +1,5 @@
 #!/usr/bin/env ts-node
 
-run()
+run();
 
-export function run() {
-
-}
+export function run() {}
