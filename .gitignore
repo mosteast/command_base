@@ -3,7 +3,7 @@ tmp/
 build/
 dist/
 log/
-storage
+secret/
 package-lock.json
 .env
 .DS_Store

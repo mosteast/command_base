@@ -1,4 +1,50 @@
-#!/usr/bin/env sh
+#!/usr/bin/env bash
+
+# Custom zsh config
+# You can source this file in ~/.zshrc:
+# source '/path/to/this/file/zshrc_custom.sh'
+
+export no_proxy="localhost,127.0.0.1,localaddress,.localdomain.com"
+export http_proxy=http://127.0.0.1:7890
+export https_proxy=http://127.0.0.1:7890
+export all_proxy=socks5://127.0.0.1:7890
+
+export PATH="$HOME/dev_lib/flutter/bin:$HOME/bin:$HOME/code_base/command_base/bin:$HOME/code_base/mosteast/giao/bin:/usr/local/mysql/bin:/opt/homebrew/bin:$PATH"
+export ZPLUG_HOME=/opt/homebrew/opt/zplug
+
+# load shortcuts
+source "$HOME/code_base/mosteast/giao.feature.root/bin/shortcuts"
+# load zplug
+source "$ZPLUG_HOME/init.zsh"
+# load secret variables
+source "$HOME/code_base/command_base/secret/variable"
+
+plugins=(git)
+
+unalias g
+function g() {
+  gaa
+  # use first param as commit message if exists
+  # or use UTC date string as commit message
+  gcmsg "${1-:$(date -u)}"
+  ggp
+}
+
+PROMPT='%{$fg[cyan]%}%c $(git_prompt_info)'
+PROMPT+="
+%{$reset_color%}%(?:%{$fg_bold[green]%}● :%{$fg_bold[red]%}● )%{$reset_color%}"
+
+alias list='tree -aFL 1 --dirsfirst'
+
+# alias backup_company_secrets='
+# scp -r root@120.27.240.21:/deployment/mosteast_auth/.env /Users/kev/Biao\ Dropbox/Kev\ Z/mosteast/production_secret/mosteast_auth/dotenv;
+# scp -r root@120.27.240.21:/deployment/mosteast_share/.env /Users/kev/Biao\ Dropbox/Kev\ Z/mosteast/production_secret/mosteast_share/dotenv
+# '
+
+alias rm='safe-rm'
+alias i=idea
+alias c='cursor'
+
 
 alias f='
 export no_proxy="localhost,127.0.0.1,localaddress,.localdomain.com"
