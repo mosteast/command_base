@@ -1,0 +1,25 @@
+#!/bin/bash
+
+# Define base backup directory
+BASE_BACKUP_DIR="$HOME/Library/Mobile Documents/com~apple~CloudDocs/main/config_base/cursor"
+
+# Find the latest backup directory
+LATEST_BACKUP=$(ls -d "$BASE_BACKUP_DIR"/*/ 2>/dev/null | sort -r | head -n 1)
+
+# Check if a backup exists
+if [ -z "$LATEST_BACKUP" ]; then
+  echo "No backup found in $BASE_BACKUP_DIR"
+  exit 1
+fi
+
+# Cursor settings directory (for macOS)
+CURSOR_CONFIG_DIR="$HOME/Library/Application Support/Cursor/User"
+
+echo "Restoring Cursor settings from $LATEST_BACKUP..."
+cp -r "$LATEST_BACKUP/User" "$CURSOR_CONFIG_DIR"
+
+# Restore extensions
+echo "Reinstalling extensions..."
+cat "$LATEST_BACKUP/extensions.txt" | xargs -n 1 cursor --install-extension
+
+echo "Restore complete!"
