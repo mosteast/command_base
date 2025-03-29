@@ -1,0 +1,23 @@
+#!/bin/bash
+
+# Check if channel URL is provided
+if [ -z "$1" ]; then
+    echo "Usage: $0 <youtube_channel_url> [output_directory]"
+    echo "Example: $0 https://www.youtube.com/@Brute-channel"
+    echo "Example with custom output: $0 https://www.youtube.com/@Brute-channel ~/Downloads/YouTube"
+    exit 1
+fi
+
+CHANNEL_URL="$1"
+OUTPUT_DIR="${2:-~/Library/Mobile Documents/com~apple~CloudDocs/main/downie/YouTube/%(uploader)s}"
+
+yt-dlp --playlist-reverse \
+-o "$OUTPUT_DIR/%(playlist)s/%(n_entries+1-playlist_index)d.%(title)s.%(ext)s" \
+--cookies-from-browser chrome \
+-N 5 \
+-f "bestvideo+bestaudio/best" \
+--write-subs \
+--write-auto-subs \
+--sub-langs "zh-Hans,zh-CN,zh,en,en-US" \
+--convert-subs srt \
+"$CHANNEL_URL"
