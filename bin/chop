@@ -1,0 +1,136 @@
+#!/bin/bash
+
+# Script to divide a text file into n equal parts
+# Usage examples:
+#   ./chop input.txt 3
+#   ./chop --input input.txt --parts 5
+#   ./chop -i input.txt -p 4 --output chunk_prefix
+#   ./chop --help
+
+# Default values
+input_file=""
+num_parts=2
+output_prefix="part"
+
+# Function to display usage
+usage() {
+    echo "Usage: $0 [OPTIONS] [input_file] [num_parts]"
+    echo "Options:"
+    echo "  [input_file]           Input file to divide (first positional argument)"
+    echo "  [num_parts]            Number of parts to divide into (second positional argument, default: 2)"
+    echo "  --input, -i FILE      Input file to divide"
+    echo "  --parts, -p NUMBER    Number of parts to divide into (default: 2)"
+    echo "  --output, -o PREFIX   Output filename prefix (default: 'part')"
+    echo "  --help, -h            Display this help message"
+    echo ""
+    echo "Examples:"
+    echo "  $0 input.txt 3        # Divide input.txt into 3 equal parts"
+    echo "  $0 -i data.txt -p 5   # Divide data.txt into 5 equal parts"
+    exit 1
+}
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    key="$1"
+    case $key in
+        --input|-i)
+            input_file="$2"
+            shift 2
+            ;;
+        --parts|-p)
+            num_parts="$2"
+            shift 2
+            ;;
+        --output|-o)
+            output_prefix="$2"
+            shift 2
+            ;;
+        --help|-h)
+            usage
+            ;;
+        *)
+            # If first positional arg and input_file is empty, use as input_file
+            if [[ -z "$input_file" ]]; then
+                input_file="$1"
+            # If second positional arg and num_parts is still default, use as num_parts
+            elif [[ "$num_parts" -eq 2 ]]; then
+                num_parts="$1"
+            else
+                echo "Unknown option: $1"
+                usage
+            fi
+            shift
+            ;;
+    esac
+done
+
+# Validate input file
+if [[ -z "$input_file" ]]; then
+    echo "Error: No input file specified"
+    usage
+fi
+
+if [[ ! -f "$input_file" ]]; then
+    echo "Error: Input file '$input_file' does not exist"
+    exit 1
+fi
+
+# Validate number of parts
+if ! [[ "$num_parts" =~ ^[0-9]+$ ]]; then
+    echo "Error: Number of parts must be a positive integer"
+    exit 1
+fi
+
+if [[ "$num_parts" -lt 1 ]]; then
+    echo "Error: Number of parts must be at least 1"
+    exit 1
+fi
+
+# Get total number of lines in the input file
+total_lines=$(wc -l < "$input_file")
+echo "Total lines in $input_file: $total_lines"
+
+# Calculate lines per part (rounding up)
+lines_per_part=$(( (total_lines + num_parts - 1) / num_parts ))
+echo "Dividing into $num_parts parts with approximately $lines_per_part lines each"
+
+# Create output directory if it doesn't exist
+mkdir -p "$(dirname "$output_prefix")"
+
+# Split the file
+current_line=1
+for ((i=1; i<=num_parts; i++)); do
+    # Calculate end line for this part
+    if [[ $i -eq $num_parts ]]; then
+        # Last part gets all remaining lines
+        end_line=$total_lines
+    else
+        end_line=$((current_line + lines_per_part - 1))
+        # Ensure we don't exceed total lines
+        if [[ $end_line -gt $total_lines ]]; then
+            end_line=$total_lines
+        fi
+    fi
+    
+    # Calculate number of lines to extract
+    num_lines=$((end_line - current_line + 1))
+    
+    # Create output file name with padded number
+    output_file="${output_prefix}_$(printf "%02d" $i)"
+    
+    # Extract lines from input file
+    if [[ $num_lines -gt 0 ]]; then
+        tail -n +$current_line "$input_file" | head -n $num_lines > "$output_file"
+        echo "Created $output_file with $num_lines lines"
+    fi
+    
+    # Update current line for next iteration
+    current_line=$((end_line + 1))
+    
+    # If we've processed all lines, break
+    if [[ $current_line -gt $total_lines ]]; then
+        break
+    fi
+done
+
+echo "File successfully divided into $num_parts parts with prefix '$output_prefix'" 

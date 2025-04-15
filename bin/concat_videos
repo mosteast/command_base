@@ -1,0 +1,144 @@
+#!/bin/bash
+
+# Script to concatenate videos by name using FFmpeg
+# Usage examples:
+#   ./concat_videos.sh --directory /path/to/videos output.mp4
+#   ./concat_videos.sh -d /path/to/videos output.mp4
+#   ./concat_videos.sh --files video1.mp4 video2.mp4 combined.mp4
+#   ./concat_videos.sh -f "video1.mp4 video2.mp4 video3.mp4" combined.mp4
+#   ./concat_videos.sh --pattern "lecture*.mp4" course.mp4
+#   ./concat_videos.sh -p "part_*.mp4" full_video.mp4
+
+# Default values
+output_file=""
+mode=""
+input_value=""
+
+# Function to display usage
+usage() {
+    echo "Usage: $0 [OPTIONS] output_file"
+    echo "Options:"
+    echo "  --directory, -d DIR   Concatenate all videos in a directory"
+    echo "  --files, -f FILES     Concatenate specific files (space-separated list)"
+    echo "  --pattern, -p PATTERN Concatenate files matching a pattern"
+    echo "  --help, -h            Display this help message"
+    echo ""
+    echo "The last argument must be the output file name"
+    exit 1
+}
+
+# Parse arguments
+while [[ $# -gt 1 ]]; do
+    key="$1"
+    case $key in
+        --directory|-d)
+            mode="directory"
+            input_value="$2"
+            shift 2
+            ;;
+        --files|-f)
+            mode="files"
+            input_value="$2"
+            shift 2
+            ;;
+        --pattern|-p)
+            mode="pattern"
+            input_value="$2"
+            shift 2
+            ;;
+        --help|-h)
+            usage
+            ;;
+        *)
+            echo "Unknown option: $1"
+            usage
+            ;;
+    esac
+done
+
+# The last argument should be the output file
+if [[ $# -eq 1 ]]; then
+    output_file="$1"
+else
+    echo "Error: No output file specified as the last argument"
+    usage
+fi
+
+# Check if ffmpeg is installed
+if ! command -v ffmpeg &> /dev/null; then
+    echo "Error: ffmpeg is not installed. Please install it first."
+    exit 1
+fi
+
+# Check if a mode was specified
+if [ -z "$mode" ]; then
+    echo "Error: You must specify one of --directory, --files, or --pattern"
+    usage
+fi
+
+# Create temporary files
+list_file="$(mktemp).txt"
+concat_file="$(mktemp).txt"
+
+# Process based on mode
+case $mode in
+    directory)
+        if [ -z "$input_value" ]; then
+            input_value="."
+        fi
+        if [ ! -d "$input_value" ]; then
+            echo "Error: Directory '$input_value' does not exist"
+            exit 1
+        fi
+        echo "Finding videos in directory: $input_value"
+        find "$input_value" -type f -name "*.mp4" -o -name "*.avi" -o -name "*.mkv" -o -name "*.mov" | sort > "$list_file"
+        ;;
+    files)
+        if [ -z "$input_value" ]; then
+            echo "Error: No files specified"
+            exit 1
+        fi
+        echo "Using specified files"
+        for file in $input_value; do
+            if [ -f "$file" ]; then
+                echo "$file" >> "$list_file"
+            else
+                echo "Warning: File '$file' does not exist and will be skipped"
+            fi
+        done
+        ;;
+    pattern)
+        if [ -z "$input_value" ]; then
+            echo "Error: No pattern specified"
+            exit 1
+        fi
+        echo "Finding files matching pattern: $input_value"
+        find . -type f -name "$input_value" | sort > "$list_file"
+        ;;
+esac
+
+# Check if any files were found
+if [ ! -s "$list_file" ]; then
+    echo "Error: No video files found"
+    rm "$list_file" "$concat_file"
+    exit 1
+fi
+
+# Create the ffmpeg concat file format
+while IFS= read -r file; do
+    echo "file '$file'" >> "$concat_file"
+done < "$list_file"
+
+# Display files to be concatenated
+echo "Files to be concatenated:"
+cat "$list_file"
+echo ""
+echo "Concatenating videos to $output_file..."
+
+# Run ffmpeg to concatenate the videos
+ffmpeg -f concat -safe 0 -i "$concat_file" -c copy "$output_file"
+
+# Clean up temporary files
+rm "$list_file" "$concat_file"
+
+echo "Concatenation complete: $output_file" 

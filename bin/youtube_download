@@ -2,26 +2,66 @@
 
 # Check if channel URL is provided
 if [ -z "$1" ]; then
-    echo "Usage: $0 <youtube_channel_url> [output_directory]"
+    echo "Usage: $0 <youtube_channel_url> [output_directory] -- [yt-dlp options]"
     echo "Example: $0 https://www.youtube.com/@Brute-channel"
     echo "Example with custom output: $0 https://www.youtube.com/@Brute-channel ~/Downloads/YouTube"
+    echo "Example with yt-dlp options: $0 https://www.youtube.com/@Brute-channel . -- --playlist-items 5:10"
     exit 1
 fi
 
 CHANNEL_URL="$1"
-OUTPUT_DIR="${2:-~/Library/Mobile Documents/com~apple~CloudDocs/main/downie/YouTube/%(uploader)s}"
+shift
+
+# Convert @channel URL to channel/videos URL format
+if [[ "$CHANNEL_URL" == *"@"* ]]; then
+    CHANNEL_URL="${CHANNEL_URL}/videos"
+fi
+
+# Handle output directory if provided
+if [ -n "$1" ] && [ "$1" != "--" ]; then
+    OUTPUT_DIR="$1"
+    shift
+else
+    OUTPUT_DIR="~/Library/Mobile Documents/com~apple~CloudDocs/main/downie/YouTube/%(uploader)s"
+fi
+
+# Skip the -- separator if present
+if [ "$1" = "--" ]; then
+    shift
+fi
+
+# All remaining arguments will be passed to yt-dlp
+EXTRA_OPTS="$@"
+
+# Create download archive directory if it doesn't exist
+ARCHIVE_DIR="${HOME}/.yt-dlp/archives"
+mkdir -p "$ARCHIVE_DIR"
+
+# Generate a unique archive file name based on the channel URL
+ARCHIVE_FILE="${ARCHIVE_DIR}/$(echo "$CHANNEL_URL" | md5sum | cut -d' ' -f1).txt"
 
 yt-dlp --playlist-reverse \
 --embed-subs \
 -o "$OUTPUT_DIR/%(playlist)s/%(n_entries+1-playlist_index)d.%(title)s.%(ext)s" \
 --cookies-from-browser chrome \
--N 10 \
+-N 7 \
 -f "bestvideo+bestaudio/best" \
 --write-subs \
 --write-auto-subs \
 --sub-langs "en,en-US,zh-Hans,zh-Hant,zh-CN,zh" \
---convert-subs srt \
+--continue \
+--download-archive "$ARCHIVE_FILE" \
 --extractor-args youtubetab:skip=authcheck \
 --referer "$CHANNEL_URL" \
---add-header "Accept:*/*" \
+--sleep-interval 1 \
+--max-sleep-interval 5 \
+--retries 10 \
+--file-access-retries 5 \
+--fragment-retries 5 \
+--add-header "Accept:text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" \
+--add-header "Accept-Language:en-us,en;q=0.5" \
+--add-header "Accept-Encoding:gzip, deflate" \
+--add-header "Accept-Charset:ISO-8859-1,utf-8;q=0.7,*;q=0.7" \
+--add-header "User-Agent:Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36" \
+$EXTRA_OPTS \
 "$CHANNEL_URL"
