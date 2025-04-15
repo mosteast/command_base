@@ -10,9 +10,8 @@
 # Default values
 input_file=""
 num_parts=2
-output_dir="."
-prefix="part"
-output_suffix=""
+output_dir=""  # Will be set to input file directory
+output_suffix=".txt"
 
 # Function to display usage
 usage() {
@@ -20,15 +19,14 @@ usage() {
     echo "Options:"
     echo "  [input_file]           Input file to divide (first positional argument)"
     echo "  [num_parts]            Number of parts to divide into (second positional argument, default: 2)"
-    echo "  --output, -o DIR       Output directory (default: current directory)"
-    echo "  --prefix, -p PREFIX    Output filename prefix (default: 'part')"
-    echo "  --suffix, -s SUFFIX    Output filename suffix (default: none)"
+    echo "  --output, -o DIR       Output directory (default: same directory as input file)"
+    echo "  --suffix, -s SUFFIX    Output filename suffix (default: .txt)"
     echo "  --help, -h             Display this help message"
     echo ""
     echo "Examples:"
     echo "  $0 input.txt 3         # Divide input.txt into 3 equal parts"
     echo "  $0 -i data.txt --parts 5    # Divide data.txt into 5 equal parts"
-    echo "  $0 -i data.txt --parts 5 -p chunk -s .txt -o output_dir   # With prefix, suffix and output dir"
+    echo "  $0 -i data.txt --parts 5 -s .txt -o output_dir   # With suffix and output dir"
     exit 1
 }
 
@@ -46,10 +44,6 @@ while [[ $# -gt 0 ]]; do
             ;;
         --output|-o)
             output_dir="$2"
-            shift 2
-            ;;
-        --prefix|-p)
-            prefix="$2"
             shift 2
             ;;
         --suffix|-s)
@@ -86,6 +80,11 @@ if [[ ! -f "$input_file" ]]; then
     exit 1
 fi
 
+# Set the default output directory to match the input file's directory
+if [[ -z "$output_dir" ]]; then
+    output_dir=$(dirname "$input_file")
+fi
+
 # Validate number of parts
 if ! [[ "$num_parts" =~ ^[0-9]+$ ]]; then
     echo "Error: Number of parts must be a positive integer"
@@ -110,6 +109,9 @@ mkdir -p "$output_dir"
 
 # Split the file
 current_line=1
+# Get the base filename without path
+base_filename=$(basename "$input_file")
+
 for ((i=1; i<=num_parts; i++)); do
     # Calculate end line for this part
     if [[ $i -eq $num_parts ]]; then
@@ -126,8 +128,8 @@ for ((i=1; i<=num_parts; i++)); do
     # Calculate number of lines to extract
     num_lines=$((end_line - current_line + 1))
     
-    # Create output file name with padded number
-    output_file="$output_dir/${prefix}_$(printf "%02d" $i)${output_suffix}"
+    # Create output file name with input filename + .part_XX + suffix
+    output_file="$output_dir/${base_filename}.part_$(printf "%02d" $i)${output_suffix}"
     
     # Extract lines from input file
     if [[ $num_lines -gt 0 ]]; then
@@ -144,4 +146,4 @@ for ((i=1; i<=num_parts; i++)); do
     fi
 done
 
-echo "File successfully divided into $num_parts parts with prefix '$prefix' and suffix '$output_suffix' in directory '$output_dir'" 
+echo "File successfully divided into $num_parts parts in directory '$output_dir'" 
