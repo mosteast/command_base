@@ -10,7 +10,9 @@
 # Default values
 input_file=""
 num_parts=2
-output_prefix="part"
+output_dir="."
+prefix="part"
+output_suffix=""
 
 # Function to display usage
 usage() {
@@ -18,14 +20,15 @@ usage() {
     echo "Options:"
     echo "  [input_file]           Input file to divide (first positional argument)"
     echo "  [num_parts]            Number of parts to divide into (second positional argument, default: 2)"
-    echo "  --input, -i FILE      Input file to divide"
-    echo "  --parts, -p NUMBER    Number of parts to divide into (default: 2)"
-    echo "  --output, -o PREFIX   Output filename prefix (default: 'part')"
-    echo "  --help, -h            Display this help message"
+    echo "  --output, -o DIR       Output directory (default: current directory)"
+    echo "  --prefix, -p PREFIX    Output filename prefix (default: 'part')"
+    echo "  --suffix, -s SUFFIX    Output filename suffix (default: none)"
+    echo "  --help, -h             Display this help message"
     echo ""
     echo "Examples:"
-    echo "  $0 input.txt 3        # Divide input.txt into 3 equal parts"
-    echo "  $0 -i data.txt -p 5   # Divide data.txt into 5 equal parts"
+    echo "  $0 input.txt 3         # Divide input.txt into 3 equal parts"
+    echo "  $0 -i data.txt --parts 5    # Divide data.txt into 5 equal parts"
+    echo "  $0 -i data.txt --parts 5 -p chunk -s .txt -o output_dir   # With prefix, suffix and output dir"
     exit 1
 }
 
@@ -37,12 +40,20 @@ while [[ $# -gt 0 ]]; do
             input_file="$2"
             shift 2
             ;;
-        --parts|-p)
+        --parts)
             num_parts="$2"
             shift 2
             ;;
         --output|-o)
-            output_prefix="$2"
+            output_dir="$2"
+            shift 2
+            ;;
+        --prefix|-p)
+            prefix="$2"
+            shift 2
+            ;;
+        --suffix|-s)
+            output_suffix="$2"
             shift 2
             ;;
         --help|-h)
@@ -95,7 +106,7 @@ lines_per_part=$(( (total_lines + num_parts - 1) / num_parts ))
 echo "Dividing into $num_parts parts with approximately $lines_per_part lines each"
 
 # Create output directory if it doesn't exist
-mkdir -p "$(dirname "$output_prefix")"
+mkdir -p "$output_dir"
 
 # Split the file
 current_line=1
@@ -116,7 +127,7 @@ for ((i=1; i<=num_parts; i++)); do
     num_lines=$((end_line - current_line + 1))
     
     # Create output file name with padded number
-    output_file="${output_prefix}_$(printf "%02d" $i)"
+    output_file="$output_dir/${prefix}_$(printf "%02d" $i)${output_suffix}"
     
     # Extract lines from input file
     if [[ $num_lines -gt 0 ]]; then
@@ -133,4 +144,4 @@ for ((i=1; i<=num_parts; i++)); do
     fi
 done
 
-echo "File successfully divided into $num_parts parts with prefix '$output_prefix'" 
+echo "File successfully divided into $num_parts parts with prefix '$prefix' and suffix '$output_suffix' in directory '$output_dir'" 
