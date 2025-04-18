@@ -15,18 +15,19 @@ output_suffix=".txt"
 
 # Function to display usage
 usage() {
-    echo "Usage: $0 [OPTIONS] [input_file] [num_parts]"
+    echo "Usage: $0 [OPTIONS] [input_file] [chunk_size]"
     echo "Options:"
     echo "  [input_file]           Input file to divide (first positional argument)"
-    echo "  [num_parts]            Number of parts to divide into (second positional argument, default: 2)"
+    echo "  [chunk_size]           Number of lines per chunk (overrides --part)"
+    echo "  --part, -p NUM         Number of parts to divide into (default: 2)"
     echo "  --output, -o DIR       Output directory (default: same directory as input file)"
     echo "  --suffix, -s SUFFIX    Output filename suffix (default: .txt)"
     echo "  --help, -h             Display this help message"
     echo ""
     echo "Examples:"
-    echo "  $0 input.txt 3         # Divide input.txt into 3 equal parts"
-    echo "  $0 -i data.txt --parts 5    # Divide data.txt into 5 equal parts"
-    echo "  $0 -i data.txt --parts 5 -s .txt -o output_dir   # With suffix and output dir"
+    echo "  $0 input.txt 3         # Divide input.txt into chunks of 3 lines each"
+    echo "  $0 -i data.txt --part 5   # Divide data.txt into 5 equal parts"
+    echo "  $0 -i data.txt -p 5 -s .txt -o output_dir   # With suffix and output dir"
     exit 1
 }
 
@@ -38,7 +39,7 @@ while [[ $# -gt 0 ]]; do
             input_file="$2"
             shift 2
             ;;
-        --parts)
+        --part|-p)
             num_parts="$2"
             shift 2
             ;;
@@ -54,14 +55,14 @@ while [[ $# -gt 0 ]]; do
             usage
             ;;
         *)
-            # If first positional arg and input_file is empty, use as input_file
+            # If positional arg and input_file is empty, use as input_file
             if [[ -z "$input_file" ]]; then
                 input_file="$1"
-            # If second positional arg and num_parts is still default, use as num_parts
-            elif [[ "$num_parts" -eq 2 ]]; then
-                num_parts="$1"
+            # If positional arg and chunk_size is empty, use as chunk_size
+            elif [[ -z "$chunk_size" ]]; then
+                chunk_size="$1"
             else
-                echo "Unknown option: $1"
+                echo "Unknown option or extra positional argument: $1"
                 usage
             fi
             shift
@@ -101,7 +102,12 @@ total_lines=$(wc -l < "$input_file")
 echo "Total lines in $input_file: $total_lines"
 
 # Calculate lines per part (rounding up)
-lines_per_part=$(( (total_lines + num_parts - 1) / num_parts ))
+if [[ -n "$chunk_size" ]]; then
+    num_parts=$(( (total_lines + chunk_size - 1) / chunk_size ))
+    lines_per_part=$chunk_size
+else
+    lines_per_part=$(( (total_lines + num_parts - 1) / num_parts ))
+fi
 echo "Dividing into $num_parts parts with approximately $lines_per_part lines each"
 
 # Create output directory if it doesn't exist
