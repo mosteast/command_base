@@ -1,0 +1,218 @@
+#!/bin/bash
+
+# Help function to display usage
+show_help() {
+    echo "Usage: $(basename "$0") [OPTIONS] [FILES...]"
+    echo
+    echo "Rename files to sequential numbers"
+    echo
+    echo "Options:"
+    echo "  -d, --directory DIR    Directory containing files to rename"
+    echo "  -r, --desc             Sort in descending order"
+    echo "  -s, --start NUM        Starting number for the sequence (default: 1)"
+    echo "  -t, --type TYPE        Sequence type: num (1,2,3), alpha (a,b,c), ALPHA (A,B,C) (default: num)"
+    echo "  -i, --ignore PATTERN   Glob patterns for files to ignore (can be used multiple times)"
+    echo "  -a, --show-hidden      Include hidden files (starting with '.')"
+    echo "  -h, --help            Show this help message"
+}
+
+# Initialize variables
+directory=""
+descending=0
+start_num=1
+sequence_type="num"
+declare -a ignore_patterns
+show_hidden=0
+declare -a files
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -d|--directory)
+            directory="$2"
+            shift 2
+            ;;
+        -r|--desc)
+            descending=1
+            shift
+            ;;
+        -s|--start)
+            start_num="$2"
+            shift 2
+            ;;
+        -t|--type)
+            sequence_type="$2"
+            shift 2
+            ;;
+        -i|--ignore)
+            ignore_patterns+=("$2")
+            shift 2
+            ;;
+        -a|--show-hidden)
+            show_hidden=1
+            shift
+            ;;
+        -h|--help)
+            show_help
+            exit 0
+            ;;
+        *)
+            files+=("$1")
+            shift
+            ;;
+    esac
+done
+
+# Function to get next sequence value
+get_sequence_value() {
+    local num=$1
+    case $sequence_type in
+        "alpha")
+            # Convert to lowercase letter (a=1, b=2, etc.)
+            printf "\\$(printf '%03o' $((96 + num)))"
+            ;;
+        "ALPHA")
+            # Convert to uppercase letter (A=1, B=2, etc.)
+            printf "\\$(printf '%03o' $((64 + num)))"
+            ;;
+        "num"|*)
+            echo "$num"
+            ;;
+    esac
+}
+
+# Validate sequence type
+case $sequence_type in
+    "num"|"alpha"|"ALPHA")
+        ;;
+    *)
+        echo "Error: Invalid sequence type. Must be 'num', 'alpha', or 'ALPHA'"
+        exit 1
+        ;;
+esac
+
+# Validate start number based on sequence type
+case $sequence_type in
+    "alpha"|"ALPHA")
+        if ((start_num < 1 || start_num > 26)); then
+            echo "Error: For alphabetic sequence, start number must be between 1 and 26"
+            exit 1
+        fi
+        ;;
+    "num")
+        if ((start_num < 1)); then
+            echo "Error: Start number must be positive"
+            exit 1
+        fi
+        ;;
+esac
+
+# Function to check if a file should be ignored
+should_ignore() {
+    local file="$1"
+    local basename=$(basename "$file")
+    
+    for pattern in "${ignore_patterns[@]}"; do
+        if [[ "$basename" == $pattern ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Function to check if a file is visible
+is_visible_file() {
+    local basename=$(basename "$1")
+    [[ "$basename" != .* ]]
+}
+
+# Collect files to rename
+declare -a files_to_rename
+
+if [[ -n "$directory" ]]; then
+    if [[ ! -d "$directory" ]]; then
+        echo "Error: Directory '$directory' does not exist"
+        exit 1
+    fi
+    
+    while IFS= read -r -d '' file; do
+        files_to_rename+=("$file")
+    done < <(find "$directory" -maxdepth 1 -type f -print0)
+else
+    if [[ ${#files[@]} -eq 0 ]]; then
+        show_help
+        exit 1
+    fi
+    files_to_rename=("${files[@]}")
+fi
+
+# Filter and sort files
+declare -a valid_files
+for file in "${files_to_rename[@]}"; do
+    if [[ -f "$file" ]] && \
+       { [[ $show_hidden -eq 1 ]] || is_visible_file "$file"; } && \
+       ! should_ignore "$file"; then
+        valid_files+=("$file")
+    fi
+done
+
+if [[ ${#valid_files[@]} -eq 0 ]]; then
+    echo "No valid files found to rename."
+    exit 0
+fi
+
+# Sort files
+if [[ $descending -eq 1 ]]; then
+    IFS=$'\n' valid_files=($(sort -r <<<"${valid_files[*]}"))
+else
+    IFS=$'\n' valid_files=($(sort <<<"${valid_files[*]}"))
+fi
+
+# Create temporary directory for renaming
+temp_dir=$(mktemp -d)
+mapping_file="$temp_dir/mapping.txt"
+trap 'rm -rf "$temp_dir"' EXIT
+
+# First pass: create mapping and check for conflicts
+current_num=$start_num
+
+for file in "${valid_files[@]}"; do
+    extension="${file##*.}"
+    if [[ "$file" == "$extension" ]]; then
+        extension=""
+    else
+        extension=".$extension"
+    fi
+    
+    dir=$(dirname "$file")
+    sequence_value=$(get_sequence_value $current_num)
+    new_name="$dir/$sequence_value$extension"
+    
+    if [[ -e "$new_name" ]]; then
+        echo "Error: Renaming would cause conflicts. Aborting."
+        exit 1
+    fi
+    
+    echo "$file|$new_name" >> "$mapping_file"
+    ((current_num++))
+    
+    # Check if we've exceeded alphabet limit for alpha sequences
+    if [[ "$sequence_type" =~ ^(alpha|ALPHA)$ ]] && ((current_num > 26)); then
+        echo "Error: Exceeded maximum of 26 files for alphabetic sequence"
+        exit 1
+    fi
+done
+
+# Second pass: perform renaming using temporary files
+while IFS='|' read -r old_name new_name; do
+    temp_file="$temp_dir/$(basename "$old_name")"
+    
+    if mv "$old_name" "$temp_file" && mv "$temp_file" "$new_name"; then
+        echo "Renamed: $(basename "$old_name") -> $(basename "$new_name")"
+    else
+        echo "Error renaming $old_name"
+        exit 1
+    fi
+done < "$mapping_file"
+
+echo "Files successfully renamed"

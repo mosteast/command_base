@@ -2,12 +2,12 @@
 
 # Script to concatenate videos by name using FFmpeg
 # Usage examples:
-#   ./concat_videos.sh --directory /path/to/videos output.mp4
-#   ./concat_videos.sh -d /path/to/videos output.mp4
-#   ./concat_videos.sh --files video1.mp4 video2.mp4 combined.mp4
-#   ./concat_videos.sh -f "video1.mp4 video2.mp4 video3.mp4" combined.mp4
-#   ./concat_videos.sh --pattern "lecture*.mp4" course.mp4
-#   ./concat_videos.sh -p "part_*.mp4" full_video.mp4
+#   ./concat_videos --directory /path/to/videos output.mp4
+#   ./concat_videos -d /path/to/videos output.mp4
+#   ./concat_videos --files video1.mp4 video2.mp4 combined.mp4
+#   ./concat_videos -f "video1.mp4 video2.mp4 video3.mp4" combined.mp4
+#   ./concat_videos --pattern "lecture*.mp4" course.mp4
+#   ./concat_videos -p "part_*.mp4" full_video.mp4
 
 # Default values
 output_file=""
@@ -91,7 +91,7 @@ case $mode in
             exit 1
         fi
         echo "Finding videos in directory: $input_value"
-        find "$input_value" -type f -name "*.mp4" -o -name "*.avi" -o -name "*.mkv" -o -name "*.mov" | sort > "$list_file"
+        find "$(readlink -f "$input_value")" -type f -name "*.mp4" -o -name "*.avi" -o -name "*.mkv" -o -name "*.mov" | sort > "$list_file"
         ;;
     files)
         if [ -z "$input_value" ]; then
@@ -101,7 +101,7 @@ case $mode in
         echo "Using specified files"
         for file in $input_value; do
             if [ -f "$file" ]; then
-                echo "$file" >> "$list_file"
+                readlink -f "$file" >> "$list_file"
             else
                 echo "Warning: File '$file' does not exist and will be skipped"
             fi
@@ -113,7 +113,7 @@ case $mode in
             exit 1
         fi
         echo "Finding files matching pattern: $input_value"
-        find . -type f -name "$input_value" | sort > "$list_file"
+        find "$(readlink -f .)" -type f -name "$input_value" | sort > "$list_file"
         ;;
 esac
 
@@ -126,7 +126,8 @@ fi
 
 # Create the ffmpeg concat file format
 while IFS= read -r file; do
-    echo "file '$file'" >> "$concat_file"
+    escaped_path=$(printf "%s" "$file" | sed "s/'/'\\\\''/g")
+    echo "file '$escaped_path'" >> "$concat_file"
 done < "$list_file"
 
 # Display files to be concatenated
