@@ -1,33 +1,120 @@
 #!/bin/bash
 
-# Check if channel URL is provided
-if [ -z "$1" ]; then
-    echo "Usage: $0 <youtube_channel_url> [output_directory] -- [yt-dlp options]"
-    echo "Example: $0 https://www.youtube.com/@Brute-channel"
-    echo "Example with custom output: $0 https://www.youtube.com/@Brute-channel ~/Downloads/YouTube"
-    echo "Example with yt-dlp options: $0 https://www.youtube.com/@Brute-channel . -- --playlist-items 5:10"
+# Initialize variables
+CHANNEL_URL=""
+PLAYLIST_URL=""
+OUTPUT_DIR="~/Library/Mobile Documents/com~apple~CloudDocs/main/downie/YouTube/%(uploader)s"
+VIDEO_URLS=()
+
+# Function to show usage
+show_usage() {
+    echo "Usage:"
+    echo "  1. Channel download:"
+    echo "     $(basename $0) -c|--channel <youtube_channel_url> [-o|--output <directory>]"
+    echo "     Example: $(basename $0) -c https://www.youtube.com/@user1"
+    echo ""
+    echo "  2. Playlist download:"
+    echo "     $(basename $0) -l|--list <youtube_playlist_url> [-o|--output <directory>]"
+    echo "     Example: $(basename $0) -l https://www.youtube.com/playlist?list=xxx"
+    echo ""
+    echo "  3. Video download:"
+    echo "     $(basename $0) <video_url1> [video_url2...] [output_directory]"
+    echo "     Example: $(basename $0) https://youtu.be/xxx https://youtu.be/yyy ~/Downloads/YouTube"
+    echo ""
+    echo "Options:"
+    echo "  -h, --help           Show this help message and exit"
+    echo "  -c, --channel <url>   Download all videos from a YouTube channel"
+    echo "  -l, --list <url>      Download all videos from a YouTube playlist"
+    echo "  -o, --output <dir>    Specify output directory"
+    echo "  --                    Pass additional options to yt-dlp"
+    echo ""
+    echo "Note: You must use exactly one input type (channel, playlist, or video URLs)"
+}
+
+# Parse command line arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -h|--help)
+            show_usage
+            exit 0
+            ;;
+        -c|--channel)
+            if [ -n "$2" ]; then
+                CHANNEL_URL="$2"
+                shift 2
+            else
+                echo "Error: Channel URL is required after -c|--channel option"
+                show_usage
+                exit 1
+            fi
+            ;;
+        -l|--list)
+            if [ -n "$2" ]; then
+                PLAYLIST_URL="$2"
+                shift 2
+            else
+                echo "Error: Playlist URL is required after -l|--list option"
+                show_usage
+                exit 1
+            fi
+            ;;
+        -o|--output)
+            if [ -n "$2" ]; then
+                OUTPUT_DIR="$2"
+                shift 2
+            else
+                echo "Error: Output directory is required after -o|--output option"
+                show_usage
+                exit 1
+            fi
+            ;;
+        --)
+            shift
+            break
+            ;;
+        -*)
+            echo "Error: Unknown option: $1"
+            show_usage
+            exit 1
+            ;;
+        *)
+            # If it's the last argument and no previous URLs were collected, treat it as output dir
+            if [[ $# -eq 1 && ${#VIDEO_URLS[@]} -gt 0 ]]; then
+                OUTPUT_DIR="$1"
+            else
+                VIDEO_URLS+=("$1")
+            fi
+            shift
+            ;;
+    esac
+done
+
+# Count how many input types are provided
+INPUT_COUNT=0
+[ -n "$CHANNEL_URL" ] && ((INPUT_COUNT++))
+[ -n "$PLAYLIST_URL" ] && ((INPUT_COUNT++))
+[ ${#VIDEO_URLS[@]} -gt 0 ] && ((INPUT_COUNT++))
+
+# Validate input
+if [ $INPUT_COUNT -eq 0 ]; then
+    echo "Error: No input provided. Please provide one of:"
+    echo "  - Channel URL (-c|--channel)"
+    echo "  - Playlist URL (-l|--list)"
+    echo "  - One or more video URLs"
+    echo ""
+    show_usage
     exit 1
-fi
-
-CHANNEL_URL="$1"
-shift
-
-# Convert @channel URL to channel/videos URL format
-if [[ "$CHANNEL_URL" == *"@"* ]]; then
-    CHANNEL_URL="${CHANNEL_URL}/videos"
-fi
-
-# Handle output directory if provided
-if [ -n "$1" ] && [ "$1" != "--" ]; then
-    OUTPUT_DIR="$1"
-    shift
-else
-    OUTPUT_DIR="~/Library/Mobile Documents/com~apple~CloudDocs/main/downie/YouTube/%(uploader)s"
-fi
-
-# Skip the -- separator if present
-if [ "$1" = "--" ]; then
-    shift
+elif [ $INPUT_COUNT -gt 1 ]; then
+    echo "Error: Multiple input types provided. Please use only one of:"
+    echo "  - Channel URL (-c|--channel)"
+    echo "  - Playlist URL (-l|--list)"
+    echo "  - One or more video URLs"
+    echo ""
+    echo "Current inputs:"
+    [ -n "$CHANNEL_URL" ] && echo "  Channel URL: $CHANNEL_URL"
+    [ -n "$PLAYLIST_URL" ] && echo "  Playlist URL: $PLAYLIST_URL"
+    [ ${#VIDEO_URLS[@]} -gt 0 ] && echo "  Video URLs: ${VIDEO_URLS[*]}"
+    exit 1
 fi
 
 # All remaining arguments will be passed to yt-dlp
@@ -37,31 +124,94 @@ EXTRA_OPTS="$@"
 ARCHIVE_DIR="${HOME}/.yt-dlp/archives"
 mkdir -p "$ARCHIVE_DIR"
 
-# Generate a unique archive file name based on the channel URL
-ARCHIVE_FILE="${ARCHIVE_DIR}/$(echo "$CHANNEL_URL" | md5sum | cut -d' ' -f1).txt"
+# Handle channel URL mode
+if [ -n "$CHANNEL_URL" ]; then
+    # Convert @channel URL to channel/videos URL format
+    if [[ "$CHANNEL_URL" == *"@"* ]]; then
+        CHANNEL_URL="${CHANNEL_URL}/videos"
+    fi
 
-yt-dlp --playlist-reverse \
---embed-subs \
--o "$OUTPUT_DIR/%(playlist)s/%(n_entries+1-playlist_index)d.%(title)s.%(ext)s" \
---cookies-from-browser chrome \
--N 7 \
--f "bestvideo+bestaudio/best" \
---write-subs \
---write-auto-subs \
---sub-langs "en,en-US,zh-Hans,zh-Hant,zh-CN,zh" \
---continue \
---download-archive "$ARCHIVE_FILE" \
---extractor-args youtubetab:skip=authcheck \
---referer "$CHANNEL_URL" \
---sleep-interval 1 \
---max-sleep-interval 5 \
---retries 10 \
---file-access-retries 5 \
---fragment-retries 5 \
---add-header "Accept:text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" \
---add-header "Accept-Language:en-us,en;q=0.5" \
---add-header "Accept-Encoding:gzip, deflate" \
---add-header "Accept-Charset:ISO-8859-1,utf-8;q=0.7,*;q=0.7" \
---add-header "User-Agent:Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36" \
-$EXTRA_OPTS \
-"$CHANNEL_URL"
+    # Generate a unique archive file name based on the channel URL
+    ARCHIVE_FILE="${ARCHIVE_DIR}/$(echo "$CHANNEL_URL" | md5sum | cut -d' ' -f1).txt"
+
+    yt-dlp --playlist-reverse \
+    --embed-subs \
+    -o "$OUTPUT_DIR/%(playlist)s/%(n_entries+1-playlist_index)d.%(title)s.%(ext)s" \
+    --cookies-from-browser chrome \
+    -N 7 \
+    -f "bestvideo+bestaudio/best" \
+    --write-subs \
+    --write-auto-subs \
+    --sub-langs "en,en-US,zh-Hans,zh-Hant,zh-CN,zh" \
+    --continue \
+    --download-archive "$ARCHIVE_FILE" \
+    --extractor-args youtubetab:skip=authcheck \
+    --referer "$CHANNEL_URL" \
+    --sleep-interval 1 \
+    --max-sleep-interval 5 \
+    --retries 10 \
+    --file-access-retries 5 \
+    --fragment-retries 5 \
+    --add-header "Accept:text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" \
+    --add-header "Accept-Language:en-us,en;q=0.5" \
+    --add-header "Accept-Encoding:gzip, deflate" \
+    --add-header "Accept-Charset:ISO-8859-1,utf-8;q=0.7,*;q=0.7" \
+    --add-header "User-Agent:Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36" \
+    $EXTRA_OPTS \
+    "$CHANNEL_URL"
+
+# Handle playlist URL mode
+elif [ -n "$PLAYLIST_URL" ]; then
+    # Generate a unique archive file name based on the playlist URL
+    ARCHIVE_FILE="${ARCHIVE_DIR}/$(echo "$PLAYLIST_URL" | md5sum | cut -d' ' -f1).txt"
+
+    yt-dlp --playlist-reverse \
+    --embed-subs \
+    -o "$OUTPUT_DIR/%(playlist)s/%(playlist_index)s.%(title)s.%(ext)s" \
+    --cookies-from-browser chrome \
+    -N 7 \
+    -f "bestvideo+bestaudio/best" \
+    --write-subs \
+    --write-auto-subs \
+    --sub-langs "en,en-US,zh-Hans,zh-Hant,zh-CN,zh" \
+    --continue \
+    --download-archive "$ARCHIVE_FILE" \
+    --yes-playlist \
+    --sleep-interval 1 \
+    --max-sleep-interval 5 \
+    --retries 10 \
+    --file-access-retries 5 \
+    --fragment-retries 5 \
+    --add-header "Accept:text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" \
+    --add-header "Accept-Language:en-us,en;q=0.5" \
+    --add-header "Accept-Encoding:gzip, deflate" \
+    --add-header "Accept-Charset:ISO-8859-1,utf-8;q=0.7,*;q=0.7" \
+    --add-header "User-Agent:Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36" \
+    $EXTRA_OPTS \
+    "$PLAYLIST_URL"
+
+# Handle individual video URLs mode
+else
+    for url in "${VIDEO_URLS[@]}"; do
+        yt-dlp --embed-subs \
+        -o "$OUTPUT_DIR/%(title)s.%(ext)s" \
+        --cookies-from-browser chrome \
+        -N 7 \
+        -f "bestvideo+bestaudio/best" \
+        --write-subs \
+        --write-auto-subs \
+        --sub-langs "en,en-US,zh-Hans,zh-Hant,zh-CN,zh" \
+        --continue \
+        --sleep-interval 1 \
+        --max-sleep-interval 5 \
+        --retries 10 \
+        --file-access-retries 5 \
+        --fragment-retries 5 \
+        --add-header "Accept:text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" \
+        --add-header "Accept-Language:en-us,en;q=0.5" \
+        --add-header "Accept-Encoding:gzip, deflate" \
+        --add-header "Accept-Charset:ISO-8859-1,utf-8;q=0.7,*;q=0.7" \
+        --add-header "User-Agent:Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36" \
+        "$url"
+    done
+fi
