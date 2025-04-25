@@ -136,10 +136,11 @@ if [ -n "$CHANNEL_URL" ]; then
 
     yt-dlp --playlist-reverse \
     --embed-subs \
+    --match-filter "availability != 'needs_subscription'" \
     -o "$OUTPUT_DIR/%(playlist)s/%(n_entries+1-playlist_index)d.%(title)s.%(ext)s" \
     --cookies-from-browser chrome \
     -N 7 \
-    -f "bestvideo+bestaudio/best" \
+    -f "bv*+ba/b" \
     --write-subs \
     --write-auto-subs \
     --sub-langs "en,en-US,zh-Hans,zh-Hant,zh-CN,zh" \
@@ -167,10 +168,11 @@ elif [ -n "$PLAYLIST_URL" ]; then
 
     yt-dlp --playlist-reverse \
     --embed-subs \
+    --match-filter "availability != 'needs_subscription'" \
     -o "$OUTPUT_DIR/%(playlist)s/%(playlist_index)s.%(title)s.%(ext)s" \
     --cookies-from-browser chrome \
     -N 7 \
-    -f "bestvideo+bestaudio/best" \
+    -f "bv*+ba/b" \
     --write-subs \
     --write-auto-subs \
     --sub-langs "en,en-US,zh-Hans,zh-Hant,zh-CN,zh" \
@@ -194,10 +196,11 @@ elif [ -n "$PLAYLIST_URL" ]; then
 else
     for url in "${VIDEO_URLS[@]}"; do
         yt-dlp --embed-subs \
+        --match-filter "availability != 'needs_subscription'" \
         -o "$OUTPUT_DIR/%(title)s.%(ext)s" \
         --cookies-from-browser chrome \
         -N 7 \
-        -f "bestvideo+bestaudio/best" \
+        -f "bv*+ba/b" \
         --write-subs \
         --write-auto-subs \
         --sub-langs "en,en-US,zh-Hans,zh-Hant,zh-CN,zh" \
