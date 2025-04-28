@@ -12,20 +12,21 @@ input_file=""
 num_parts=2
 output_dir=""  # Will be set to input file directory
 output_suffix=".txt"
+lines_per_chunk=""  # New variable for lines per chunk
 
 # Function to display usage
 usage() {
-    echo "Usage: $0 [OPTIONS] [input_file] [chunk_size]"
+    echo "Usage: $0 [OPTIONS] [input_file]"
     echo "Options:"
     echo "  [input_file]           Input file to divide (first positional argument)"
-    echo "  [chunk_size]           Number of lines per chunk (overrides --part)"
+    echo "  --lines, -l NUM        Number of lines per chunk"
     echo "  --part, -p NUM         Number of parts to divide into (default: 2)"
     echo "  --output, -o DIR       Output directory (default: same directory as input file)"
     echo "  --suffix, -s SUFFIX    Output filename suffix (default: .txt)"
     echo "  --help, -h             Display this help message"
     echo ""
     echo "Examples:"
-    echo "  $0 input.txt 3         # Divide input.txt into chunks of 3 lines each"
+    echo "  $0 input.txt -l 3         # Divide input.txt into chunks of 3 lines each"
     echo "  $0 -i data.txt --part 5   # Divide data.txt into 5 equal parts"
     echo "  $0 -i data.txt -p 5 -s .txt -o output_dir   # With suffix and output dir"
     exit 1
@@ -37,6 +38,10 @@ while [[ $# -gt 0 ]]; do
     case $key in
         --input|-i)
             input_file="$2"
+            shift 2
+            ;;
+        --lines|-l)
+            lines_per_chunk="$2"
             shift 2
             ;;
         --part|-p)
@@ -58,9 +63,6 @@ while [[ $# -gt 0 ]]; do
             # If positional arg and input_file is empty, use as input_file
             if [[ -z "$input_file" ]]; then
                 input_file="$1"
-            # If positional arg and chunk_size is empty, use as chunk_size
-            elif [[ -z "$chunk_size" ]]; then
-                chunk_size="$1"
             else
                 echo "Unknown option or extra positional argument: $1"
                 usage
@@ -102,9 +104,9 @@ total_lines=$(wc -l < "$input_file")
 echo "Total lines in $input_file: $total_lines"
 
 # Calculate lines per part (rounding up)
-if [[ -n "$chunk_size" ]]; then
-    num_parts=$(( (total_lines + chunk_size - 1) / chunk_size ))
-    lines_per_part=$chunk_size
+if [[ -n "$lines_per_chunk" ]]; then
+    num_parts=$(( (total_lines + lines_per_chunk - 1) / lines_per_chunk ))
+    lines_per_part=$lines_per_chunk
 else
     lines_per_part=$(( (total_lines + num_parts - 1) / num_parts ))
 fi
