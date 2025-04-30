@@ -1,14 +1,14 @@
 #!/bin/bash
 
-# Script to divide a text file into n equal parts
+# Script to divide text files into n equal parts
 # Usage examples:
-#   ./chop input.txt 3
-#   ./chop --input input.txt --parts 5
-#   ./chop -i input.txt -p 4 --output chunk_prefix
+#   ./chop input1.txt input2.txt -p 3
+#   ./chop --input "*.txt" --parts 5
+#   ./chop -i "file1.txt file2.txt" -p 4 --output chunk_prefix
 #   ./chop --help
 
 # Default values
-input_file=""
+input_files=()
 num_parts=2
 output_dir=""  # Will be set to input file directory
 output_suffix=".txt"
@@ -16,19 +16,70 @@ lines_per_chunk=""  # New variable for lines per chunk
 
 # Function to display usage
 usage() {
-    echo "Usage: $0 [OPTIONS] [input_file]"
-    echo "Options:"
-    echo "  [input_file]           Input file to divide (first positional argument)"
-    echo "  --lines, -l NUM        Number of lines per chunk"
-    echo "  --part, -p NUM         Number of parts to divide into (default: 2)"
-    echo "  --output, -o DIR       Output directory (default: same directory as input file)"
-    echo "  --suffix, -s SUFFIX    Output filename suffix (default: .txt)"
-    echo "  --help, -h             Display this help message"
-    echo ""
-    echo "Examples:"
-    echo "  $0 input.txt -l 3         # Divide input.txt into chunks of 3 lines each"
-    echo "  $0 -i data.txt --part 5   # Divide data.txt into 5 equal parts"
-    echo "  $0 -i data.txt -p 5 -s .txt -o output_dir   # With suffix and output dir"
+    echo "chop - A tool to divide text files into equal parts"
+    echo
+    echo "SYNOPSIS"
+    echo "    CMD [OPTIONS] [input_files...]"
+    echo
+    echo "DESCRIPTION"
+    echo "    Splits one or more text files into equal-sized chunks, either by specifying"
+    echo "    the number of parts or the number of lines per chunk."
+    echo
+    echo "ARGUMENTS"
+    echo "    [input_files...]"
+    echo "        One or more input files to divide. Supports glob patterns (e.g., *.txt)."
+    echo "        Files can be specified either as arguments or using the --input option."
+    echo
+    echo "OPTIONS"
+    echo "    -i, --input FILES"
+    echo "        Specify input files (space-separated or glob pattern)"
+    echo "        Example: --input \"*.log\" or --input \"file1.txt file2.txt\""
+    echo
+    echo "    -l, --lines NUM"
+    echo "        Split files into chunks of NUM lines each"
+    echo "        This option takes precedence over --part if both are specified"
+    echo
+    echo "    -p, --part NUM"
+    echo "        Split files into NUM equal parts (default: 2)"
+    echo "        Ignored if --lines is specified"
+    echo
+    echo "    -o, --output DIR"
+    echo "        Output directory for the chunks"
+    echo "        Default: same directory as each input file"
+    echo
+    echo "    -s, --suffix SUFFIX"
+    echo "        Suffix to append to output filenames (default: .txt)"
+    echo "        The final filename format will be: original_name.part_XX<suffix>"
+    echo
+    echo "    -h, --help"
+    echo "        Display this help message"
+    echo
+    echo "OUTPUT FORMAT"
+    echo "    Each chunk file will be named as follows:"
+    echo "    <original_filename>.part_XX<suffix>"
+    echo "    where XX is a two-digit number starting from 01"
+    echo
+    echo "EXAMPLES"
+    echo "    1. Split a single file into 3 parts:"
+    echo "       CMD input.txt -p 3"
+    echo
+    echo "    2. Split multiple files into chunks of 100 lines each:"
+    echo "       CMD file1.txt file2.txt -l 100"
+    echo
+    echo "    3. Process all log files in current directory into 5 parts each:"
+    echo "       CMD --input \"*.log\" --part 5"
+    echo
+    echo "    4. Split files with custom output directory and suffix:"
+    echo "       CMD -i \"data*.txt\" -p 4 -o ./chunks -s .dat"
+    echo
+    echo "    5. Mix positional and option arguments:"
+    echo "       CMD input1.txt -i \"data*.txt\" -l 50 -o ./output"
+    echo
+    echo "NOTES"
+    echo "    - When using --lines, the actual number of parts may vary per file"
+    echo "    - The last chunk may contain fewer lines than others"
+    echo "    - Non-existent files are skipped with a warning"
+    echo "    - Output directories are created if they don't exist"
     exit 1
 }
 
@@ -37,7 +88,10 @@ while [[ $# -gt 0 ]]; do
     key="$1"
     case $key in
         --input|-i)
-            input_file="$2"
+            # Handle multiple files or glob patterns
+            for file in $2; do
+                input_files+=("$file")
+            done
             shift 2
             ;;
         --lines|-l)
@@ -60,32 +114,38 @@ while [[ $# -gt 0 ]]; do
             usage
             ;;
         *)
-            # If positional arg and input_file is empty, use as input_file
-            if [[ -z "$input_file" ]]; then
-                input_file="$1"
+            # If positional arg, add to input_files array
+            if [[ -f "$1" ]]; then
+                input_files+=("$1")
             else
-                echo "Unknown option or extra positional argument: $1"
-                usage
+                # Handle glob patterns in positional arguments
+                for file in $1; do
+                    if [[ -f "$file" ]]; then
+                        input_files+=("$file")
+                    fi
+                done
             fi
             shift
             ;;
     esac
 done
 
-# Validate input file
-if [[ -z "$input_file" ]]; then
-    echo "Error: No input file specified"
+# Validate input files
+if [[ -z "$input_files" ]]; then
+    echo "Error: No input files specified"
     usage
 fi
 
-if [[ ! -f "$input_file" ]]; then
-    echo "Error: Input file '$input_file' does not exist"
-    exit 1
-fi
+for input_file in "${input_files[@]}"; do
+    if [[ ! -f "$input_file" ]]; then
+        echo "Error: Input file '$input_file' does not exist"
+        exit 1
+    fi
+done
 
 # Set the default output directory to match the input file's directory
 if [[ -z "$output_dir" ]]; then
-    output_dir=$(dirname "$input_file")
+    output_dir=$(dirname "${input_files[0]}")
 fi
 
 # Validate number of parts
@@ -99,59 +159,79 @@ if [[ "$num_parts" -lt 1 ]]; then
     exit 1
 fi
 
-# Get total number of lines in the input file
-total_lines=$(wc -l < "$input_file")
-echo "Total lines in $input_file: $total_lines"
+# Process each input file
+for input_file in "${input_files[@]}"; do
+    if [[ ! -f "$input_file" ]]; then
+        echo "Warning: Input file '$input_file' does not exist, skipping..."
+        continue
+    fi
 
-# Calculate lines per part (rounding up)
-if [[ -n "$lines_per_chunk" ]]; then
-    num_parts=$(( (total_lines + lines_per_chunk - 1) / lines_per_chunk ))
-    lines_per_part=$lines_per_chunk
-else
-    lines_per_part=$(( (total_lines + num_parts - 1) / num_parts ))
-fi
-echo "Dividing into $num_parts parts with approximately $lines_per_part lines each"
+    echo "Processing file: $input_file"
+    
+    # Set the output directory for this file
+    current_output_dir="$output_dir"
+    if [[ -z "$current_output_dir" ]]; then
+        current_output_dir=$(dirname "$input_file")
+    fi
 
-# Create output directory if it doesn't exist
-mkdir -p "$output_dir"
+    # Get total number of lines in the input file
+    total_lines=$(wc -l < "$input_file")
+    echo "Total lines in $input_file: $total_lines"
 
-# Split the file
-current_line=1
-# Get the base filename without path
-base_filename=$(basename "$input_file")
-
-for ((i=1; i<=num_parts; i++)); do
-    # Calculate end line for this part
-    if [[ $i -eq $num_parts ]]; then
-        # Last part gets all remaining lines
-        end_line=$total_lines
+    # Calculate lines per part (rounding up)
+    if [[ -n "$lines_per_chunk" ]]; then
+        current_num_parts=$(( (total_lines + lines_per_chunk - 1) / lines_per_chunk ))
+        lines_per_part=$lines_per_chunk
     else
-        end_line=$((current_line + lines_per_part - 1))
-        # Ensure we don't exceed total lines
-        if [[ $end_line -gt $total_lines ]]; then
+        current_num_parts=$num_parts
+        lines_per_part=$(( (total_lines + current_num_parts - 1) / current_num_parts ))
+    fi
+    echo "Dividing into $current_num_parts parts with approximately $lines_per_part lines each"
+
+    # Create output directory if it doesn't exist
+    mkdir -p "$current_output_dir"
+
+    # Split the file
+    current_line=1
+    # Get the base filename without path
+    base_filename=$(basename "$input_file")
+
+    for ((i=1; i<=current_num_parts; i++)); do
+        # Calculate end line for this part
+        if [[ $i -eq $current_num_parts ]]; then
+            # Last part gets all remaining lines
             end_line=$total_lines
+        else
+            end_line=$((current_line + lines_per_part - 1))
+            # Ensure we don't exceed total lines
+            if [[ $end_line -gt $total_lines ]]; then
+                end_line=$total_lines
+            fi
         fi
-    fi
-    
-    # Calculate number of lines to extract
-    num_lines=$((end_line - current_line + 1))
-    
-    # Create output file name with input filename + .part_XX + suffix
-    output_file="$output_dir/${base_filename}.part_$(printf "%02d" $i)${output_suffix}"
-    
-    # Extract lines from input file
-    if [[ $num_lines -gt 0 ]]; then
-        tail -n +$current_line "$input_file" | head -n $num_lines > "$output_file"
-        echo "Created $output_file with $num_lines lines"
-    fi
-    
-    # Update current line for next iteration
-    current_line=$((end_line + 1))
-    
-    # If we've processed all lines, break
-    if [[ $current_line -gt $total_lines ]]; then
-        break
-    fi
+        
+        # Calculate number of lines to extract
+        num_lines=$((end_line - current_line + 1))
+        
+        # Create output file name with input filename + .part_XX + suffix
+        output_file="$current_output_dir/${base_filename}.part_$(printf "%02d" $i)${output_suffix}"
+        
+        # Extract lines from input file
+        if [[ $num_lines -gt 0 ]]; then
+            tail -n +$current_line "$input_file" | head -n $num_lines > "$output_file"
+            echo "Created $output_file with $num_lines lines"
+        fi
+        
+        # Update current line for next iteration
+        current_line=$((end_line + 1))
+        
+        # If we've processed all lines, break
+        if [[ $current_line -gt $total_lines ]]; then
+            break
+        fi
+    done
+
+    echo "Finished processing $input_file"
+    echo "----------------------------------------"
 done
 
-echo "File successfully divided into $num_parts parts in directory '$output_dir'" 
+echo "All files have been processed successfully" 
