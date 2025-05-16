@@ -26,8 +26,12 @@ function g() {
   gaa
   # use first param as commit message if exists
   # or use UTC date string as commit message
-  gcmsg "${1-:$(date -u)}"
+  gcmsg "${1:-$(date -u)}"
   ggp
+}
+
+function ggg() {
+  npm run format && g "$@"
 }
 
 PROMPT='%{$fg[cyan]%}%c $(git_prompt_info)'
