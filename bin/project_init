@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+_dir=$(dirname "$0")
+"$_dir"/git_init
+"$_dir"/npm_init

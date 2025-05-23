@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+
+npm init -y
+npm pkg set scripts.format="npx sort-package-json && git diff --name-only --diff-filter=d | xargs -r npx prettier --write -u"
