@@ -1,7 +1,8 @@
-#!/usr/bin/env bash
+#!/usr/bin/env node
 
-cat << EOF > ./.gitignore
-# Custom
+const { writeFile } = require('fs-extra')
+
+const ignore = `# Custom
 /build/
 /dist/
 tmp/
@@ -73,11 +74,11 @@ typings/
 .yarn-integrity
 
 # next.js build output
-.next
-EOF
+.next`
 
-cat << EOF > ./.gitattributes
-*.pdf filter=lfs diff=lfs merge=lfs -text
+writeFile('./.gitignore', ignore, e => { if (e) throw e })
+
+const attr = `*.pdf filter=lfs diff=lfs merge=lfs -text
 *.png filter=lfs diff=lfs merge=lfs -text
 *.jpg filter=lfs diff=lfs merge=lfs -text
 *.jpeg filter=lfs diff=lfs merge=lfs -text
@@ -85,6 +86,5 @@ cat << EOF > ./.gitattributes
 *.mp3 filter=lfs diff=lfs merge=lfs -text
 *.mp4 filter=lfs diff=lfs merge=lfs -text
 *.mov filter=lfs diff=lfs merge=lfs -text
-EOF
-
-git lfs install
+`
+writeFile('./.gitattributes', attr, e => { if (e) throw e })

@@ -2,3 +2,5 @@
 _dir=$(dirname "$0")
 "$_dir"/git_init
 "$_dir"/npm_init
+
+touch readme.md .cursorrules
