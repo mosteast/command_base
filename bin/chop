@@ -5,6 +5,7 @@
 #   ./chop input1.txt input2.txt -p 3
 #   ./chop --input "*.txt" --parts 5
 #   ./chop -i "file1.txt file2.txt" -p 4 --output chunk_prefix
+#   ./chop -d /path/to/directory -p 3
 #   ./chop --help
 
 # Default values
@@ -13,6 +14,7 @@ num_parts=2
 output_dir=""  # Will be set to input file directory
 output_suffix=".txt"
 lines_per_chunk=""  # New variable for lines per chunk
+input_directory=""  # New variable for directory input
 
 # Function to display usage
 usage() {
@@ -31,6 +33,10 @@ usage() {
     echo "        Files can be specified either as arguments or using the --input option."
     echo
     echo "OPTIONS"
+    echo "    -d, --directory DIR"
+    echo "        Process all files in the specified directory"
+    echo "        Example: --directory /path/to/files or -d ./data"
+    echo
     echo "    -i, --input FILES"
     echo "        Specify input files (space-separated or glob pattern)"
     echo "        Example: --input \"*.log\" or --input \"file1.txt file2.txt\""
@@ -69,17 +75,24 @@ usage() {
     echo "    3. Process all log files in current directory into 5 parts each:"
     echo "       CMD --input \"*.log\" --part 5"
     echo
-    echo "    4. Split files with custom output directory and suffix:"
+    echo "    4. Process all files in a directory:"
+    echo "       CMD --directory /path/to/files --part 3"
+    echo
+    echo "    5. Split files with custom output directory and suffix:"
     echo "       CMD -i \"data*.txt\" -p 4 -o ./chunks -s .dat"
     echo
-    echo "    5. Mix positional and option arguments:"
+    echo "    6. Mix positional and option arguments:"
     echo "       CMD input1.txt -i \"data*.txt\" -l 50 -o ./output"
+    echo
+    echo "    7. Process all markdown files in a directory using glob pattern:"
+    echo "       CMD dir/*.md -p 3"
     echo
     echo "NOTES"
     echo "    - When using --lines, the actual number of parts may vary per file"
     echo "    - The last chunk may contain fewer lines than others"
     echo "    - Non-existent files are skipped with a warning"
     echo "    - Output directories are created if they don't exist"
+    echo "    - When using --directory, only regular files are processed (subdirectories are ignored)"
     exit 1
 }
 
@@ -87,6 +100,10 @@ usage() {
 while [[ $# -gt 0 ]]; do
     key="$1"
     case $key in
+        --directory|-d)
+            input_directory="$2"
+            shift 2
+            ;;
         --input|-i)
             # Handle multiple files or glob patterns
             for file in $2; do
@@ -114,24 +131,55 @@ while [[ $# -gt 0 ]]; do
             usage
             ;;
         *)
-            # If positional arg, add to input_files array
-            if [[ -f "$1" ]]; then
-                input_files+=("$1")
-            else
-                # Handle glob patterns in positional arguments
-                for file in $1; do
+            # Handle positional arguments and glob patterns
+            # Use bash's nullglob option temporarily to handle non-matching patterns
+            shopt -s nullglob
+            expanded_files=($1)
+            shopt -u nullglob
+            
+            if [[ ${#expanded_files[@]} -gt 0 ]]; then
+                # Glob pattern matched files
+                for file in "${expanded_files[@]}"; do
                     if [[ -f "$file" ]]; then
                         input_files+=("$file")
                     fi
                 done
+            elif [[ -f "$1" ]]; then
+                # Single file that exists
+                input_files+=("$1")
+            else
+                # Pattern didn't match any files
+                echo "Warning: No files found matching pattern '$1'"
             fi
             shift
             ;;
     esac
 done
 
+# Process directory input if specified
+if [[ -n "$input_directory" ]]; then
+    if [[ ! -d "$input_directory" ]]; then
+        echo "Error: Directory '$input_directory' does not exist"
+        exit 1
+    fi
+    
+    # Add all files from the directory to input_files array
+    echo "Scanning directory: $input_directory"
+    file_count=0
+    while IFS= read -r -d '' file; do
+        input_files+=("$file")
+        ((file_count++))
+    done < <(find "$input_directory" -maxdepth 1 -type f -print0)
+    
+    if [[ $file_count -eq 0 ]]; then
+        echo "Warning: No files found in directory '$input_directory'"
+    else
+        echo "Found $file_count files in directory '$input_directory'"
+    fi
+fi
+
 # Validate input files
-if [[ -z "$input_files" ]]; then
+if [[ ${#input_files[@]} -eq 0 ]]; then
     echo "Error: No input files specified"
     usage
 fi
