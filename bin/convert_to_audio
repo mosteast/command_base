@@ -1,0 +1,397 @@
+#!/bin/bash
+
+# Script to convert videos to AAC audio files using FFmpeg
+# Usage examples:
+#   ./convert_to_audio dir1/*.mp4 dir2/*.mp4
+#   ./convert_to_audio videos/*.mp4 -o /path/to/audio
+#   ./convert_to_audio video1.mp4 video2.mp4
+#   ./convert_to_audio "videos/**/*.mp4" --bitrate 128k
+#   ./convert_to_audio "lecture_*.{mp4,mkv,avi}" --output ~/Music
+
+# Default values
+output_dir=""
+input_patterns=()
+bitrate="128k"
+force_overwrite=false
+parallel_jobs=4
+
+# Function to display usage
+usage() {
+    echo "Usage: $0 [PATTERNS...] [OPTIONS]"
+    echo ""
+    echo "Arguments:"
+    echo "  PATTERNS               One or more glob patterns or file paths"
+    echo ""
+    echo "Options:"
+    echo "  --output, -o DIR       Output directory for audio files (default: same directory as each input file)"
+    echo "  --bitrate, -b RATE     Audio bitrate (default: 128k)"
+    echo "  --parallel, -p NUM     Number of parallel conversions (default: 4)"
+    echo "  --force, -F            Force overwrite existing files"
+    echo "  --help, -h             Display this help message"
+    echo ""
+    echo "Examples:"
+    echo "  $0 '*.mp4'                           # Convert all MP4s in current dir, output to same dir"
+    echo "  $0 dir1/*.mp4 dir2/*.mkv             # Convert files from multiple directories"
+    echo "  $0 videos/*.mp4 -o ~/Music           # Convert files, output to ~/Music"
+    echo "  $0 'videos/**/*.{mp4,mkv}' -b 192k   # Recursive with high bitrate"
+    echo "  $0 video1.mp4 video2.mkv --force     # Convert specific files, overwrite existing"
+    exit 1
+}
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --output|-o)
+            output_dir="$2"
+            shift 2
+            ;;
+        --bitrate|-b)
+            bitrate="$2"
+            shift 2
+            ;;
+        --parallel|-p)
+            parallel_jobs="$2"
+            shift 2
+            ;;
+        --force|-F)
+            force_overwrite=true
+            shift
+            ;;
+        --help|-h)
+            usage
+            ;;
+        -*)
+            echo "Unknown option: $1"
+            usage
+            ;;
+        *)
+            # Positional argument - treat as input pattern
+            input_patterns+=("$1")
+            shift
+            ;;
+    esac
+done
+
+# Check if any input patterns were provided
+if [ ${#input_patterns[@]} -eq 0 ]; then
+    echo "Error: No input patterns or files specified"
+    echo ""
+    usage
+fi
+
+# Check if ffmpeg is installed
+if ! command -v ffmpeg &> /dev/null; then
+    echo "Error: ffmpeg is not installed. Please install it first."
+    exit 1
+fi
+
+# Create output directory if it's specified
+if [ -n "$output_dir" ]; then
+    mkdir -p "$output_dir"
+fi
+
+# Create temporary file for video list
+list_file="$(mktemp)"
+trap 'rm -f "$list_file"' EXIT
+
+# Function to check if a file is a video file
+is_video_file() {
+    local file="$1"
+    local ext="${file##*.}"
+    # Convert to lowercase using tr (more portable than ${ext,,})
+    ext=$(echo "$ext" | tr '[:upper:]' '[:lower:]')
+    
+    case "$ext" in
+        mp4|mkv|avi|mov|wmv|flv|webm|m4v|mpg|mpeg|3gp|ogv)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+# Function to get video files from input patterns
+get_video_files() {
+    echo "Processing input patterns..."
+    
+    # Enable extended globbing - check if globstar is supported
+    if shopt -s globstar 2>/dev/null; then
+        echo "Globstar enabled for recursive matching"
+    else
+        echo "Globstar not supported, using find for recursive patterns"
+    fi
+    
+    shopt -s nullglob extglob 2>/dev/null || true
+    
+    for pattern in "${input_patterns[@]}"; do
+        echo "Processing pattern: $pattern"
+        
+        # Check if pattern contains ** (recursive pattern)
+        if [[ "$pattern" == *"**"* ]]; then
+            # Handle recursive patterns with find
+            local base_dir="${pattern%%/**}"
+            local file_pattern="${pattern##**/}"
+            
+            if [ -d "$base_dir" ]; then
+                find "$base_dir" -type f -name "$file_pattern" 2>/dev/null | while IFS= read -r file; do
+                    if is_video_file "$file"; then
+                        echo "$file" >> "$list_file"
+                    fi
+                done
+            else
+                echo "Warning: Directory not found: $base_dir"
+            fi
+        else
+            # Handle regular patterns
+            # Always use find for better handling of complex paths and patterns
+            local dir_part="${pattern%/*}"
+            local file_part="${pattern##*/}"
+            
+            # If pattern doesn't contain a slash, use current directory
+            if [ "$dir_part" = "$pattern" ]; then
+                dir_part="."
+                file_part="$pattern"
+            fi
+            
+            echo "  Directory: $dir_part"
+            echo "  Pattern: $file_part"
+            
+            if [ -d "$dir_part" ]; then
+                find "$dir_part" -maxdepth 1 -type f -name "$file_part" 2>/dev/null | while IFS= read -r file; do
+                    if is_video_file "$file"; then
+                        echo "$(readlink -f "$file")" >> "$list_file"
+                    fi
+                done
+            else
+                echo "Warning: Directory not found: $dir_part"
+            fi
+        fi
+    done
+    
+    # Sort the results and remove duplicates
+    if [ -s "$list_file" ]; then
+        sort "$list_file" | uniq > "${list_file}.tmp"
+        mv "${list_file}.tmp" "$list_file"
+    fi
+}
+
+# Function to convert a single video file to AAC audio
+convert_video_to_audio() {
+    local input_file="$1"
+    
+    # Validate input file exists and is readable
+    if [ ! -f "$input_file" ]; then
+        echo "✗ File not found: $input_file"
+        return 1
+    fi
+    
+    if [ ! -r "$input_file" ]; then
+        echo "✗ File not readable: $input_file"
+        return 1
+    fi
+    
+    local filename=$(basename "$input_file")
+    local name_without_ext="${filename%.*}"
+    
+    # Determine output file path
+    local output_file
+    if [ -n "$output_dir" ]; then
+        # Use specified output directory
+        output_file="$output_dir/${name_without_ext}.aac"
+    else
+        # Use same directory as input file
+        local input_dir=$(dirname "$input_file")
+        output_file="$input_dir/${name_without_ext}.aac"
+    fi
+    
+    # Note: Skip check is now handled before calling this function
+    
+    # Truncate very long filenames for display
+    local display_filename="$filename"
+    if [ ${#display_filename} -gt 80 ]; then
+        display_filename="${filename:0:40}...${filename: -37}"
+    fi
+    
+    echo "Processing: $display_filename -> $(basename "$output_file")"
+    
+    # Check if source already has AAC audio - if so, just copy it (much faster!)
+    local audio_codec=""
+    local conversion_method=""
+    local ffmpeg_args=""
+    
+    # Safely probe the audio codec with proper quoting
+    if audio_codec=$(ffprobe -v quiet -select_streams a:0 -show_entries stream=codec_name -of csv=p=0 "$input_file" 2>/dev/null) && [ -n "$audio_codec" ]; then
+        # Successfully detected audio codec - clean it up (remove any extra whitespace/characters)
+        audio_codec=$(echo "$audio_codec" | tr -d '[:space:]' | head -c 20)
+        
+        if [ "x$audio_codec" = "xaac" ]; then
+            # Source is already AAC - just copy the stream (super fast!)
+            conversion_method="COPYING"
+            ffmpeg_args="-vn -acodec copy"
+            echo "  Method: Stream copy (source is already AAC)"
+        else
+            # Need to actually convert to AAC
+            conversion_method="CONVERTING"
+            echo "  Method: Converting from $audio_codec to AAC"
+        fi
+    else
+        # Failed to detect codec or no audio stream - assume conversion needed
+        conversion_method="CONVERTING"
+        echo "  Method: Converting to AAC (codec detection failed)"
+    fi
+    
+    # Set up conversion arguments if needed
+    if [ "x$conversion_method" = "xCONVERTING" ]; then
+        # Try to use hardware acceleration on macOS
+        if [[ "$OSTYPE" == "darwin"* ]]; then
+            # Check if VideoToolbox is available (modern macOS)
+            if ffmpeg -hide_banner -encoders 2>/dev/null | grep -q "aac_at"; then
+                ffmpeg_args="-vn -acodec aac_at -b:a $bitrate -threads 0"
+            else
+                ffmpeg_args="-vn -acodec aac -b:a $bitrate -threads 0"
+            fi
+        else
+            ffmpeg_args="-vn -acodec aac -b:a $bitrate -threads 0"
+        fi
+    fi
+    
+    # Execute the conversion/copy with better error handling
+    local ffmpeg_exit_code=0
+    local error_output=""
+    
+    if [ "x$force_overwrite" = "xtrue" ]; then
+        error_output=$(ffmpeg -hide_banner -loglevel error -i "$input_file" $ffmpeg_args -y "$output_file" 2>&1)
+        ffmpeg_exit_code=$?
+    else
+        error_output=$(ffmpeg -hide_banner -loglevel error -i "$input_file" $ffmpeg_args "$output_file" 2>&1)
+        ffmpeg_exit_code=$?
+    fi
+    
+    # If ffmpeg failed, try with safer approach (create symlink with shorter name)
+    if [ $ffmpeg_exit_code -ne 0 ] && [ ${#input_file} -gt 200 ]; then
+        echo "  Retrying with shorter filename (original path too long)..."
+        
+        # Create a temporary symlink with shorter name
+        local temp_link="/tmp/temp_video_$(date +%s).${input_file##*.}"
+        ln -sf "$input_file" "$temp_link" 2>/dev/null
+        
+        if [ -L "$temp_link" ]; then
+            if [ "x$force_overwrite" = "xtrue" ]; then
+                error_output=$(ffmpeg -hide_banner -loglevel error -i "$temp_link" $ffmpeg_args -y "$output_file" 2>&1)
+                ffmpeg_exit_code=$?
+            else
+                error_output=$(ffmpeg -hide_banner -loglevel error -i "$temp_link" $ffmpeg_args "$output_file" 2>&1)
+                ffmpeg_exit_code=$?
+            fi
+            
+            # Clean up temp symlink
+            rm -f "$temp_link" 2>/dev/null
+        fi
+    fi
+    
+    if [ $ffmpeg_exit_code -eq 0 ]; then
+        if [ "x$conversion_method" = "xCOPYING" ]; then
+            echo "✓ Successfully copied: $(basename "$output_file") (no re-encoding needed!)"
+        else
+            echo "✓ Successfully converted: $(basename "$output_file")"
+        fi
+    else
+        echo "✗ Failed to process: $filename (exit code: $ffmpeg_exit_code)"
+        if [ -n "$error_output" ]; then
+            # Show first line of error for debugging
+            local first_error=$(echo "$error_output" | head -n 1 | cut -c 1-100)
+            echo "  Error: $first_error"
+        fi
+        return 1
+    fi
+}
+
+# Get video files
+get_video_files
+
+# Check if any files were found
+if [ ! -s "$list_file" ]; then
+    echo "Error: No video files found"
+    exit 1
+fi
+
+# Configuration summary
+if [ -n "$output_dir" ]; then
+    echo "Output directory: $output_dir"
+else
+    echo "Output directory: same as input files"
+fi
+echo "Audio bitrate: $bitrate"
+echo ""
+
+# Convert video files in batches
+converted_count=0
+failed_count=0
+skipped_count=0
+total_count=$(wc -l < "$list_file" 2>/dev/null || echo 0)
+processed_count=0
+
+# Check for already converted files first
+temp_unconverted="$(mktemp)"
+trap 'rm -f "$temp_unconverted"' EXIT
+
+echo "Checking for already converted files..."
+while IFS= read -r video_file; do
+    filename=$(basename "$video_file")
+    name_without_ext="${filename%.*}"
+    
+    # Check if output file already exists
+    if [ -n "$output_dir" ]; then
+        output_file="$output_dir/${name_without_ext}.aac"
+    else
+        input_dir=$(dirname "$video_file")
+        output_file="$input_dir/${name_without_ext}.aac"
+    fi
+    
+    if [ -f "$output_file" ] && [ "x$force_overwrite" = "xfalse" ]; then
+        echo "Already converted: $(basename "$video_file")"
+        ((skipped_count++))
+    else
+        echo "$video_file" >> "$temp_unconverted"
+    fi
+done < "$list_file"
+
+unconverted_count=$(wc -l < "$temp_unconverted" 2>/dev/null || echo 0)
+
+echo ""
+echo "Files already converted: $skipped_count"
+echo "Files to convert: $unconverted_count"
+echo "Converting all files..."
+echo ""
+
+# Convert all files
+while IFS= read -r video_file; do
+    if convert_video_to_audio "$video_file"; then
+        ((converted_count++))
+    else
+        ((failed_count++))
+    fi
+    ((processed_count++))
+done < "$temp_unconverted"
+
+# Summary
+echo ""
+echo "=== Conversion Summary ==="
+echo "Total video files found: $total_count"
+echo "Already converted (skipped): $skipped_count"
+echo "Files needing conversion: $unconverted_count"
+echo "Files processed this run: $processed_count"
+echo "Successfully converted: $converted_count"
+echo "Failed: $failed_count"
+
+if [ "$failed_count" -eq 0 ] 2>/dev/null; then
+    if [ "$processed_count" -gt 0 ] 2>/dev/null; then
+        echo "✓ All processed conversions completed successfully!"
+    else
+        echo "ℹ️  No files needed conversion."
+    fi
+else
+    echo "⚠ Some conversions failed. Check the output above for details."
+    exit 1
+fi 
