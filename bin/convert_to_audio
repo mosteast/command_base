@@ -13,7 +13,129 @@ output_dir=""
 input_patterns=()
 bitrate="128k"
 force_overwrite=false
-parallel_jobs=4
+parallel_jobs=5
+
+# State file for tracking conversion progress
+state_file="$HOME/.cache/convert_to_audio_state"
+
+# Ensure cache directory exists
+mkdir -p "$(dirname "$state_file")"
+
+# Function to initialize or load state file
+init_state_file() {
+    if [ ! -f "$state_file" ]; then
+        # Create new state file with header
+        echo "# State file for convert_to_audio script" > "$state_file"
+        echo "# Format: status|input_file|output_file|timestamp" >> "$state_file"
+    fi
+}
+
+# Function to clean incomplete conversions from previous runs
+clean_incomplete_conversions() {
+    if [ ! -f "$state_file" ]; then
+        return 0
+    fi
+    
+    echo "Checking for incomplete conversions from previous runs..."
+    local cleaned_count=0
+    
+    # Create temporary file for new state
+    local temp_state="$(mktemp)"
+    
+    # Process each line in state file
+    while IFS='|' read -r status input_file output_file timestamp; do
+        # Skip comments and empty lines
+        if [[ "$status" =~ ^#.*$ ]] || [ -z "$status" ]; then
+            echo "$status|$input_file|$output_file|$timestamp" >> "$temp_state"
+            continue
+        fi
+        
+        case "$status" in
+            "started")
+                # This conversion was started but never completed - remove incomplete file
+                if [ -f "$output_file" ]; then
+                    echo "  Removing incomplete file: $(basename "$output_file")"
+                    rm -f "$output_file"
+                    ((cleaned_count++))
+                fi
+                # Don't copy this entry to new state file (remove it)
+                ;;
+            "completed"|"failed")
+                # Keep completed and failed entries
+                echo "$status|$input_file|$output_file|$timestamp" >> "$temp_state"
+                ;;
+        esac
+    done < "$state_file"
+    
+    # Replace state file with cleaned version
+    mv "$temp_state" "$state_file"
+    
+    if [ "$cleaned_count" -gt 0 ]; then
+        echo "  Cleaned up $cleaned_count incomplete files"
+    else
+        echo "  No incomplete files found"
+    fi
+    echo ""
+}
+
+# Function to check if file conversion is already completed
+is_conversion_completed() {
+    local input_file="$1"
+    local output_file="$2"
+    
+    if [ ! -f "$state_file" ]; then
+        return 1
+    fi
+    
+    # Look for completed entry with matching input and output files
+    while IFS='|' read -r status input_file_state output_file_state timestamp; do
+        if [ "$status" = "completed" ] && [ "$input_file_state" = "$input_file" ] && [ "$output_file_state" = "$output_file" ]; then
+            # Also verify the output file actually exists
+            if [ -f "$output_file" ]; then
+                return 0
+            else
+                # State says completed but file is missing - mark for reconversion
+                return 1
+            fi
+        fi
+    done < "$state_file"
+    
+    return 1
+}
+
+# Function to update conversion state
+update_conversion_state() {
+    local status="$1"
+    local input_file="$2"
+    local output_file="$3"
+    local timestamp="$(date '+%Y-%m-%d %H:%M:%S')"
+    
+    # Create temporary file for updated state
+    local temp_state="$(mktemp)"
+    local found_entry=false
+    
+    # Copy existing entries, updating any matching entry
+    if [ -f "$state_file" ]; then
+        while IFS='|' read -r old_status old_input old_output old_timestamp; do
+            if [ "$old_input" = "$input_file" ] && [ "$old_output" = "$output_file" ]; then
+                # Update this entry
+                echo "$status|$input_file|$output_file|$timestamp" >> "$temp_state"
+                found_entry=true
+            else
+                # Keep existing entry
+                echo "$old_status|$old_input|$old_output|$old_timestamp" >> "$temp_state"
+            fi
+        done < "$state_file"
+    fi
+    
+    # If no existing entry found, add new one
+    if [ "$found_entry" = false ]; then
+        echo "$status|$input_file|$output_file|$timestamp" >> "$temp_state"
+    fi
+    
+    # Replace state file
+    mv "$temp_state" "$state_file"
+}
 
 # Function to display usage
 usage() {
@@ -25,8 +147,10 @@ usage() {
     echo "Options:"
     echo "  --output, -o DIR       Output directory for audio files (default: same directory as each input file)"
     echo "  --bitrate, -b RATE     Audio bitrate (default: 128k)"
-    echo "  --parallel, -p NUM     Number of parallel conversions (default: 4)"
+    echo "  --parallel, -p NUM     Number of parallel conversions (default: 5)"
     echo "  --force, -F            Force overwrite existing files"
+    echo "  --state-info           Show state file information and exit"
+    echo "  --clear-state          Clear the state file and exit"
     echo "  --help, -h             Display this help message"
     echo ""
     echo "Examples:"
@@ -35,7 +159,60 @@ usage() {
     echo "  $0 videos/*.mp4 -o ~/Music           # Convert files, output to ~/Music"
     echo "  $0 'videos/**/*.{mp4,mkv}' -b 192k   # Recursive with high bitrate"
     echo "  $0 video1.mp4 video2.mkv --force     # Convert specific files, overwrite existing"
+    echo "  $0 --state-info                      # Show conversion state information"
+    echo "  $0 --clear-state                     # Clear conversion state"
     exit 1
+}
+
+# Function to show state file information
+show_state_info() {
+    if [ ! -f "$state_file" ]; then
+        echo "No state file found at: $state_file"
+        exit 0
+    fi
+    
+    echo "State file location: $state_file"
+    echo "State file size: $(du -h "$state_file" | cut -f1)"
+    echo ""
+    
+    local completed_count=0
+    local failed_count=0
+    local started_count=0
+    
+    while IFS='|' read -r status input_file output_file timestamp; do
+        if [[ "$status" =~ ^#.*$ ]] || [ -z "$status" ]; then
+            continue
+        fi
+        
+        case "$status" in
+            "completed") ((completed_count++)) ;;
+            "failed") ((failed_count++)) ;;
+            "started") ((started_count++)) ;;
+        esac
+    done < "$state_file"
+    
+    echo "Conversion statistics:"
+    echo "  Completed: $completed_count"
+    echo "  Failed: $failed_count"
+    echo "  Incomplete (started but not finished): $started_count"
+    
+    if [ "$started_count" -gt 0 ]; then
+        echo ""
+        echo "Note: $started_count incomplete conversions will be cleaned up on next run"
+    fi
+    
+    exit 0
+}
+
+# Function to clear state file
+clear_state() {
+    if [ -f "$state_file" ]; then
+        rm -f "$state_file"
+        echo "State file cleared: $state_file"
+    else
+        echo "No state file found at: $state_file"
+    fi
+    exit 0
 }
 
 # Parse arguments
@@ -56,6 +233,12 @@ while [[ $# -gt 0 ]]; do
         --force|-F)
             force_overwrite=true
             shift
+            ;;
+        --state-info)
+            show_state_info
+            ;;
+        --clear-state)
+            clear_state
             ;;
         --help|-h)
             usage
@@ -84,6 +267,10 @@ if ! command -v ffmpeg &> /dev/null; then
     echo "Error: ffmpeg is not installed. Please install it first."
     exit 1
 fi
+
+# Initialize state file and clean up incomplete conversions
+init_state_file
+clean_incomplete_conversions
 
 # Create output directory if it's specified
 if [ -n "$output_dir" ]; then
@@ -205,7 +392,8 @@ convert_video_to_audio() {
         output_file="$input_dir/${name_without_ext}.aac"
     fi
     
-    # Note: Skip check is now handled before calling this function
+    # Mark conversion as started in state file
+    update_conversion_state "started" "$input_file" "$output_file"
     
     # Truncate very long filenames for display
     local display_filename="$filename"
@@ -291,12 +479,18 @@ convert_video_to_audio() {
     fi
     
     if [ $ffmpeg_exit_code -eq 0 ]; then
+        # Mark conversion as completed in state file
+        update_conversion_state "completed" "$input_file" "$output_file"
+        
         if [ "x$conversion_method" = "xCOPYING" ]; then
             echo "✓ Successfully copied: $(basename "$output_file") (no re-encoding needed!)"
         else
             echo "✓ Successfully converted: $(basename "$output_file")"
         fi
     else
+        # Mark conversion as failed in state file
+        update_conversion_state "failed" "$input_file" "$output_file"
+        
         echo "✗ Failed to process: $filename (exit code: $ffmpeg_exit_code)"
         if [ -n "$error_output" ]; then
             # Show first line of error for debugging
@@ -334,14 +528,13 @@ processed_count=0
 
 # Check for already converted files first
 temp_unconverted="$(mktemp)"
-trap 'rm -f "$temp_unconverted"' EXIT
 
 echo "Checking for already converted files..."
 while IFS= read -r video_file; do
     filename=$(basename "$video_file")
     name_without_ext="${filename%.*}"
     
-    # Check if output file already exists
+    # Determine output file path
     if [ -n "$output_dir" ]; then
         output_file="$output_dir/${name_without_ext}.aac"
     else
@@ -349,7 +542,8 @@ while IFS= read -r video_file; do
         output_file="$input_dir/${name_without_ext}.aac"
     fi
     
-    if [ -f "$output_file" ] && [ "x$force_overwrite" = "xfalse" ]; then
+    # Check if conversion is already completed using state file
+    if [ "x$force_overwrite" = "xfalse" ] && is_conversion_completed "$video_file" "$output_file"; then
         echo "Already converted: $(basename "$video_file")"
         ((skipped_count++))
     else
@@ -365,15 +559,72 @@ echo "Files to convert: $unconverted_count"
 echo "Converting all files..."
 echo ""
 
-# Convert all files
+# Convert all files with parallel processing
+job_pids=()
+current_jobs=0
+
+# Create temporary files for tracking results
+temp_success="$(mktemp)"
+temp_failure="$(mktemp)"
+trap 'rm -f "$list_file" "$temp_unconverted" "$temp_success" "$temp_failure"' EXIT
+
+# Function to start a conversion job in background
+start_conversion_job() {
+    local video_file="$1"
+    (
+        if convert_video_to_audio "$video_file"; then
+            echo "1" >> "$temp_success"
+        else
+            echo "1" >> "$temp_failure"
+        fi
+    ) &
+    local pid=$!
+    job_pids+=("$pid")
+    ((current_jobs++))
+}
+
+# Process files with parallel limit
 while IFS= read -r video_file; do
-    if convert_video_to_audio "$video_file"; then
-        ((converted_count++))
-    else
-        ((failed_count++))
-    fi
-    ((processed_count++))
+    # Wait if we've reached the parallel job limit
+    while [ "$current_jobs" -ge "$parallel_jobs" ]; do
+        sleep 0.1
+        # Check for completed jobs
+        for i in "${!job_pids[@]}"; do
+            local pid="${job_pids[$i]}"
+            if ! kill -0 "$pid" 2>/dev/null; then
+                # Job is done, remove it from the array
+                unset "job_pids[$i]"
+                ((current_jobs--))
+            fi
+        done
+        # Rebuild array to remove gaps
+        job_pids=("${job_pids[@]}")
+    done
+    
+    # Start new conversion job
+    start_conversion_job "$video_file"
 done < "$temp_unconverted"
+
+# Wait for all remaining jobs to complete
+if [ "$current_jobs" -gt 0 ]; then
+    echo "Waiting for remaining $current_jobs conversion jobs to complete..."
+    for pid in "${job_pids[@]}"; do
+        if kill -0 "$pid" 2>/dev/null; then
+            wait "$pid"
+        fi
+    done
+fi
+
+# Count results from temporary files
+converted_count=0
+failed_count=0
+if [ -f "$temp_success" ]; then
+    converted_count=$(wc -l < "$temp_success" 2>/dev/null || echo 0)
+fi
+if [ -f "$temp_failure" ]; then
+    failed_count=$(wc -l < "$temp_failure" 2>/dev/null || echo 0)
+fi
+processed_count=$((converted_count + failed_count))
 
 # Summary
 echo ""
