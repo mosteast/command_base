@@ -5,6 +5,8 @@ CHANNEL_URL=""
 PLAYLIST_URL=""
 OUTPUT_DIR="~/Library/Mobile Documents/com~apple~CloudDocs/main/downie/YouTube/%(uploader)s"
 VIDEO_URLS=()
+ONLY_AUDIO=false
+ONLY_SUBTITLE=false
 
 # Function to show usage
 show_usage() {
@@ -26,6 +28,8 @@ show_usage() {
     echo "  -c, --channel <url>   Download all videos from a YouTube channel"
     echo "  -l, --list <url>      Download all videos from a YouTube playlist"
     echo "  -o, --output <dir>    Specify output directory"
+    echo "  --only-audio         Download only audio files"
+    echo "  --only-subtitle      Download only subtitle files"
     echo "  --                    Pass additional options to yt-dlp"
     echo ""
     echo "Note: You must use exactly one input type (channel, playlist, or video URLs)"
@@ -68,6 +72,14 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             ;;
+        --only-audio)
+            ONLY_AUDIO=true
+            shift
+            ;;
+        --only-subtitle)
+            ONLY_SUBTITLE=true
+            shift
+            ;;
         --)
             shift
             break
@@ -88,6 +100,12 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# Validate audio/subtitle options
+if [ "$ONLY_AUDIO" = true ] && [ "$ONLY_SUBTITLE" = true ]; then
+    echo "Error: Cannot use both --only-audio and --only-subtitle options together"
+    exit 1
+fi
 
 # Count how many input types are provided
 INPUT_COUNT=0
@@ -124,6 +142,21 @@ EXTRA_OPTS="$@"
 ARCHIVE_DIR="${HOME}/.yt-dlp/archives"
 mkdir -p "$ARCHIVE_DIR"
 
+# Set format and additional options based on download type
+if [ "$ONLY_AUDIO" = true ]; then
+    FORMAT_OPTS="-f ba"
+    EMBED_SUBS_OPTS=""
+    WRITE_SUBS_OPTS=""
+elif [ "$ONLY_SUBTITLE" = true ]; then
+    FORMAT_OPTS="--skip-download"
+    EMBED_SUBS_OPTS=""
+    WRITE_SUBS_OPTS="--write-subs --write-auto-subs"
+else
+    FORMAT_OPTS=""
+    EMBED_SUBS_OPTS="--embed-subs"
+    WRITE_SUBS_OPTS="--write-subs --write-auto-subs"
+fi
+
 # Handle channel URL mode
 if [ -n "$CHANNEL_URL" ]; then
     # Convert @channel URL to channel/videos URL format
@@ -135,14 +168,13 @@ if [ -n "$CHANNEL_URL" ]; then
     ARCHIVE_FILE="${ARCHIVE_DIR}/$(echo "$CHANNEL_URL" | md5sum | cut -d' ' -f1).txt"
 
     yt-dlp --playlist-reverse \
-    --embed-subs \
+    $EMBED_SUBS_OPTS \
     --match-filter "availability != 'needs_subscription'" \
     -o "$OUTPUT_DIR/%(playlist)s/%(n_entries+1-playlist_index)d.%(title)s.%(ext)s" \
     --cookies-from-browser chrome \
     -N 7 \
-    -f "bv*+ba/b" \
-    --write-subs \
-    --write-auto-subs \
+    $FORMAT_OPTS \
+    $WRITE_SUBS_OPTS \
     --sub-langs "en,en-US,zh-Hans,zh-Hant,zh-CN,zh" \
     --continue \
     --download-archive "$ARCHIVE_FILE" \
@@ -167,14 +199,13 @@ elif [ -n "$PLAYLIST_URL" ]; then
     ARCHIVE_FILE="${ARCHIVE_DIR}/$(echo "$PLAYLIST_URL" | md5sum | cut -d' ' -f1).txt"
 
     yt-dlp --playlist-reverse \
-    --embed-subs \
+    $EMBED_SUBS_OPTS \
     --match-filter "availability != 'needs_subscription'" \
     -o "$OUTPUT_DIR/%(playlist)s/%(playlist_index)s.%(title)s.%(ext)s" \
     --cookies-from-browser chrome \
     -N 7 \
-    -f "bv*+ba/b" \
-    --write-subs \
-    --write-auto-subs \
+    $FORMAT_OPTS \
+    $WRITE_SUBS_OPTS \
     --sub-langs "en,en-US,zh-Hans,zh-Hant,zh-CN,zh" \
     --continue \
     --download-archive "$ARCHIVE_FILE" \
@@ -195,14 +226,13 @@ elif [ -n "$PLAYLIST_URL" ]; then
 # Handle individual video URLs mode
 else
     for url in "${VIDEO_URLS[@]}"; do
-        yt-dlp --embed-subs \
+        yt-dlp $EMBED_SUBS_OPTS \
         --match-filter "availability != 'needs_subscription'" \
         -o "$OUTPUT_DIR/%(title)s.%(ext)s" \
         --cookies-from-browser chrome \
         -N 7 \
-        -f "bv*+ba/b" \
-        --write-subs \
-        --write-auto-subs \
+        $FORMAT_OPTS \
+        $WRITE_SUBS_OPTS \
         --sub-langs "en,en-US,zh-Hans,zh-Hant,zh-CN,zh" \
         --continue \
         --sleep-interval 1 \

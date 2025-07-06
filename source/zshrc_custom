@@ -12,6 +12,8 @@ export all_proxy=socks5://127.0.0.1:7890
 export PATH="$HOME/dev_lib/flutter/bin:$HOME/bin:$HOME/code_base/command_base/bin:$HOME/code_base/mosteast/giao/bin:/usr/local/mysql/bin:/opt/homebrew/bin:$PATH"
 export ZPLUG_HOME=/opt/homebrew/opt/zplug
 
+export GOOGLE_CLOUD_PROJECT="inme-395708"
+
 # load shortcuts
 source "$HOME/code_base/mosteast/giao.feature.root/bin/shortcuts"
 # load zplug
