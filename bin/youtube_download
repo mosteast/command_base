@@ -90,9 +90,14 @@ while [[ $# -gt 0 ]]; do
             exit 1
             ;;
         *)
-            # If it's the last argument and no previous URLs were collected, treat it as output dir
+            # If it's the last argument and there are other video URLs, it *could* be an output directory
             if [[ $# -eq 1 && ${#VIDEO_URLS[@]} -gt 0 ]]; then
-                OUTPUT_DIR="$1"
+                # If the argument contains typical URL patterns, treat as a URL.
+                if [[ "$1" == "http"* || "$1" == *".com"* || "$1" == *".be"* || "$1" == *"watch?v="* ]]; then
+                    VIDEO_URLS+=("$1")
+                else
+                    OUTPUT_DIR="$1"
+                fi
             else
                 VIDEO_URLS+=("$1")
             fi
