@@ -1,39 +1,40 @@
 #!/usr/bin/env node
 
-const { command } = require('@mosteast/command')
+const { command } = require("@mosteast/command");
 
 const N_version = {
-  major: 'major',
-  minor: 'minor',
-  patch: 'patch',
-}
+  major: "major",
+  minor: "minor",
+  patch: "patch",
+};
 
 // Precondition:
 // The last command `git push` need to set `git config --global push.default current`
-require('yargs')
+require("yargs")
   .command({
-    command: '$0 [version_type]',
-    describe: 'Publish npm package',
+    command: "$0 [version_type]",
+    describe: "Publish npm package",
     builder(argv) {
       return argv
-        .positional('version_type', {
-          type: 'string',
-          describe: 'Version type',
+        .positional("version_type", {
+          type: "string",
+          describe: "Version type",
           default: N_version.patch,
           choices: Object.values(N_version),
         })
         .options({
           skip_version: {
-            type: 'boolean',
-            alias: 's',
-            describe: 'Skip version tagging',
+            type: "boolean",
+            alias: "s",
+            describe: "Skip version tagging",
             default: false,
           },
-        })
+        });
     },
     async handler(args) {
-      await command(`npm version ${args.version_type} && npm run build && cd build && npm publish --registry http://registry.npmjs.org --access public && cd .. && git push`)
+      await command(
+        `npm version ${args.version_type} && npm run build && cd build && npm publish --registry http://registry.npmjs.org --access public && cd .. && git push`,
+      );
     },
   })
-  .demandCommand()
-  .argv
+  .demandCommand().argv;

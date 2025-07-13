@@ -7,6 +7,7 @@ OUTPUT_DIR="~/Library/Mobile Documents/com~apple~CloudDocs/main/downie/YouTube/%
 VIDEO_URLS=()
 ONLY_AUDIO=false
 ONLY_SUBTITLE=false
+OVERWRITE=false
 
 # Function to show usage
 show_usage() {
@@ -78,6 +79,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --only-subtitle)
             ONLY_SUBTITLE=true
+            shift
+            ;;
+        --overwrite)
+            OVERWRITE=true
             shift
             ;;
         --)
@@ -182,7 +187,8 @@ if [ -n "$CHANNEL_URL" ]; then
     $WRITE_SUBS_OPTS \
     --sub-langs "en,en-US,zh-Hans,zh-Hant,zh-CN,zh" \
     --continue \
-    --download-archive "$ARCHIVE_FILE" \
+    $( [ "$OVERWRITE" != true ] && echo "--download-archive \"$ARCHIVE_FILE\"" ) \
+    $( [ "$OVERWRITE" = true ] && echo "--force-overwrites" ) \
     --extractor-args youtubetab:skip=authcheck \
     --referer "$CHANNEL_URL" \
     --sleep-interval 1 \
@@ -213,7 +219,8 @@ elif [ -n "$PLAYLIST_URL" ]; then
     $WRITE_SUBS_OPTS \
     --sub-langs "en,en-US,zh-Hans,zh-Hant,zh-CN,zh" \
     --continue \
-    --download-archive "$ARCHIVE_FILE" \
+    $( [ "$OVERWRITE" != true ] && echo "--download-archive \"$ARCHIVE_FILE\"" ) \
+    $( [ "$OVERWRITE" = true ] && echo "--force-overwrites" ) \
     --yes-playlist \
     --sleep-interval 1 \
     --max-sleep-interval 5 \
@@ -231,15 +238,21 @@ elif [ -n "$PLAYLIST_URL" ]; then
 # Handle individual video URLs mode
 else
     for url in "${VIDEO_URLS[@]}"; do
+        # Generate a unique archive file name based on the video URL
+        ARCHIVE_FILE="${ARCHIVE_DIR}/$(echo "$url" | md5sum | cut -d' ' -f1).txt"
+        [ "$OVERWRITE" != true ] && touch "$ARCHIVE_FILE"
+
         yt-dlp $EMBED_SUBS_OPTS \
         --match-filter "availability != 'needs_subscription'" \
-        -o "$OUTPUT_DIR/%(title)s.%(ext)s" \
+        -o "$OUTPUT_DIR/%(uploader)s - Videos/%(title)s.%(ext)s" \
         --cookies-from-browser chrome \
         -N 7 \
         $FORMAT_OPTS \
         $WRITE_SUBS_OPTS \
         --sub-langs "en,en-US,zh-Hans,zh-Hant,zh-CN,zh" \
         --continue \
+        $( [ "$OVERWRITE" != true ] && echo "--download-archive $ARCHIVE_FILE" ) \
+        $( [ "$OVERWRITE" = true ] && echo "--force-overwrites" ) \
         --sleep-interval 1 \
         --max-sleep-interval 5 \
         --retries 10 \

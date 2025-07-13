@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-const { writeFile } = require('fs-extra')
+const { writeFile } = require("fs-extra");
 
 const ignore = `# Custom
 /build/
@@ -74,9 +74,11 @@ typings/
 .yarn-integrity
 
 # next.js build output
-.next`
+.next`;
 
-writeFile('./.gitignore', ignore, e => { if (e) throw e })
+writeFile("./.gitignore", ignore, (e) => {
+  if (e) throw e;
+});
 
 const attr = `*.pdf filter=lfs diff=lfs merge=lfs -text
 *.png filter=lfs diff=lfs merge=lfs -text
@@ -86,5 +88,7 @@ const attr = `*.pdf filter=lfs diff=lfs merge=lfs -text
 *.mp3 filter=lfs diff=lfs merge=lfs -text
 *.mp4 filter=lfs diff=lfs merge=lfs -text
 *.mov filter=lfs diff=lfs merge=lfs -text
-`
-writeFile('./.gitattributes', attr, e => { if (e) throw e })
+`;
+writeFile("./.gitattributes", attr, (e) => {
+  if (e) throw e;
+});

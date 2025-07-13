@@ -1,78 +1,87 @@
 #!/usr/bin/env node
 
-const { cd, pwd } = require('shelljs');
-const { basename, resolve } = require('path');
-const { trim } = require('lodash');
-const { command } = require('@mosteast/command');
+const { cd, pwd } = require("shelljs");
+const { basename, resolve } = require("path");
+const { trim } = require("lodash");
+const { command } = require("@mosteast/command");
 
-const N_parent = 'parent';
+const N_parent = "parent";
 
 // Precondition: github CLI installed
-require('yargs')
-  .command({
-    command: '$0 <repo_uri> [dir_path] [--branch] [--create_remote] [--keep_origin] [--keep_branch]',
-    describe: `Clone and parenting a repository
+require("yargs").command({
+  command:
+    "$0 <repo_uri> [dir_path] [--branch] [--create_remote] [--keep_origin] [--keep_branch]",
+  describe: `Clone and parenting a repository
 Example:
 
 mimic mosteast/giao foo --branch feature.rds --create_remote mosteast/foo
 `,
-    builder(argv) {
-      return argv.options({
-        branch: {
-          type: 'string',
-          default: '',
-        },
-        create_remote: {
-          type: 'string',
-          describe: 'Whether to create remote repository in github',
-        },
-        keep_origin: {
-          type: 'boolean',
-          default: false,
-          describe: `Whether rename origin to ${N_parent}`,
-        },
-        keep_branch: {
-          type: 'boolean',
-          default: false,
-          describe: `Whether rename branch to ${N_parent}`,
-        },
-      });
-    },
-    async handler({ repo_uri, dir_path, branch, create_remote, keep_origin, keep_branch }) {
-      const wd = pwd().toString();
-      const repo = basename(trim(repo_uri, '/'), '.git');
-      let dir;
+  builder(argv) {
+    return argv.options({
+      branch: {
+        type: "string",
+        default: "",
+      },
+      create_remote: {
+        type: "string",
+        describe: "Whether to create remote repository in github",
+      },
+      keep_origin: {
+        type: "boolean",
+        default: false,
+        describe: `Whether rename origin to ${N_parent}`,
+      },
+      keep_branch: {
+        type: "boolean",
+        default: false,
+        describe: `Whether rename branch to ${N_parent}`,
+      },
+    });
+  },
+  async handler({
+    repo_uri,
+    dir_path,
+    branch,
+    create_remote,
+    keep_origin,
+    keep_branch,
+  }) {
+    const wd = pwd().toString();
+    const repo = basename(trim(repo_uri, "/"), ".git");
+    let dir;
 
-      if (!dir_path) {
-        dir_path = resolve(wd, repo);
-        dir = repo;
-      } else {
-        dir = trim(dir_path, '/').split('/').pop();
+    if (!dir_path) {
+      dir_path = resolve(wd, repo);
+      dir = repo;
+    } else {
+      dir = trim(dir_path, "/").split("/").pop();
+    }
+
+    if (branch) {
+      branch = `--single-branch --branch ${branch}`;
+    }
+
+    await command(
+      `gh repo clone ${repo_uri} "${dir_path}" -- ${branch} --recursive`,
+    );
+
+    cd(dir_path);
+
+    if (!keep_origin) {
+      await command(`git remote rename origin ${N_parent}`);
+    }
+
+    if (!keep_branch) {
+      await command(`git branch -m master ${N_parent}`);
+      await command(`git checkout -b master`);
+    }
+
+    if (create_remote) {
+      let remote = "";
+      if (typeof create_remote === "string") {
+        remote = create_remote;
       }
-
-      if (branch) {
-        branch = `--single-branch --branch ${branch}`;
-      }
-
-      await command(`gh repo clone ${repo_uri} "${dir_path}" -- ${branch} --recursive`);
-
-      cd(dir_path);
-
-      if (!keep_origin) {
-        await command(`git remote rename origin ${N_parent}`);
-      }
-
-      if (!keep_branch) {
-        await command(`git branch -m master ${N_parent}`);
-        await command(`git checkout -b master`);
-      }
-
-      if (create_remote) {
-        let remote = '';
-        if (typeof create_remote === 'string') {
-          remote = create_remote;
-        }
-        await command(`gh repo create ${remote}`);
-      }
-    },
-  }).argv;
+      await command(`gh repo create ${remote}`);
+    }
+  },
+}).argv;

@@ -1,39 +1,39 @@
 #!/usr/bin/env node
 
-const { command } = require('@mosteast/command')
+const { command } = require("@mosteast/command");
 
-require('yargs')
-  .command({
-    command: '$0 [remote] [branch]',
-    describe: 'Merge current branch with parent',
-    builder(argv) {
-      return argv
-        .positional('remote', {
-          type: 'string',
-          describe: 'Remote name',
-          default: 'parent',
-        })
-        .positional('branch', {
-          type: 'string',
-          describe: 'Remote branch',
-          default: 'master',
-        })
-        .options({
-          edit: {
-            type: 'boolean',
-            default: false,
-            describe: 'Edit merge commit or not',
-          },
-          force: {
-            type: 'boolean',
-            alias: 'f',
-            default: false,
-            describe: 'Add options: --allow-unrelated-histories',
-          },
-        })
-    },
-    async handler({ remote, branch, edit, force }) {
-      await command(`git pull ${remote} ${branch} ${edit ? '' : '--no-edit'} ${force ? '--allow-unrelated-histories' : ''}`)
-    },
-  })
-  .argv
+require("yargs").command({
+  command: "$0 [remote] [branch]",
+  describe: "Merge current branch with parent",
+  builder(argv) {
+    return argv
+      .positional("remote", {
+        type: "string",
+        describe: "Remote name",
+        default: "parent",
+      })
+      .positional("branch", {
+        type: "string",
+        describe: "Remote branch",
+        default: "master",
+      })
+      .options({
+        edit: {
+          type: "boolean",
+          default: false,
+          describe: "Edit merge commit or not",
+        },
+        force: {
+          type: "boolean",
+          alias: "f",
+          default: false,
+          describe: "Add options: --allow-unrelated-histories",
+        },
+      });
+  },
+  async handler({ remote, branch, edit, force }) {
+    await command(
+      `git pull ${remote} ${branch} ${edit ? "" : "--no-edit"} ${force ? "--allow-unrelated-histories" : ""}`,
+    );
+  },
+}).argv;
