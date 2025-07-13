@@ -182,7 +182,7 @@ if [ -n "$CHANNEL_URL" ]; then
     --match-filter "availability != 'needs_subscription'" \
     -o "$OUTPUT_DIR/%(playlist)s/%(n_entries+1-playlist_index)d.%(title)s.%(ext)s" \
     --cookies-from-browser chrome \
-    -N 7 \
+    -N 1 \
     $FORMAT_OPTS \
     $WRITE_SUBS_OPTS \
     --sub-langs "en,en-US,zh-Hans,zh-Hant,zh-CN,zh" \
@@ -191,8 +191,8 @@ if [ -n "$CHANNEL_URL" ]; then
     $( [ "$OVERWRITE" = true ] && echo "--force-overwrites" ) \
     --extractor-args youtubetab:skip=authcheck \
     --referer "$CHANNEL_URL" \
-    --sleep-interval 1 \
-    --max-sleep-interval 5 \
+    --sleep-interval 5 \
+    --max-sleep-interval 10 \
     --retries 10 \
     --file-access-retries 5 \
     --fragment-retries 5 \
@@ -214,7 +214,7 @@ elif [ -n "$PLAYLIST_URL" ]; then
     --match-filter "availability != 'needs_subscription'" \
     -o "$OUTPUT_DIR/%(playlist)s/%(playlist_index)s.%(title)s.%(ext)s" \
     --cookies-from-browser chrome \
-    -N 7 \
+    -N 1 \
     $FORMAT_OPTS \
     $WRITE_SUBS_OPTS \
     --sub-langs "en,en-US,zh-Hans,zh-Hant,zh-CN,zh" \
@@ -222,8 +222,8 @@ elif [ -n "$PLAYLIST_URL" ]; then
     $( [ "$OVERWRITE" != true ] && echo "--download-archive \"$ARCHIVE_FILE\"" ) \
     $( [ "$OVERWRITE" = true ] && echo "--force-overwrites" ) \
     --yes-playlist \
-    --sleep-interval 1 \
-    --max-sleep-interval 5 \
+    --sleep-interval 5 \
+    --max-sleep-interval 10 \
     --retries 10 \
     --file-access-retries 5 \
     --fragment-retries 5 \
@@ -246,15 +246,15 @@ else
         --match-filter "availability != 'needs_subscription'" \
         -o "$OUTPUT_DIR/%(uploader)s - Videos/%(title)s.%(ext)s" \
         --cookies-from-browser chrome \
-        -N 7 \
+        -N 1 \
         $FORMAT_OPTS \
         $WRITE_SUBS_OPTS \
         --sub-langs "en,en-US,zh-Hans,zh-Hant,zh-CN,zh" \
         --continue \
         $( [ "$OVERWRITE" != true ] && echo "--download-archive $ARCHIVE_FILE" ) \
         $( [ "$OVERWRITE" = true ] && echo "--force-overwrites" ) \
-        --sleep-interval 1 \
-        --max-sleep-interval 5 \
+        --sleep-interval 5 \
+        --max-sleep-interval 10 \
         --retries 10 \
         --file-access-retries 5 \
         --fragment-retries 5 \
