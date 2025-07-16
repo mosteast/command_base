@@ -1,6 +1,12 @@
 #!/bin/bash
 
-# Script to divide text files into n equal parts
+# chop - A utility script to divide text files into equal-sized chunks
+# 
+# This script can:
+#   1. Split text files into N equal parts or into chunks of specific line counts
+#   2. Process multiple files at once, including glob patterns
+#   3. Optionally combine split files afterward in sequence
+#
 # Usage examples:
 #   ./chop input1.txt input2.txt -p 3
 #   ./chop --input "*.txt" --parts 5
@@ -9,23 +15,27 @@
 #   ./chop --help
 
 # Default values
-input_files=()
-num_parts=2
-output_dir=""  # Will be set to input file directory
-output_suffix=".txt"
-lines_per_chunk=""  # New variable for lines per chunk
-input_directory=""  # New variable for directory input
+input_files=()         # Array to hold all input file paths
+num_parts=2            # Default number of parts to split into
+output_dir=""          # Will be set to input file directory by default
+output_suffix=".txt"   # Default suffix for split files
+combined_suffix=".txt" # Default suffix for combined files
+lines_per_chunk=""     # Lines per chunk (takes precedence over num_parts if specified)
+input_directory=""     # Directory to process all files from
+combine_mode=false     # Whether to combine split files after splitting
+cleanup_mode=true      # Whether to clean up temporary files after processing
 
-# Function to display usage
+# Function to display usage information and help
 usage() {
     echo "chop - A tool to divide text files into equal parts"
     echo
     echo "SYNOPSIS"
-    echo "    CMD [OPTIONS] [input_files...]"
+    echo "    chop [OPTIONS] [input_files...]"
     echo
     echo "DESCRIPTION"
     echo "    Splits one or more text files into equal-sized chunks, either by specifying"
     echo "    the number of parts or the number of lines per chunk."
+    echo "    Can optionally combine the split files afterward into new files with line limits."
     echo
     echo "ARGUMENTS"
     echo "    [input_files...]"
@@ -40,22 +50,36 @@ usage() {
     echo "    -i, --input FILES"
     echo "        Specify input files (space-separated or glob pattern)"
     echo "        Example: --input \"*.log\" or --input \"file1.txt file2.txt\""
+    echo "        For paths with spaces, use double quotes: --input \"/path/with spaces/*.txt\""
     echo
     echo "    -l, --lines NUM"
     echo "        Split files into chunks of NUM lines each"
     echo "        This option takes precedence over --part if both are specified"
+    echo "        When combining, this specifies the maximum lines per combined file"
     echo
     echo "    -p, --part NUM"
     echo "        Split files into NUM equal parts (default: 2)"
     echo "        Ignored if --lines is specified"
     echo
+    echo "    -c, --combine"
+    echo "        Enable combination mode - combines split files sequentially"
+    echo "        Always preserves original files by first splitting then combining"
+    echo
     echo "    -o, --output DIR"
-    echo "        Output directory for the chunks"
+    echo "        Output directory for the chunks and combined files"
     echo "        Default: same directory as each input file"
     echo
     echo "    -s, --suffix SUFFIX"
-    echo "        Suffix to append to output filenames (default: .txt)"
+    echo "        Suffix to append to output filenames for split files (default: .txt)"
     echo "        The final filename format will be: original_name.part_XX<suffix>"
+    echo
+    echo "    --suffix-combined SUFFIX"
+    echo "        Suffix to append to combined filenames (default: .txt)"
+    echo "        The final filename format will be: combined_XX<suffix>"
+    echo
+    echo "    --no-cleanup"
+    echo "        Disable automatic cleanup of temporary files (default: cleanup enabled)"
+    echo "        When enabled with --combine, part_XX files are removed after combination"
     echo
     echo "    -h, --help"
     echo "        Display this help message"
@@ -65,27 +89,40 @@ usage() {
     echo "    <original_filename>.part_XX<suffix>"
     echo "    where XX is a two-digit number starting from 01"
     echo
+    echo "    If combination mode is enabled, combined files will be named:"
+    echo "    combined_XX<combined_suffix>"
+    echo "    where XX is a two-digit number starting from 01"
+    echo
     echo "EXAMPLES"
     echo "    1. Split a single file into 3 parts:"
-    echo "       CMD input.txt -p 3"
+    echo "       chop input.txt -p 3"
     echo
     echo "    2. Split multiple files into chunks of 100 lines each:"
-    echo "       CMD file1.txt file2.txt -l 100"
+    echo "       chop file1.txt file2.txt -l 100"
     echo
     echo "    3. Process all log files in current directory into 5 parts each:"
-    echo "       CMD --input \"*.log\" --part 5"
+    echo "       chop --input \"*.log\" --part 5"
     echo
     echo "    4. Process all files in a directory:"
-    echo "       CMD --directory /path/to/files --part 3"
+    echo "       chop --directory /path/to/files --part 3"
     echo
     echo "    5. Split files with custom output directory and suffix:"
-    echo "       CMD -i \"data*.txt\" -p 4 -o ./chunks -s .dat"
+    echo "       chop -i \"data*.txt\" -p 4 -o ./chunks -s .dat"
     echo
     echo "    6. Mix positional and option arguments:"
-    echo "       CMD input1.txt -i \"data*.txt\" -l 50 -o ./output"
+    echo "       chop input1.txt -i \"data*.txt\" -l 50 -o ./output"
     echo
     echo "    7. Process all markdown files in a directory using glob pattern:"
-    echo "       CMD dir/*.md -p 3"
+    echo "       chop dir/*.md -p 3"
+    echo
+    echo "    8. Split files and then combine them with a line limit:"
+    echo "       chop -d ./files -c -l 1000 -o ./output"
+    echo
+    echo "    9. Split and combine with custom suffixes:"
+    echo "       chop -i \"*.txt\" -c -l 500 --suffix .split --suffix-combined .merged"
+    echo
+    echo "    10. Process paths with spaces:"
+    echo "        chop -i \"/path/with spaces/*.txt\" -c -l 1000"
     echo
     echo "NOTES"
     echo "    - When using --lines, the actual number of parts may vary per file"
@@ -93,10 +130,14 @@ usage() {
     echo "    - Non-existent files are skipped with a warning"
     echo "    - Output directories are created if they don't exist"
     echo "    - When using --directory, only regular files are processed (subdirectories are ignored)"
+    echo "    - When combining, files are first split and then combined in sequence"
+    echo "    - Original files are always preserved"
+    echo "    - For paths with spaces, use quotes and avoid escaping spaces with backslashes"
     exit 1
 }
 
-# Parse arguments
+# ===== ARGUMENT PARSING =====
+# Parse command-line arguments
 while [[ $# -gt 0 ]]; do
     key="$1"
     case $key in
@@ -105,10 +146,50 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --input|-i)
-            # Handle multiple files or glob patterns
-            for file in $2; do
-                input_files+=("$file")
-            done
+            # Process patterns and find matching files directly using find command
+            # This approach handles spaces in paths and avoids issues with bash glob expansion
+            pattern="$2"
+            echo "Searching for files matching pattern: $pattern"
+            
+            # Extract directory part and filename pattern from the given pattern
+            if [[ "$pattern" == *"/"* ]]; then
+                dir_part=$(dirname "$pattern")
+                file_part=$(basename "$pattern")
+            else
+                dir_part="."
+                file_part="$pattern"
+            fi
+            
+            # Check if directory exists
+            if [[ ! -d "$dir_part" ]]; then
+                echo "Warning: Directory '$dir_part' does not exist"
+                shift 2
+                continue
+            fi
+            
+            # Find files matching pattern
+            echo "Searching in directory: $dir_part"
+            echo "File pattern: $file_part"
+            
+            # Convert glob pattern to regex pattern for find's -regex option
+            # This is a simplified conversion that works for basic patterns
+            regex_pattern="${file_part//\*/.*}"
+            
+            # Use find command to get matching files
+            found_count=0
+            while IFS= read -r -d '' file; do
+                # Only add regular files, not directories
+                if [[ -f "$file" ]]; then
+                    input_files+=("$file")
+                    ((found_count++))
+                fi
+            done < <(find "$dir_part" -maxdepth 1 -type f -name "$file_part" -print0)
+            
+            if [[ $found_count -eq 0 ]]; then
+                echo "Warning: No files found matching pattern '$pattern'"
+            else
+                echo "Found $found_count file(s) matching pattern"
+            fi
             shift 2
             ;;
         --lines|-l)
@@ -119,6 +200,10 @@ while [[ $# -gt 0 ]]; do
             num_parts="$2"
             shift 2
             ;;
+        --combine|-c)
+            combine_mode=true
+            shift 1
+            ;;
         --output|-o)
             output_dir="$2"
             shift 2
@@ -127,35 +212,61 @@ while [[ $# -gt 0 ]]; do
             output_suffix="$2"
             shift 2
             ;;
+        --suffix-combined)
+            combined_suffix="$2"
+            shift 2
+            ;;
+        --no-cleanup)
+            cleanup_mode=false
+            shift 1
+            ;;
         --help|-h)
             usage
             ;;
         *)
             # Handle positional arguments and glob patterns
-            # Use bash's nullglob option temporarily to handle non-matching patterns
-            shopt -s nullglob
-            expanded_files=($1)
-            shopt -u nullglob
-            
-            if [[ ${#expanded_files[@]} -gt 0 ]]; then
-                # Glob pattern matched files
-                for file in "${expanded_files[@]}"; do
-                    if [[ -f "$file" ]]; then
-                        input_files+=("$file")
-                    fi
-                done
-            elif [[ -f "$1" ]]; then
-                # Single file that exists
+            # First check if it's a valid file
+            if [[ -f "$1" ]]; then
                 input_files+=("$1")
             else
-                # Pattern didn't match any files
-                echo "Warning: No files found matching pattern '$1'"
+                # It might be a glob pattern - use find similarly to the -i option
+                pattern="$1"
+                
+                # Extract directory part and filename pattern
+                if [[ "$pattern" == *"/"* ]]; then
+                    dir_part=$(dirname "$pattern")
+                    file_part=$(basename "$pattern")
+                else
+                    dir_part="."
+                    file_part="$pattern"
+                fi
+                
+                # Check if directory exists
+                if [[ ! -d "$dir_part" ]]; then
+                    echo "Warning: Directory '$dir_part' does not exist"
+                    shift
+                    continue
+                fi
+                
+                # Find files matching pattern
+                found_count=0
+                while IFS= read -r -d '' file; do
+                    if [[ -f "$file" ]]; then
+                        input_files+=("$file")
+                        ((found_count++))
+                    fi
+                done < <(find "$dir_part" -maxdepth 1 -type f -name "$file_part" -print0)
+                
+                if [[ $found_count -eq 0 ]]; then
+                    echo "Warning: No files found matching pattern '$pattern'"
+                fi
             fi
             shift
             ;;
     esac
 done
 
+# ===== DIRECTORY PROCESSING =====
 # Process directory input if specified
 if [[ -n "$input_directory" ]]; then
     if [[ ! -d "$input_directory" ]]; then
@@ -177,6 +288,13 @@ if [[ -n "$input_directory" ]]; then
         echo "Found $file_count files in directory '$input_directory'"
     fi
 fi
+
+# ===== VALIDATION =====
+# Debug: Show what files were found
+echo "Files to process:"
+for file in "${input_files[@]}"; do
+    echo "  - $file"
+done
 
 # Validate input files
 if [[ ${#input_files[@]} -eq 0 ]]; then
@@ -207,7 +325,14 @@ if [[ "$num_parts" -lt 1 ]]; then
     exit 1
 fi
 
-# Process each input file
+# Create output directory if it doesn't exist
+mkdir -p "$output_dir"
+
+# Array to collect all split files for potential later combination
+all_split_files=()
+
+# ===== FILE SPLITTING =====
+# First pass: Split all input files into parts
 for input_file in "${input_files[@]}"; do
     if [[ ! -f "$input_file" ]]; then
         echo "Warning: Input file '$input_file' does not exist, skipping..."
@@ -218,31 +343,32 @@ for input_file in "${input_files[@]}"; do
     
     # Set the output directory for this file
     current_output_dir="$output_dir"
-    if [[ -z "$current_output_dir" ]]; then
-        current_output_dir=$(dirname "$input_file")
-    fi
 
     # Get total number of lines in the input file
     total_lines=$(wc -l < "$input_file")
     echo "Total lines in $input_file: $total_lines"
 
-    # Calculate lines per part (rounding up)
+    # Calculate lines per part based on either:
+    # 1. Specified lines per chunk, or
+    # 2. Dividing total lines by number of parts (rounding up)
     if [[ -n "$lines_per_chunk" ]]; then
+        # If lines per chunk is specified, calculate how many parts we'll need
         current_num_parts=$(( (total_lines + lines_per_chunk - 1) / lines_per_chunk ))
         lines_per_part=$lines_per_chunk
     else
+        # Otherwise use the specified number of parts and calculate lines per part
         current_num_parts=$num_parts
         lines_per_part=$(( (total_lines + current_num_parts - 1) / current_num_parts ))
     fi
     echo "Dividing into $current_num_parts parts with approximately $lines_per_part lines each"
 
-    # Create output directory if it doesn't exist
-    mkdir -p "$current_output_dir"
-
-    # Split the file
+    # Split the file into parts
     current_line=1
     # Get the base filename without path
     base_filename=$(basename "$input_file")
+    
+    # Keep track of split parts for this file
+    file_split_parts=()
 
     for ((i=1; i<=current_num_parts; i++)); do
         # Calculate end line for this part
@@ -257,16 +383,20 @@ for input_file in "${input_files[@]}"; do
             fi
         fi
         
-        # Calculate number of lines to extract
+        # Calculate number of lines to extract for this part
         num_lines=$((end_line - current_line + 1))
         
-        # Create output file name with input filename + .part_XX + suffix
+        # Create output file name with format: original_name.part_XX.suffix
         output_file="$current_output_dir/${base_filename}.part_$(printf "%02d" $i)${output_suffix}"
         
-        # Extract lines from input file
+        # Extract lines from input file using tail+head for efficient line extraction
         if [[ $num_lines -gt 0 ]]; then
             tail -n +$current_line "$input_file" | head -n $num_lines > "$output_file"
             echo "Created $output_file with $num_lines lines"
+            
+            # Add to the list of split files for this file and overall
+            file_split_parts+=("$output_file")
+            all_split_files+=("$output_file")
         fi
         
         # Update current line for next iteration
@@ -278,8 +408,100 @@ for input_file in "${input_files[@]}"; do
         fi
     done
 
-    echo "Finished processing $input_file"
+    echo "Finished splitting $input_file"
     echo "----------------------------------------"
 done
 
+# ===== FILE COMBINATION =====
+# Second pass: Combine the split files if requested
+if [[ "$combine_mode" == true ]]; then
+    echo "Starting combination mode..."
+    
+    # If lines_per_chunk is not set, use a default value
+    if [[ -z "$lines_per_chunk" ]]; then
+        # Use a large value that will likely include all split files in one combined file
+        lines_per_chunk=1000000
+        echo "No line limit specified for combination, using default high value"
+    else
+        echo "Using line limit of $lines_per_chunk for combined files"
+    fi
+    
+    # Sort all split files by name for sequential processing
+    sorted_split_files=()
+    while IFS= read -r file; do
+        sorted_split_files+=("$file")
+    done < <(printf '%s\n' "${all_split_files[@]}" | sort)
+    
+    echo "Found ${#sorted_split_files[@]} split files to combine"
+    
+    # Count lines in each split file - use a temporary file for mapping
+    # This approach is more portable than associative arrays
+    tmp_file_lines=$(mktemp)
+    
+    # Build file:lines mapping in the temporary file
+    for file in "${sorted_split_files[@]}"; do
+        if [[ -f "$file" ]]; then
+            lines=$(wc -l < "$file")
+            echo "$file:$lines" >> "$tmp_file_lines"
+        else
+            echo "Warning: Split file '$file' does not exist, skipping..."
+            continue
+        fi
+    done
+    
+    # Perform combination - group files while respecting line limit
+    current_part=1
+    current_total_lines=0
+    current_batch=()
+    
+    for file in "${sorted_split_files[@]}"; do
+        # Get line count for this file from our temporary mapping
+        file_line_count=$(grep "^$file:" "$tmp_file_lines" | cut -d':' -f2)
+        
+        # Check if adding this file would exceed the line limit
+        if [[ $((current_total_lines + file_line_count)) -gt $lines_per_chunk ]] && [[ ${#current_batch[@]} -gt 0 ]]; then
+            # This file would exceed limit, create output from current batch
+            output_file="$output_dir/combined_$(printf "%02d" $current_part)${combined_suffix}"
+            echo "Creating $output_file with $current_total_lines lines from ${#current_batch[@]} files"
+            
+            # Concatenate files in the current batch
+            cat "${current_batch[@]}" > "$output_file"
+            
+            # Reset for next batch
+            current_part=$((current_part + 1))
+            current_total_lines=0
+            current_batch=()
+        fi
+        
+        # Add file to current batch
+        current_batch+=("$file")
+        current_total_lines=$((current_total_lines + file_line_count))
+    done
+    
+    # Process any remaining files in the last batch
+    if [[ ${#current_batch[@]} -gt 0 ]]; then
+        output_file="$output_dir/combined_$(printf "%02d" $current_part)${combined_suffix}"
+        echo "Creating $output_file with $current_total_lines lines from ${#current_batch[@]} files"
+        cat "${current_batch[@]}" > "$output_file"
+    fi
+    
+    # Clean up temporary file
+    rm -f "$tmp_file_lines"
+    
+    echo "Combination complete - Created $current_part combined files"
+    echo "----------------------------------------"
+fi
+
 echo "All files have been processed successfully" 
+
+# ===== CLEANUP =====
+if [[ "$combine_mode" == true ]] && [[ "$cleanup_mode" == true ]]; then
+    echo "Cleaning up temporary split files..."
+    for file in "${all_split_files[@]}"; do
+        if [[ -f "$file" ]]; then
+            rm -f "$file"
+            echo "Removed temporary file: $file"
+        fi
+    done
+    echo "Cleanup complete"
+fi 
