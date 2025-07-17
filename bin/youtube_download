@@ -3,7 +3,7 @@
 # Initialize variables
 CHANNEL_URL=""
 PLAYLIST_URL=""
-OUTPUT_DIR="~/Library/Mobile Documents/com~apple~CloudDocs/main/downie/YouTube/%(uploader)s"
+OUTPUT_DIR="~/Library/Mobile Documents/com~apple~CloudDocs/main/download/YouTube/%(uploader)s"
 VIDEO_URLS=()
 ONLY_AUDIO=false
 ONLY_SUBTITLE=false
@@ -31,6 +31,7 @@ show_usage() {
     echo "  -o, --output <dir>    Specify output directory"
     echo "  --only-audio         Download only audio files"
     echo "  --only-subtitle      Download only subtitle files"
+    echo "  --overwrite          Force overwrite existing files"
     echo "  --                    Pass additional options to yt-dlp"
     echo ""
     echo "Note: You must use exactly one input type (channel, playlist, or video URLs)"
@@ -187,7 +188,7 @@ if [ -n "$CHANNEL_URL" ]; then
     $WRITE_SUBS_OPTS \
     --sub-langs "en,en-US,zh-Hans,zh-Hant,zh-CN,zh" \
     --continue \
-    $( [ "$OVERWRITE" != true ] && echo "--download-archive \"$ARCHIVE_FILE\"" ) \
+    $( [ "$OVERWRITE" != true ] && echo "--download-archive \"$ARCHIVE_FILE\" --no-overwrites" ) \
     $( [ "$OVERWRITE" = true ] && echo "--force-overwrites" ) \
     --extractor-args youtubetab:skip=authcheck \
     --referer "$CHANNEL_URL" \
@@ -219,7 +220,7 @@ elif [ -n "$PLAYLIST_URL" ]; then
     $WRITE_SUBS_OPTS \
     --sub-langs "en,en-US,zh-Hans,zh-Hant,zh-CN,zh" \
     --continue \
-    $( [ "$OVERWRITE" != true ] && echo "--download-archive \"$ARCHIVE_FILE\"" ) \
+    $( [ "$OVERWRITE" != true ] && echo "--download-archive \"$ARCHIVE_FILE\" --no-overwrites" ) \
     $( [ "$OVERWRITE" = true ] && echo "--force-overwrites" ) \
     --yes-playlist \
     --sleep-interval 5 \
@@ -251,7 +252,7 @@ else
         $WRITE_SUBS_OPTS \
         --sub-langs "en,en-US,zh-Hans,zh-Hant,zh-CN,zh" \
         --continue \
-        $( [ "$OVERWRITE" != true ] && echo "--download-archive $ARCHIVE_FILE" ) \
+        $( [ "$OVERWRITE" != true ] && echo "--download-archive $ARCHIVE_FILE --no-overwrites" ) \
         $( [ "$OVERWRITE" = true ] && echo "--force-overwrites" ) \
         --sleep-interval 5 \
         --max-sleep-interval 10 \
