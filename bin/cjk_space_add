@@ -1,0 +1,128 @@
+#!/usr/bin/env node
+
+/**
+ * CMD - Add spaces between CJK characters and Latin letters/numbers in files
+ * 
+ * Usage:
+ *   CMD file1.md file2.md
+ *   CMD path/to/dir/*.md
+ *   CMD --look-around "[0-9]+" file1.md
+ *   
+ * Options:
+ *   --look-around, -l   Custom pattern to match characters around CJK (replaces [A-Za-z0-9])
+ */
+
+const fs = require('fs');
+const glob = require('glob');
+const path = require('path');
+
+// Unicode ranges for CJK:
+// - CJK Unified Ideographs: \u4E00-\u9FFF
+// - Hiragana: \u3040-\u309F
+// - Katakana: \u30A0-\u30FF
+// - Hangul Syllables: \uAC00-\uD7AF
+// - CJK Extensions: \u3400-\u4DBF
+const CJK_RANGE = '[\u4E00-\u9FFF\u3040-\u309F\u30A0-\u30FF\uAC00-\uD7AF\u3400-\u4DBF]';
+const DEFAULT_NON_CJK = '[A-Za-z0-9]';
+
+// Creates regex patterns based on the given non-CJK pattern or default
+function createPatterns(nonCjkPattern = DEFAULT_NON_CJK) {
+    return [
+        new RegExp(`(${CJK_RANGE})(${nonCjkPattern})`, 'g'),
+        new RegExp(`(${nonCjkPattern})(${CJK_RANGE})`, 'g')
+    ];
+}
+
+function addSpaces(text, nonCjkPattern) {
+    // Create patterns with the provided non-CJK pattern or default
+    const patterns = createPatterns(nonCjkPattern);
+
+    // Apply each pattern
+    return patterns.reduce((result, pattern) => {
+        return result.replace(pattern, '$1 $2');
+    }, text);
+}
+
+// Process each file
+function processFile(filePath, nonCjkPattern) {
+    try {
+        // Read the file
+        const content = fs.readFileSync(filePath, 'utf8');
+
+        // Process the content
+        const processedContent = addSpaces(content, nonCjkPattern);
+
+        // Write back to the file if content changed
+        if (content !== processedContent) {
+            fs.writeFileSync(filePath, processedContent, 'utf8');
+            console.log(`Processed: ${filePath}`);
+        } else {
+            console.log(`No changes needed: ${filePath}`);
+        }
+    } catch (err) {
+        console.error(`Error processing ${filePath}: ${err.message}`);
+    }
+}
+
+// Parse command line arguments
+function parseArgs(args) {
+    const options = { files: [], nonCjkPattern: DEFAULT_NON_CJK };
+    let i = 0;
+
+    while (i < args.length) {
+        const arg = args[i];
+
+        if (arg === '--look-around' || arg === '-l') {
+            if (i + 1 < args.length) {
+                try {
+                    // Test if the pattern is valid
+                    new RegExp(args[i + 1]);
+                    options.nonCjkPattern = args[i + 1];
+                    i += 2;
+                } catch (err) {
+                    console.error(`Invalid pattern: ${args[i + 1]}`);
+                    process.exit(1);
+                }
+            } else {
+                console.error('Missing pattern after --look-around option');
+                process.exit(1);
+            }
+        } else {
+            options.files.push(arg);
+            i++;
+        }
+    }
+
+    return options;
+}
+
+// Main function
+function main() {
+    const args = process.argv.slice(2);
+
+    if (args.length === 0) {
+        console.log('Usage: CMD <file_pattern>');
+        console.log('       CMD --look-around "[custom-pattern]" <file_pattern>');
+        console.log('Options:');
+        console.log('  --look-around, -l   Custom pattern to match characters around CJK (replaces [A-Za-z0-9])');
+        console.log('Example:');
+        console.log('  CMD --look-around "[0-9]+" file.md     # Only add spaces between CJK and numbers');
+        process.exit(1);
+    }
+
+    const options = parseArgs(args);
+
+    // Process each file pattern
+    options.files.forEach(pattern => {
+        // Use node's built-in path module for handling Windows/Unix paths
+        const files = glob.sync(pattern);
+
+        if (files.length === 0) {
+            console.log(`No files match pattern: ${pattern}`);
+        } else {
+            files.forEach(file => processFile(file, options.nonCjkPattern));
+        }
+    });
+}
+
+main(); 
