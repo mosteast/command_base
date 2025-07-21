@@ -1,0 +1,196 @@
+#!/usr/bin/env node
+
+const fs = require('fs');
+const path = require('path');
+const glob = require('glob');
+const minimist = require('minimist');
+
+// Parse command-line arguments
+const argv = minimist(process.argv.slice(2), {
+    boolean: ['desc', 'help', 'h'],
+    string: ['output', 'o', 'title', 't', 'extension', 'e'],
+    alias: {
+        o: 'output',
+        h: 'help',
+        t: 'title',
+        e: 'extension'
+    },
+    default: {
+        extension: '.build.md'
+    }
+});
+
+// Helper function to convert absolute paths to relative paths (relative to current working directory)
+function toRelativePath(absolutePath) {
+    return path.relative(process.cwd(), absolutePath);
+}
+
+// Show help information
+if (argv.help || argv._.length === 0) {
+    console.log('Usage:');
+    console.log('  markdown_concat [options] <files...>');
+    console.log('');
+    console.log('Description:');
+    console.log('  Concatenates multiple markdown files into a single file and lowers all heading levels by 1.');
+    console.log('');
+    console.log('Options:');
+    console.log('  --desc              Sort files in descending order');
+    console.log('  -o, --output FILE   Output file path');
+    console.log('  -t, --title TITLE   Set title for the combined file (H1 heading)');
+    console.log('  -e, --extension EXT Set output file extension (default: .build.md)');
+    console.log('  -h, --help          Show this help text');
+    console.log('');
+    console.log('Examples:');
+    console.log('  # Concatenate all markdown files in a directory, sorted by name ascending');
+    console.log('  markdown_concat docs/*.md');
+    console.log('');
+    console.log('  # Concatenate files in descending order');
+    console.log('  markdown_concat --desc *.md');
+    console.log('');
+    console.log('  # Concatenate specific files in the given order');
+    console.log('  markdown_concat intro.md chapter1.md chapter2.md conclusion.md');
+    console.log('');
+    console.log('  # Specify custom output filename');
+    console.log('  markdown_concat -o combined.md part1.md part2.md');
+    console.log('');
+    console.log('  # Set a custom title for the combined file');
+    console.log('  markdown_concat -t "Project Documentation" docs/*.md');
+    console.log('');
+    console.log('  # Use custom extension for the output file');
+    console.log('  markdown_concat -e .final.md docs/*.md');
+    console.log('');
+    console.log('  # Recursive pattern matching');
+    console.log('  markdown_concat "docs/**/*.md"');
+
+    if (argv._.length === 0) {
+        console.error('\nError: No input files specified');
+        process.exit(1);
+    } else {
+        process.exit(0);
+    }
+}
+
+// Normalize extension (ensure it starts with a dot)
+if (argv.extension && !argv.extension.startsWith('.')) {
+    argv.extension = '.' + argv.extension;
+}
+
+// Expand glob patterns and collect all file paths
+const filePaths = [];
+argv._.forEach(pattern => {
+    // Check if the pattern is a glob pattern
+    if (typeof pattern === 'string' && pattern.includes('*')) {
+        const matches = glob.sync(pattern);
+        matches.forEach(match => filePaths.push(match));
+    } else if (typeof pattern === 'string') {
+        filePaths.push(pattern);
+    }
+});
+
+// Filter out non-markdown files
+const markdownFiles = filePaths.filter(file => {
+    return typeof file === 'string' && file.toLowerCase().endsWith('.md');
+});
+
+if (markdownFiles.length === 0) {
+    console.error('Error: No markdown files found');
+    process.exit(1);
+}
+
+// Improved natural sort function for filenames
+function naturalSort(a, b) {
+    // Extract just the filename part without path
+    const aName = path.basename(String(a));
+    const bName = path.basename(String(b));
+
+    return aName.localeCompare(bName, undefined, {
+        numeric: true,
+        sensitivity: 'base'
+    });
+}
+
+// Sort files based on the sorting flag using natural sort
+if (argv.desc) {
+    markdownFiles.sort((a, b) => naturalSort(b, a));
+} else {
+    markdownFiles.sort(naturalSort);
+}
+
+// Log the sorted files order
+console.log('Files will be processed in this order:');
+markdownFiles.forEach((file, index) => {
+    console.log(`${index + 1}. ${toRelativePath(file)}`);
+});
+console.log('');
+
+// Determine output file path
+let outputPath;
+if (argv.output) {
+    outputPath = argv.output;
+} else {
+    // Default: output to the same directory as the last file segment
+    const lastFilePath = markdownFiles[markdownFiles.length - 1];
+    const dirPath = path.dirname(path.resolve(lastFilePath));
+    const dirName = path.basename(dirPath);
+
+    // Use the specified extension (or default .build.md)
+    const extension = argv.extension || '.build.md';
+    outputPath = path.join(dirPath, `${dirName}${extension}`);
+}
+
+// Resolve output path to absolute path if it's not already
+if (!path.isAbsolute(outputPath)) {
+    outputPath = path.resolve(process.cwd(), outputPath);
+}
+
+// Determine title (H1 heading)
+let title;
+if (argv.title) {
+    title = argv.title;
+} else {
+    // Default: use parent directory name of the last file segment
+    const lastFilePath = markdownFiles[markdownFiles.length - 1];
+    const parentDir = path.dirname(path.resolve(lastFilePath));
+    title = path.basename(parentDir);
+}
+
+// Read and process each markdown file
+let combinedContent = '';
+let fileCount = 0;
+
+// Add the H1 title at the beginning
+combinedContent = `# ${title}\n\n`;
+
+markdownFiles.forEach(filePath => {
+    try {
+        console.log(`Processing: ${toRelativePath(filePath)}`);
+        const content = fs.readFileSync(filePath, 'utf8');
+
+        // Lower all heading levels by adding one # to each heading
+        const processedContent = content.replace(/^(#{1,6})\s+/gm, (match, hashes) => {
+            return `#${hashes} `;
+        });
+
+        // Add a separator between files (except for the first file)
+        if (fileCount > 0) {
+            combinedContent += '\n\n';
+        }
+
+        // Add the processed content to the combined content
+        combinedContent += processedContent;
+        fileCount++;
+    } catch (err) {
+        console.error(`Error processing file ${toRelativePath(filePath)}: ${err.message}`);
+    }
+});
+
+// Write the combined content to the output file
+try {
+    fs.writeFileSync(outputPath, combinedContent);
+    console.log(`Successfully concatenated ${fileCount} files.`);
+    console.log(`Output:\n${toRelativePath(outputPath)}`);
+    console.log(`Title: "${title}"`);
+} catch (err) {
+    console.error(`Error writing to output file ${toRelativePath(outputPath)}: ${err.message}`);
+    process.exit(1);
+} 

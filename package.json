@@ -26,8 +26,10 @@
     "@types/shelljs": "^0.8.6",
     "@types/yargs": "^15.0.3",
     "fs-extra": "^8.1.0",
+    "glob": "^11.0.3",
     "inquirer": "^7.0.4",
     "lodash": "^4.17.15",
+    "minimist": "^1.2.8",
     "shelljs": "^0.8.3",
     "yargs": "^15.1.0"
   },
