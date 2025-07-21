@@ -188,7 +188,7 @@ if [ -n "$CHANNEL_URL" ]; then
     $WRITE_SUBS_OPTS \
     --sub-langs "en,en-US,zh-Hans,zh-Hant,zh-CN,zh" \
     --continue \
-    $( [ "$OVERWRITE" != true ] && echo "--download-archive \"$ARCHIVE_FILE\" --no-overwrites" ) \
+    $( [ "$OVERWRITE" != true ] && echo "--download-archive $ARCHIVE_FILE --no-overwrites" ) \
     $( [ "$OVERWRITE" = true ] && echo "--force-overwrites" ) \
     --extractor-args youtubetab:skip=authcheck \
     --referer "$CHANNEL_URL" \
@@ -220,7 +220,7 @@ elif [ -n "$PLAYLIST_URL" ]; then
     $WRITE_SUBS_OPTS \
     --sub-langs "en,en-US,zh-Hans,zh-Hant,zh-CN,zh" \
     --continue \
-    $( [ "$OVERWRITE" != true ] && echo "--download-archive \"$ARCHIVE_FILE\" --no-overwrites" ) \
+    $( [ "$OVERWRITE" != true ] && echo "--download-archive $ARCHIVE_FILE --no-overwrites" ) \
     $( [ "$OVERWRITE" = true ] && echo "--force-overwrites" ) \
     --yes-playlist \
     --sleep-interval 5 \
