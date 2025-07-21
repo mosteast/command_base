@@ -1,0 +1,84 @@
+#!/bin/bash
+
+# Usage function
+usage() {
+  echo "Usage: CMD [--out|-o OUTPUT_DIR] FILES..."
+  echo "  Process files with npx pangu, replacing content by default"
+  echo "  --out, -o  Specify output directory instead of replacing files"
+  exit 1
+}
+
+# Parse arguments
+OUTPUT_DIR=""
+FILES=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --out|-o)
+      if [[ -z "$2" || "$2" == --* ]]; then
+        echo "Error: --out requires a directory"
+        usage
+      fi
+      OUTPUT_DIR="$2"
+      shift 2
+      ;;
+    --help|-h)
+      usage
+      ;;
+    -*)
+      echo "Error: Unknown option $1"
+      usage
+      ;;
+    *)
+      FILES+=("$1")
+      shift
+      ;;
+  esac
+done
+
+# Check if any files specified
+if [[ ${#FILES[@]} -eq 0 ]]; then
+  echo "Error: No files specified"
+  usage
+fi
+
+# Create output directory if specified and doesn't exist
+if [[ -n "$OUTPUT_DIR" && ! -d "$OUTPUT_DIR" ]]; then
+  mkdir -p "$OUTPUT_DIR" || { echo "Error: Could not create output directory $OUTPUT_DIR"; exit 1; }
+fi
+
+# Process each file
+process_count=0
+for pattern in "${FILES[@]}"; do
+  # Expand glob pattern
+  for file in $pattern; do
+    if [[ ! -f "$file" ]]; then
+      echo "Warning: Skipping $file (not a regular file)"
+      continue
+    fi
+    
+    echo "Processing $file..."
+    
+    # Use pangu to process the file
+    if [[ -n "$OUTPUT_DIR" ]]; then
+      # Get filename without path
+      filename=$(basename "$file")
+      output_file="$OUTPUT_DIR/$filename"
+      npx pangu -f "$file" > "$output_file" || { echo "Error processing $file"; continue; }
+      echo "Output written to $output_file"
+    else
+      # Replace the file (in-place)
+      tmpfile=$(mktemp)
+      npx pangu -f "$file" > "$tmpfile" && mv "$tmpfile" "$file" || {
+        echo "Error processing $file"
+        rm -f "$tmpfile"
+        continue
+      }
+      echo "File $file updated in place"
+    fi
+    
+    process_count=$((process_count + 1))
+  done
+done
+
+echo "Done! Processed $process_count file(s)"
