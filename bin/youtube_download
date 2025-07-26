@@ -168,6 +168,10 @@ else
     WRITE_SUBS_OPTS="--write-subs --write-auto-subs"
 fi
 
+# Define match filter that allows Rumble videos to bypass subscription check
+# For Rumble videos - no filter, for other extractors - check for subscription requirement
+MATCH_FILTER="extractor!='Rumble' & extractor!='RumbleEmbed' & availability!='needs_subscription' | extractor='Rumble' | extractor='RumbleEmbed'"
+
 # Handle channel URL mode
 if [ -n "$CHANNEL_URL" ]; then
     # Convert @channel URL to channel/videos URL format
@@ -180,7 +184,6 @@ if [ -n "$CHANNEL_URL" ]; then
 
     yt-dlp --playlist-reverse \
     $EMBED_SUBS_OPTS \
-    --match-filter "availability != 'needs_subscription'" \
     -o "$OUTPUT_DIR/%(playlist)s/%(n_entries+1-playlist_index)d.%(title)s.%(ext)s" \
     --cookies-from-browser chrome \
     -N 1 \
@@ -212,7 +215,7 @@ elif [ -n "$PLAYLIST_URL" ]; then
 
     yt-dlp --playlist-reverse \
     $EMBED_SUBS_OPTS \
-    --match-filter "availability != 'needs_subscription'" \
+    --match-filter "$MATCH_FILTER" \
     -o "$OUTPUT_DIR/%(playlist)s/%(playlist_index)s.%(title)s.%(ext)s" \
     --cookies-from-browser chrome \
     -N 1 \
@@ -244,7 +247,7 @@ else
         [ "$OVERWRITE" != true ] && touch "$ARCHIVE_FILE"
 
         yt-dlp $EMBED_SUBS_OPTS \
-        --match-filter "availability != 'needs_subscription'" \
+        --match-filter "$MATCH_FILTER" \
         -o "$OUTPUT_DIR/%(uploader)s - Videos/%(title)s.%(ext)s" \
         --cookies-from-browser chrome \
         -N 1 \
