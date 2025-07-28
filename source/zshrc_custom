@@ -64,3 +64,5 @@ unset no_proxy
 unset http_proxy
 unset https_proxy
 '
+
+alias typora="/Applications/Typora.app/Contents/MacOS/Typora"
