@@ -215,7 +215,6 @@ elif [ -n "$PLAYLIST_URL" ]; then
 
     yt-dlp --playlist-reverse \
     $EMBED_SUBS_OPTS \
-    --match-filter "$MATCH_FILTER" \
     -o "$OUTPUT_DIR/%(playlist)s/%(playlist_index)s.%(title)s.%(ext)s" \
     --cookies-from-browser chrome \
     -N 1 \
@@ -247,7 +246,6 @@ else
         [ "$OVERWRITE" != true ] && touch "$ARCHIVE_FILE"
 
         yt-dlp $EMBED_SUBS_OPTS \
-        --match-filter "$MATCH_FILTER" \
         -o "$OUTPUT_DIR/%(uploader)s - Videos/%(title)s.%(ext)s" \
         --cookies-from-browser chrome \
         -N 1 \
