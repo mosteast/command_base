@@ -140,9 +140,9 @@ elif [ $INPUT_COUNT -gt 1 ]; then
     echo "  - One or more video URLs"
     echo ""
     echo "Current inputs:"
-    [ -n "$CHANNEL_URL" ] && echo "  Channel URL: $CHANNEL_URL"
-    [ -n "$PLAYLIST_URL" ] && echo "  Playlist URL: $PLAYLIST_URL"
-    [ ${#VIDEO_URLS[@]} -gt 0 ] && echo "  Video URLs: ${VIDEO_URLS[*]}"
+    [ -n "$CHANNEL_URL" ] && echo "  Channel URL: '$CHANNEL_URL'"
+    [ -n "$PLAYLIST_URL" ] && echo "  Playlist URL: '$PLAYLIST_URL'"
+    [ ${#VIDEO_URLS[@]} -gt 0 ] && echo "  Video URLs: '${VIDEO_URLS[*]}'"
     exit 1
 fi
 
