@@ -265,6 +265,7 @@ else
         --add-header "Accept-Encoding:gzip, deflate" \
         --add-header "Accept-Charset:ISO-8859-1,utf-8;q=0.7,*;q=0.7" \
         --add-header "User-Agent:Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36" \
+        $EXTRA_OPTS \
         "$url"
     done
 fi
