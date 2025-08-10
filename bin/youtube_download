@@ -197,8 +197,8 @@ if [ -n "$CHANNEL_URL" ]; then
     $( [ "$OVERWRITE" = true ] && echo "--force-overwrites" ) \
     --extractor-args youtubetab:skip=authcheck \
     --referer "$CHANNEL_URL" \
-    --sleep-interval 5 \
-    --max-sleep-interval 10 \
+    --sleep-interval 1 \
+    --max-sleep-interval 3 \
     --retries 10 \
     --file-access-retries 5 \
     --fragment-retries 5 \
@@ -229,8 +229,8 @@ elif [ -n "$PLAYLIST_URL" ]; then
     $( [ "$OVERWRITE" != true ] && echo "--download-archive $ARCHIVE_FILE --no-overwrites" ) \
     $( [ "$OVERWRITE" = true ] && echo "--force-overwrites" ) \
     --yes-playlist \
-    --sleep-interval 5 \
-    --max-sleep-interval 10 \
+    --sleep-interval 1 \
+    --max-sleep-interval 3 \
     --retries 10 \
     --file-access-retries 5 \
     --fragment-retries 5 \
@@ -261,8 +261,8 @@ else
         --continue \
         $( [ "$OVERWRITE" != true ] && echo "--download-archive $ARCHIVE_FILE --no-overwrites" ) \
         $( [ "$OVERWRITE" = true ] && echo "--force-overwrites" ) \
-        --sleep-interval 5 \
-        --max-sleep-interval 10 \
+        --sleep-interval 1 \
+        --max-sleep-interval 3 \
         --retries 10 \
         --file-access-retries 5 \
         --fragment-retries 5 \

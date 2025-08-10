@@ -1,0 +1,79 @@
+#!/usr/bin/env node
+
+const fs = require('fs');
+const path = require('path');
+const glob = require('glob');
+const { vttToPlainText } = require('vtt-to-text');
+
+function showUsage(exitCode = 0) {
+    const cmd = path.basename(process.argv[1] || 'vtt2txt');
+    console.log('Usage:');
+    console.log(`  ${cmd} <patterns...>`);
+    console.log('Example:');
+    console.log('  vtt2txt a/b/*.vtt c/d/*.vtt');
+    process.exit(exitCode);
+}
+
+const args = process.argv.slice(2);
+if (args.length === 0 || args.includes('--help') || args.includes('-h')) {
+    showUsage(args.length === 0 ? 1 : 0);
+}
+
+function normalizeAndDedupe(text) {
+    // Split to lines, trim, remove empties
+    const lines = text
+        .replace(/\r\n/g, '\n')
+        .replace(/\r/g, '\n')
+        .split('\n')
+        .map((l) => l.trim())
+        .filter((l) => l.length > 0)
+        // Filter out common WebVTT metadata that may slip through
+        .filter((l) => !/^WEBVTT\b/i.test(l) && !/^Kind:/i.test(l) && !/^Language:/i.test(l));
+
+    // Deduplicate consecutive identical lines only (preserve legitimate repeats later)
+    const deduped = [];
+    for (const l of lines) {
+        if (deduped.length === 0 || deduped[deduped.length - 1] !== l) {
+            deduped.push(l);
+        }
+    }
+    return deduped.join('\n');
+}
+
+function convertFile(filePath) {
+    const src = path.resolve(filePath);
+    const ext = path.extname(src);
+    const out = src.slice(0, -ext.length) + '.txt';
+
+    try {
+        const content = fs.readFileSync(src, 'utf8');
+        // Convert via robust parser that handles inline timestamps/tags
+        const plain = vttToPlainText(content);
+        const finalText = normalizeAndDedupe(plain);
+        fs.writeFileSync(out, finalText, 'utf8');
+        console.log(`Converted: ${src} -> ${out}`);
+        return true;
+    } catch (err) {
+        console.error(`Error processing ${src}: ${err.message}`);
+        return false;
+    }
+}
+
+let totalPatterns = 0;
+let totalFiles = 0;
+let converted = 0;
+
+for (const pattern of args) {
+    totalPatterns++;
+    const matches = glob.sync(pattern, { nodir: true, nocase: true });
+    if (matches.length === 0) {
+        console.log(`No files match pattern: ${pattern}`);
+        continue;
+    }
+    for (const filePath of matches) {
+        totalFiles++;
+        if (convertFile(filePath)) converted++;
+    }
+}
+
+console.log(`Done. Processed ${totalFiles} file(s) from ${totalPatterns} pattern(s). Converted: ${converted}.`); 
