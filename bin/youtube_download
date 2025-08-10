@@ -187,9 +187,11 @@ if [ -n "$CHANNEL_URL" ]; then
     -o "$OUTPUT_DIR/%(playlist)s/%(n_entries+1-playlist_index)d.%(title)s.%(ext)s" \
     --cookies-from-browser chrome \
     -N 1 \
+    -i \
     $FORMAT_OPTS \
     $WRITE_SUBS_OPTS \
     --sub-langs "en,en-US,zh-Hans,zh-Hant,zh-CN,zh" \
+    --sleep-subtitles 1 \
     --continue \
     $( [ "$OVERWRITE" != true ] && echo "--download-archive $ARCHIVE_FILE --no-overwrites" ) \
     $( [ "$OVERWRITE" = true ] && echo "--force-overwrites" ) \
@@ -218,9 +220,11 @@ elif [ -n "$PLAYLIST_URL" ]; then
     -o "$OUTPUT_DIR/%(playlist)s/%(playlist_index)s.%(title)s.%(ext)s" \
     --cookies-from-browser chrome \
     -N 1 \
+    -i \
     $FORMAT_OPTS \
     $WRITE_SUBS_OPTS \
     --sub-langs "en,en-US,en-GB,zh-Hans,zh-Hant,zh-CN,zh" \
+    --sleep-subtitles 1 \
     --continue \
     $( [ "$OVERWRITE" != true ] && echo "--download-archive $ARCHIVE_FILE --no-overwrites" ) \
     $( [ "$OVERWRITE" = true ] && echo "--force-overwrites" ) \
@@ -249,9 +253,11 @@ else
         -o "$OUTPUT_DIR/%(uploader)s - Videos/%(title)s.%(ext)s" \
         --cookies-from-browser chrome \
         -N 1 \
+        -i \
         $FORMAT_OPTS \
         $WRITE_SUBS_OPTS \
         --sub-langs "en,en-US,zh-Hans,zh-Hant,zh-CN,zh" \
+        --sleep-subtitles 1 \
         --continue \
         $( [ "$OVERWRITE" != true ] && echo "--download-archive $ARCHIVE_FILE --no-overwrites" ) \
         $( [ "$OVERWRITE" = true ] && echo "--force-overwrites" ) \
