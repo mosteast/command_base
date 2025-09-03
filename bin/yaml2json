@@ -1,138 +1,170 @@
 #!/usr/bin/env node
 
-const fs = require('fs');
-const path = require('path');
-const glob = require('glob');
-const minimist = require('minimist');
-const YAML = require('yaml');
+const fs = require("fs");
+const path = require("path");
+const glob = require("glob");
+const minimist = require("minimist");
+const YAML = require("yaml");
 
 function show_usage(exit_code = 0) {
-    const cmd = path.basename(process.argv[1] || 'yaml2json');
-    console.log('Usage:');
-    console.log(`  ${cmd} <patterns...> [-o|--out <dir>] [-e|--extension <ext>] [--space N|--minify] [--force]`);
-    console.log(`  printf 'a: 1\nb: [2, 3]\n' | ${cmd}`);
-    console.log('');
-    console.log('Options:');
-    console.log('  -o, --out DIR          Output directory (defaults to source dir)');
-    console.log('  -e, --extension EXT    Output extension (default: .json)');
-    console.log('  --space, -s N          Indentation spaces for pretty JSON (default: 2)');
-    console.log('  --minify               Minify JSON (overrides --space)');
-    console.log('  --force, -F            Overwrite when output exists');
-    console.log('  -h, --help             Show this help');
-    process.exit(exit_code);
+  const cmd = path.basename(process.argv[1] || "yaml2json");
+  console.log("Usage:");
+  console.log(
+    `  ${cmd} <patterns...> [-o|--out <dir>] [-e|--extension <ext>] [--space N|--minify] [--force]`,
+  );
+  console.log(`  printf 'a: 1\nb: [2, 3]\n' | ${cmd}`);
+  console.log("");
+  console.log("Options:");
+  console.log(
+    "  -o, --out DIR          Output directory (defaults to source dir)",
+  );
+  console.log("  -e, --extension EXT    Output extension (default: .json)");
+  console.log(
+    "  --space, -s N  „        Indentation spaces for pretty JSON (default: 2)",
+  );
+  console.log("  --minify               Minify JSON (overrides --space)");
+  console.log("  --force, -F            Overwrite when output exists");
+  console.log("  -h, --help             Show this help");
+  process.exit(exit_code);
 }
 
 function normalize_extension(ext, fallback) {
-    if (!ext) return fallback;
-    return ext.startsWith('.') ? ext : `.${ext}`;
+  if (!ext) return fallback;
+  return ext.startsWith(".") ? ext : `.${ext}`;
 }
 
 function read_stdin() {
-    return new Promise((resolve, reject) => {
-        let data = '';
-        process.stdin.setEncoding('utf8');
-        process.stdin.on('data', (chunk) => (data += chunk));
-        process.stdin.on('end', () => resolve(data));
-        process.stdin.on('error', (err) => reject(err));
-    });
+  return new Promise((resolve, reject) => {
+    let data = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (chunk) => (data += chunk));
+    process.stdin.on("end", () => resolve(data));
+    process.stdin.on("error", (err) => reject(err));
+  });
 }
 
 function convert_yaml_text_to_json(yaml_text, space) {
-    const text = yaml_text && yaml_text.charCodeAt(0) === 0xfeff ? yaml_text.slice(1) : yaml_text;
-    const obj = YAML.parse(text);
-    return JSON.stringify(obj, null, space);
+  const text =
+    yaml_text && yaml_text.charCodeAt(0) === 0xfeff
+      ? yaml_text.slice(1)
+      : yaml_text;
+  const obj = YAML.parse(text);
+  return JSON.stringify(obj, null, space);
 }
 
 async function main() {
-    const argv = minimist(process.argv.slice(2), {
-        boolean: ['help', 'h', 'minify', 'force', 'F'],
-        string: ['out', 'o', 'extension', 'e', 'space', 's'],
-        alias: { o: 'out', e: 'extension', h: 'help', s: 'space', F: 'force' },
-    });
+  const argv = minimist(process.argv.slice(2), {
+    boolean: ["help", "h", "minify", "force", "F"],
+    string: ["out", "o", "extension", "e", "space", "s"],
+    alias: { o: "out", e: "extension", h: "help", s: "space", F: "force" },
+  });
 
-    if (argv.help) show_usage(0);
+  if (argv.help) show_usage(0);
 
-    const patterns = argv._ || [];
-    const stdin_mode = patterns.length === 0 || (patterns.length === 1 && patterns[0] === '-');
-    const output_extension = normalize_extension(argv.extension || argv.e, '.json');
-    const output_dir_cli = argv.out || argv.o || '';
-    const force_overwrite = Boolean(argv.force || argv.F);
+  const patterns = argv._ || [];
+  const stdin_mode =
+    patterns.length === 0 || (patterns.length === 1 && patterns[0] === "-");
+  const output_extension = normalize_extension(
+    argv.extension || argv.e,
+    ".json",
+  );
+  const output_dir_cli = argv.out || argv.o || "";
+  const force_overwrite = Boolean(argv.force || argv.F);
 
-    let space = 2;
-    if (argv.minify) space = 0;
-    else if (argv.space || argv.s) {
-        const n = Number(argv.space || argv.s);
-        if (Number.isFinite(n) && n >= 0 && n <= 10) space = n;
-    }
+  let space = 2;
+  if (argv.minify) space = 0;
+  else if (argv.space || argv.s) {
+    const n = Number(argv.space || argv.s);
+    if (Number.isFinite(n) && n >= 0 && n <= 10) space = n;
+  }
 
-    if (stdin_mode) {
-        try {
-            const input = await read_stdin();
-            if (!input || input.trim() === '') {
-                show_usage(1);
-            }
-            const json_text = convert_yaml_text_to_json(input, space);
-            process.stdout.write(json_text + (json_text.endsWith('\n') ? '' : '\n'));
-            return;
-        } catch (err) {
-            console.error(`Failed to convert from STDIN: ${err.message}`);
-            process.exit(1);
-        }
-    }
-
-    const files = [];
-    for (const pattern of patterns) {
-        const matches = glob.sync(pattern, { nodir: true, nocase: false });
-        if (matches.length > 0) {
-            for (const m of matches) files.push(m);
-        } else {
-            files.push(pattern);
-        }
-    }
-
-    if (files.length === 0) {
-        console.error('Error: No input files found.');
+  if (stdin_mode) {
+    try {
+      const input = await read_stdin();
+      if (!input || input.trim() === "") {
         show_usage(1);
+      }
+      const json_text = convert_yaml_text_to_json(input, space);
+      process.stdout.write(json_text + (json_text.endsWith("\n") ? "" : "\n"));
+      return;
+    } catch (err) {
+      console.error(`Failed to convert from STDIN: ${err.message}`);
+      process.exit(1);
+    }
+  }
+
+  const files = [];
+  for (const pattern of patterns) {
+    const matches = glob.sync(pattern, { nodir: true, nocase: false });
+    if (matches.length > 0) {
+      for (const m of matches) files.push(m);
+    } else {
+      files.push(pattern);
+    }
+  }
+
+  if (files.length === 0) {
+    console.error("Error: No input files found.");
+    show_usage(1);
+  }
+
+  let converted_count = 0;
+  let failed_count = 0;
+
+  for (const file_path of files) {
+    let absolute_input_path = path.resolve(file_path);
+
+    if (
+      !fs.existsSync(absolute_input_path) ||
+      !fs.statSync(absolute_input_path).isFile()
+    ) {
+      console.error(`Skipping (not a file): ${file_path}`);
+      continue;
     }
 
-    let converted_count = 0;
-    let failed_count = 0;
+    const source_dir = path.dirname(absolute_input_path);
+    const base_name_without_ext = path.basename(
+      absolute_input_path,
+      path.extname(absolute_input_path),
+    );
 
-    for (const file_path of files) {
-        let absolute_input_path = path.resolve(file_path);
+    const output_directory = output_dir_cli
+      ? path.resolve(output_dir_cli)
+      : source_dir;
+    const output_path = path.join(
+      output_directory,
+      `${base_name_without_ext}${output_extension}`,
+    );
 
-        if (!fs.existsSync(absolute_input_path) || !fs.statSync(absolute_input_path).isFile()) {
-            console.error(`Skipping (not a file): ${file_path}`);
-            continue;
-        }
+    try {
+      if (output_dir_cli) fs.mkdirSync(output_directory, { recursive: true });
 
-        const source_dir = path.dirname(absolute_input_path);
-        const base_name_without_ext = path.basename(absolute_input_path, path.extname(absolute_input_path));
+      if (fs.existsSync(output_path) && !force_overwrite) {
+        console.log(
+          `Exists (skip): ${path.relative(process.cwd(), output_path)}`,
+        );
+        continue;
+      }
 
-        const output_directory = output_dir_cli ? path.resolve(output_dir_cli) : source_dir;
-        const output_path = path.join(output_directory, `${base_name_without_ext}${output_extension}`);
+      const input_text = fs.readFileSync(absolute_input_path, "utf8");
+      const json_text = convert_yaml_text_to_json(input_text, space);
+      fs.writeFileSync(
+        output_path,
+        json_text + (json_text.endsWith("\n") ? "" : "\n"),
+        "utf8",
+      );
 
-        try {
-            if (output_dir_cli) fs.mkdirSync(output_directory, { recursive: true });
-
-            if (fs.existsSync(output_path) && !force_overwrite) {
-                console.log(`Exists (skip): ${path.relative(process.cwd(), output_path)}`);
-                continue;
-            }
-
-            const input_text = fs.readFileSync(absolute_input_path, 'utf8');
-            const json_text = convert_yaml_text_to_json(input_text, space);
-            fs.writeFileSync(output_path, json_text + (json_text.endsWith('\n') ? '' : '\n'), 'utf8');
-
-            console.log(`Converted: ${path.relative(process.cwd(), absolute_input_path)} -> ${path.relative(process.cwd(), output_path)}`);
-            converted_count++;
-        } catch (err) {
-            console.error(`Error processing ${file_path}: ${err.message}`);
-            failed_count++;
-        }
+      console.log(
+        `Converted: ${path.relative(process.cwd(), absolute_input_path)} -> ${path.relative(process.cwd(), output_path)}`,
+      );
+      converted_count++;
+    } catch (err) {
+      console.error(`Error processing ${file_path}: ${err.message}`);
+      failed_count++;
     }
+  }
 
-    console.log(`Done. Converted: ${converted_count}. Failed: ${failed_count}.`);
+  console.log(`Done. Converted: ${converted_count}. Failed: ${failed_count}.`);
 }
 
-main(); 
+main();
