@@ -1,0 +1,116 @@
+#!/usr/bin/env node
+
+const path = require("path");
+const minimist = require("minimist");
+
+const { compressVideo } = require("../lib/live_media/compress_video");
+
+function showHelp() {
+  const cmd = path.basename(process.argv[1] || "videos_compress_for_web");
+  console.log("Usage:");
+  console.log(`  ${cmd} <video-file> [options]`);
+  console.log("");
+  console.log("Options:");
+  console.log(
+    "  -o, --output PATH        Output video path (default: <name>.compressed.mp4)",
+  );
+  console.log("      --crf VALUE          Constant Rate Factor (default: 23)");
+  console.log(
+    "      --preset NAME        x264 preset (ultrafast...placebo, default: medium)",
+  );
+  console.log("      --audio-bitrate RATE Audio bitrate (default: 128k)");
+  console.log("      --video-codec NAME   Video codec (default: libx264)");
+  console.log("      --audio-codec NAME   Audio codec (default: aac)");
+  console.log("      --pix-format NAME    Pixel format (default: yuv420p)");
+  console.log(
+    "      --max-height PIXELS  Downscale height if larger (default: 1080)",
+  );
+  console.log(
+    "      --keep-resolution    Disable scaling (keep original resolution)",
+  );
+  console.log(
+    "      --tune NAME          Optional tuning (film, animation, etc.)",
+  );
+  console.log("      --extra ARG          Additional ffmpeg args (repeatable)");
+  console.log("      --ffmpeg PATH        Path to ffmpeg executable");
+  console.log("      --force              Overwrite existing output");
+  console.log("  -h, --help               Show this help message");
+  console.log("");
+  console.log("Example:");
+  console.log(`  ${cmd} input.mp4 --crf 24 --preset slow`);
+}
+
+function parseNumber(value, label) {
+  if (value === undefined || value === null || value === "") return undefined;
+  const num = Number(value);
+  if (Number.isNaN(num)) {
+    throw new Error(`Invalid value for ${label}: ${value}`);
+  }
+  return num;
+}
+
+async function main() {
+  const argv = minimist(process.argv.slice(2), {
+    string: [
+      "output",
+      "crf",
+      "preset",
+      "audio-bitrate",
+      "video-codec",
+      "audio-codec",
+      "pix-format",
+      "max-height",
+      "tune",
+      "extra",
+      "ffmpeg",
+    ],
+    boolean: ["help", "keep-resolution", "force"],
+    alias: { o: "output", h: "help" },
+  });
+
+  if (argv.help) {
+    showHelp();
+    return;
+  }
+
+  const inputPath = argv._[0] || argv.input;
+  if (!inputPath) {
+    console.error("Error: input video file is required.");
+    showHelp();
+    process.exit(1);
+  }
+
+  let extraArgs = [];
+  if (Array.isArray(argv.extra)) {
+    extraArgs = argv.extra;
+  } else if (typeof argv.extra === "string") {
+    extraArgs = [argv.extra];
+  }
+
+  try {
+    const result = await compressVideo({
+      inputPath,
+      outputPath: argv.output,
+      force: Boolean(argv.force),
+      crf: parseNumber(argv.crf, "--crf") ?? 23,
+      preset: argv.preset || "medium",
+      audioBitrate: argv["audio-bitrate"] || "128k",
+      videoCodec: argv["video-codec"] || "libx264",
+      audioCodec: argv["audio-codec"] || "aac",
+      pixFormat: argv["pix-format"] || "yuv420p",
+      maxHeight: parseNumber(argv["max-height"], "--max-height") ?? 1080,
+      keepResolution: Boolean(argv["keep-resolution"] || argv.keepResolution),
+      tune: argv.tune,
+      extraArgs,
+      ffmpegPath: argv.ffmpeg,
+      logger: console,
+    });
+
+    console.log(`Compressed video saved to: ${result.outputPath}`);
+  } catch (err) {
+    console.error(`Video compression failed: ${err.message}`);
+    process.exit(1);
+  }
+}
+
+main();

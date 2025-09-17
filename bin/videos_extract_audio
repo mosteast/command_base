@@ -1,0 +1,112 @@
+#!/usr/bin/env node
+
+const path = require("path");
+const minimist = require("minimist");
+
+const { extractAudio } = require("../lib/live_media/extract_audio");
+
+function showHelp() {
+  const cmd = path.basename(process.argv[1] || "videos_extract_audio");
+  console.log("Usage:");
+  console.log(`  ${cmd} <video-file> [options]`);
+  console.log("");
+  console.log("Options:");
+  console.log("  -o, --output PATH        Audio output path");
+  console.log(
+    "  -f, --format EXT         Force audio extension (m4a, mp3, opus, etc.)",
+  );
+  console.log("      --stream INDEX       Audio stream index (default: 0)");
+  console.log(
+    "      --bitrate RATE       Fallback transcode bitrate (default: 192k)",
+  );
+  console.log("      --sample-rate HZ     Fallback transcode sample rate");
+  console.log("      --ffmpeg PATH        Path to ffmpeg executable");
+  console.log("      --ffprobe PATH       Path to ffprobe executable");
+  console.log("      --no-fallback        Disable transcode fallback");
+  console.log(
+    "      --transcode-only     Skip copy attempt and transcode directly",
+  );
+  console.log("      --force              Overwrite existing output");
+  console.log("  -h, --help               Show this help message");
+  console.log("");
+  console.log("Example:");
+  console.log(`  ${cmd} input.mp4 --stream 0 -o audio.m4a`);
+}
+
+function parseNumber(value, label) {
+  if (value === undefined || value === null || value === "") return undefined;
+  const num = Number(value);
+  if (Number.isNaN(num)) {
+    throw new Error(`Invalid value for ${label}: ${value}`);
+  }
+  return num;
+}
+
+async function main() {
+  const argv = minimist(process.argv.slice(2), {
+    boolean: ["help", "force", "fallback"],
+    string: ["output", "format", "bitrate", "sample-rate", "ffmpeg", "ffprobe"],
+    alias: { o: "output", f: "format", h: "help" },
+    default: { fallback: true },
+  });
+
+  if (argv.help) {
+    showHelp();
+    return;
+  }
+
+  const inputPath = argv._[0] || argv.input;
+  if (!inputPath) {
+    console.error("Error: input video file is required.");
+    showHelp();
+    process.exit(1);
+  }
+
+  const transcodeOnly = argv["transcode-only"] || argv.transcodeOnly || false;
+  const allowFallback = argv.fallback !== false;
+  const streamIdxRaw = argv.stream || argv.s;
+  const audioStreamIndex =
+    streamIdxRaw !== undefined ? Number(streamIdxRaw) : 0;
+
+  if (Number.isNaN(audioStreamIndex) || audioStreamIndex < 0) {
+    console.error("Error: --stream must be a non-negative integer.");
+    process.exit(1);
+  }
+
+  try {
+    const fallbackSampleRate = parseNumber(
+      argv["sample-rate"],
+      "--sample-rate",
+    );
+    const result = await extractAudio({
+      inputPath,
+      outputPath: argv.output,
+      outputExtension: argv.format,
+      audioStreamIndex,
+      force: Boolean(argv.force),
+      preferCopy: !transcodeOnly,
+      allowTranscodeFallback: allowFallback,
+      fallbackBitrate: argv.bitrate || "192k",
+      fallbackSampleRate,
+      ffmpegPath: argv.ffmpeg,
+      ffprobePath: argv.ffprobe,
+      logger: console,
+    });
+
+    console.log(`Audio written to: ${result.outputPath}`);
+    if (result.usedCopy) {
+      console.log(
+        `Stream copied without re-encoding (codec: ${result.codec || "unknown"}).`,
+      );
+    } else {
+      console.log(
+        `Audio re-encoded using ${result.codec || "configured codec"}.`,
+      );
+    }
+  } catch (err) {
+    console.error(`Failed to extract audio: ${err.message}`);
+    process.exit(1);
+  }
+}
+
+main();

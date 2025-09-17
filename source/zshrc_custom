@@ -66,7 +66,3 @@ unset https_proxy
 '
 
 alias typora="/Applications/Typora.app/Contents/MacOS/Typora"
-
-# export ANTHROPIC_AUTH_TOKEN="sk-6vZdw5WTjjYT0DSgv7eX2IAq1PVnx94GZr14GWtuNTmW5UrF"
-export ANTHROPIC_API_KEY="sk-6vZdw5WTjjYT0DSgv7eX2IAq1PVnx94GZr14GWtuNTmW5UrF"
-export ANTHROPIC_BASE_URL="https://code.ppchat.vip"

@@ -1,0 +1,183 @@
+#!/usr/bin/env node
+
+const fs = require("fs");
+const path = require("path");
+const minimist = require("minimist");
+
+const {
+  transcribeWithWhisper,
+} = require("../lib/live_media/whisper_transcribe");
+
+const DEFAULT_WHISPER_MODEL = process.env.WHISPER_DEFAULT_MODEL || "turbo";
+const DEFAULT_TRANSCRIPT_FORMATS = ["srt", "vtt"];
+
+const extraBinDirs = [];
+if (process.env.HOME) {
+  extraBinDirs.push(path.join(process.env.HOME, ".local/bin"));
+  extraBinDirs.push(path.join(process.env.HOME, "Library/Python/3.9/bin"));
+}
+const existingExtraDirs = extraBinDirs.filter((dir) => {
+  try {
+    fs.accessSync(dir, fs.constants.X_OK);
+    return true;
+  } catch (err) {
+    return false;
+  }
+});
+if (existingExtraDirs.length) {
+  const currentPath = process.env.PATH || "";
+  process.env.PATH = `${existingExtraDirs.join(path.delimiter)}${currentPath ? `${path.delimiter}${currentPath}` : ""}`;
+}
+
+function showHelp() {
+  const cmd = path.basename(process.argv[1] || "videos_transcribe_whisper");
+  console.log("Usage:");
+  console.log(`  ${cmd} <audio-or-video-file> [options]`);
+  console.log("");
+  console.log("Options:");
+  console.log("  -o, --output-dir DIR      Directory for transcript outputs");
+  console.log(
+    "      --format FORMAT       Output format(s) (repeat or comma-separated, default: srt,vtt)",
+  );
+  console.log(
+    `      --model NAME          Whisper model (default: ${DEFAULT_WHISPER_MODEL})`,
+  );
+  console.log(
+    "      --language CODE       Force language (auto-detect if omitted)",
+  );
+  console.log("      --task TASK           transcribe (default) or translate");
+  console.log("      --temperature VALUE   Sampling temperature");
+  console.log("      --beam-size N         Beam search size");
+  console.log("      --best-of N           Best-of parameter");
+  console.log("      --device DEVICE       cpu, cuda, etc.");
+  console.log(
+    "      --compute-type TYPE   Only for faster-whisper (e.g. float16)",
+  );
+  console.log("      --whisper-bin PATH    Path to whisper executable");
+  console.log("      --extra ARG           Additional CLI args (repeatable)");
+  console.log("  -h, --help                Show this help message");
+  console.log("");
+  console.log("Examples:");
+  console.log(`  ${cmd} input.m4a --model turbo`);
+  console.log(
+    `  ${cmd} input.mp4 --output-dir transcripts --format srt --extra --max_line_width --extra 120`,
+  );
+}
+
+function parseNumber(value, label) {
+  if (value === undefined || value === null || value === "") return undefined;
+  const num = Number(value);
+  if (Number.isNaN(num)) {
+    throw new Error(`Invalid value for ${label}: ${value}`);
+  }
+  return num;
+}
+
+function parseRepeatable(value) {
+  if (!value) return [];
+  if (Array.isArray(value)) return value;
+  return [value];
+}
+
+function normalizeFormats(rawValue) {
+  const initial = parseRepeatable(rawValue);
+  const flattened = initial
+    .flatMap((entry) => `${entry}`.split(",").map((part) => part.trim()))
+    .filter((part) => part.length > 0);
+  let formats = flattened.length
+    ? flattened.map((part) => part.toLowerCase())
+    : [...DEFAULT_TRANSCRIPT_FORMATS];
+  if (formats.includes("all")) {
+    formats = ["txt", "vtt", "srt", "tsv", "json"];
+  }
+  return Array.from(new Set(formats));
+}
+
+async function main() {
+  const argv = minimist(process.argv.slice(2), {
+    string: [
+      "output-dir",
+      "format",
+      "model",
+      "language",
+      "task",
+      "temperature",
+      "beam-size",
+      "best-of",
+      "device",
+      "compute-type",
+      "whisper-bin",
+      "extra",
+    ],
+    boolean: ["help"],
+    alias: { o: "output-dir", h: "help" },
+  });
+
+  if (argv.help) {
+    showHelp();
+    return;
+  }
+
+  const inputPath = argv._[0] || argv.input;
+  if (!inputPath) {
+    console.error("Error: input audio or video file is required.");
+    showHelp();
+    process.exit(1);
+  }
+
+  let extraArgs = [];
+  if (Array.isArray(argv.extra)) {
+    extraArgs = argv.extra;
+  } else if (typeof argv.extra === "string") {
+    extraArgs = [argv.extra];
+  }
+
+  try {
+    const formats = normalizeFormats(argv.format);
+    const result = await transcribeWithWhisper({
+      inputPath,
+      outputDir: argv["output-dir"] || argv.outputDir,
+      outputFormats: formats,
+      model: argv.model || DEFAULT_WHISPER_MODEL,
+      language: argv.language,
+      task: argv.task,
+      temperature: parseNumber(argv.temperature, "--temperature"),
+      beamSize: parseNumber(argv["beam-size"], "--beam-size"),
+      bestOf: parseNumber(argv["best-of"], "--best-of"),
+      device: argv.device,
+      computeType: argv["compute-type"] || argv.computeType,
+      whisperPath: argv["whisper-bin"] || argv.whisperBin,
+      extraArgs,
+      logger: console,
+    });
+
+    const outputs =
+      result.outputs && result.outputs.length
+        ? result.outputs
+        : result.primaryOutput
+          ? [{ format: formats[0], path: result.primaryOutput }]
+          : [];
+    if (outputs.length > 1) {
+      console.log("Transcripts saved to:");
+      outputs.forEach((output) => {
+        console.log(
+          `  - ${output.path}${output.format ? ` [${output.format}]` : ""}`,
+        );
+      });
+    } else if (outputs.length === 1) {
+      const only = outputs[0];
+      console.log(
+        `Transcript saved to: ${only.path}${only.format ? ` [${only.format}]` : ""}`,
+      );
+    } else {
+      console.log(
+        "Transcription completed, but no output files were detected.",
+      );
+    }
+  } catch (err) {
+    console.error(`Transcription failed: ${err.message}`);
+    process.exit(1);
+  }
+}
+
+main();
