@@ -2,6 +2,7 @@
 
 const fs = require("fs");
 const path = require("path");
+const os = require("os");
 const minimist = require("minimist");
 
 const { extractAudio } = require("../lib/live_media/extract_audio");
@@ -113,6 +114,9 @@ function showHelp() {
   console.log("Shared options:");
   console.log("      --ffmpeg PATH              Path to ffmpeg");
   console.log("      --ffprobe PATH             Path to ffprobe");
+  console.log(
+    "      --trash-input              Move processed input videos to trash",
+  );
   console.log("      --force                    Overwrite existing outputs");
   console.log("  -h, --help                     Show this help message");
 }
@@ -155,6 +159,80 @@ async function pathExists(filePath) {
     if (err.code === "ENOENT") return false;
     throw err;
   }
+}
+
+async function resolveTrashDirectory() {
+  const homeDir = os.homedir();
+  if (!homeDir) {
+    throw new Error("Cannot determine home directory for trash location.");
+  }
+  const platform = process.platform;
+  if (platform === "darwin") {
+    return path.join(homeDir, ".Trash");
+  }
+  if (platform === "linux") {
+    return path.join(homeDir, ".local", "share", "Trash", "files");
+  }
+  throw new Error(`Moving to trash is not supported on platform: ${platform}`);
+}
+
+async function moveToTrash(filePath) {
+  if (!filePath) {
+    throw new Error("moveToTrash: filePath is required");
+  }
+  const sourcePath = path.resolve(filePath);
+  const trashDir = await resolveTrashDirectory();
+  await fs.promises.mkdir(trashDir, { recursive: true });
+
+  const baseName = path.basename(sourcePath);
+  const ext = path.extname(baseName);
+  const baseStem = path.basename(baseName, ext);
+
+  let targetPath = path.join(trashDir, baseName);
+  if (await pathExists(targetPath)) {
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    let attempt = 0;
+    do {
+      const suffix = attempt ? `-${attempt}` : "";
+      targetPath = path.join(
+        trashDir,
+        `${baseStem}-${timestamp}${suffix}${ext}`,
+      );
+      attempt += 1;
+    } while (await pathExists(targetPath));
+  }
+
+  try {
+    await fs.promises.rename(sourcePath, targetPath);
+  } catch (err) {
+    if (err && err.code === "EXDEV") {
+      try {
+        await fs.promises.copyFile(sourcePath, targetPath);
+      } catch (copyErr) {
+        try {
+          await fs.promises.unlink(targetPath);
+        } catch (cleanupErr) {
+          // ignore cleanup failures
+        }
+        throw copyErr;
+      }
+      await fs.promises.unlink(sourcePath);
+    } else {
+      throw err;
+    }
+  }
+
+  return targetPath;
+}
+
+function formatDisplayPath(filePath) {
+  if (!filePath) return "";
+  const absolutePath = path.resolve(filePath);
+  const homeDir = os.homedir();
+  if (homeDir && absolutePath.startsWith(homeDir)) {
+    return `~${absolutePath.slice(homeDir.length)}`;
+  }
+  return absolutePath;
 }
 
 function describeSkipReason(reason) {
@@ -580,6 +658,7 @@ async function main() {
       "skip-compress",
       "force",
       "compress-keep-resolution",
+      "trash-input",
     ],
     alias: { h: "help" },
   });
@@ -655,6 +734,7 @@ async function main() {
   }
 
   const force = Boolean(argv.force);
+  const trashInput = Boolean(argv["trash-input"] || argv.trashInput);
   const summaries = [];
 
   for (let idx = 0; idx < inputs.length; idx += 1) {
@@ -682,6 +762,25 @@ async function main() {
 
     try {
       const summary = await processVideoPipeline(absoluteVideo, argv, force);
+      if (trashInput) {
+        try {
+          const trashedPath = await moveToTrash(absoluteVideo);
+          const displayPath = formatDisplayPath(trashedPath);
+          summary.original = {
+            trashed: true,
+            trashPath: trashedPath,
+          };
+          console.log(`  Original:   moved to trash -> ${displayPath}`);
+        } catch (trashErr) {
+          console.warn(
+            `  ⚠ Failed to move original video to trash: ${trashErr.message}`,
+          );
+          summary.original = {
+            trashed: false,
+            error: trashErr.message,
+          };
+        }
+      }
       summaries.push(summary);
     } catch (err) {
       console.error("");
@@ -738,6 +837,15 @@ async function main() {
       } else if (item.compression && item.compression.skipped) {
         const reason = describeSkipReason(item.compression.reason);
         console.log(`      Video: skipped${reason ? ` (${reason})` : ""}`);
+      }
+      if (item.original) {
+        if (item.original.trashed && item.original.trashPath) {
+          console.log(
+            `      Original: trashed -> ${formatDisplayPath(item.original.trashPath)}`,
+          );
+        } else if (item.original.error) {
+          console.log(`      Original: trash failed (${item.original.error})`);
+        }
       }
     }
   }
