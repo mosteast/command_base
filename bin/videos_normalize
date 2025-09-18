@@ -21,6 +21,10 @@ const VIDEO_EXTENSIONS = new Set([
 ]);
 const DEFAULT_WHISPER_MODEL = process.env.WHISPER_DEFAULT_MODEL || "turbo";
 const DEFAULT_TRANSCRIPT_FORMATS = ["srt", "vtt"];
+const JOB_MODE_STEP = "step";
+const JOB_MODE_FILE = "file";
+const DEFAULT_JOB_MODE = JOB_MODE_STEP;
+const JOB_MODE_VALUES = new Set([JOB_MODE_STEP, JOB_MODE_FILE]);
 
 const extraBinDirs = [];
 if (process.env.HOME) {
@@ -117,8 +121,20 @@ function showHelp() {
   console.log(
     "      --trash-input              Move processed input videos to trash",
   );
+  console.log(
+    "      --job-mode MODE           Processing strategy: step (default) or file",
+  );
   console.log("      --force                    Overwrite existing outputs");
   console.log("  -h, --help                     Show this help message");
+  console.log("");
+  console.log("Examples:");
+  console.log(`  ${cmd} --force ~/videos/raw.mp4`);
+  console.log(`  ${cmd} --skip-transcript ~/videos/project`);
+  console.log(
+    `  ${cmd} --compress-output ~/videos/raw.compressed.mp4 ~/videos/raw.mp4`,
+  );
+  console.log(`  ${cmd} --skip-compress ~/videos/*.mp4`);
+  console.log(`  ${cmd} --job-mode file --skip-transcript ~/videos/**/*.mp4`);
 }
 
 function parseNumber(value, label) {
@@ -159,6 +175,88 @@ async function pathExists(filePath) {
     if (err.code === "ENOENT") return false;
     throw err;
   }
+}
+
+async function listVideoFilesRecursive(rootDir) {
+  const pending = [rootDir];
+  const results = [];
+
+  while (pending.length) {
+    const current = pending.pop();
+    let entries;
+    try {
+      entries = await fs.promises.readdir(current, { withFileTypes: true });
+    } catch (err) {
+      if (err && err.code === "ENOENT") {
+        continue;
+      }
+      throw err;
+    }
+
+    for (const entry of entries) {
+      const fullPath = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        pending.push(fullPath);
+      } else if (entry.isFile()) {
+        const ext = path.extname(entry.name).toLowerCase();
+        if (VIDEO_EXTENSIONS.has(ext)) {
+          results.push(fullPath);
+        }
+      }
+    }
+  }
+
+  results.sort((a, b) => a.localeCompare(b));
+  return results;
+}
+
+async function findCompressedFallback(rawPath) {
+  const directory = path.dirname(rawPath);
+  const rawBaseName = path.basename(rawPath, path.extname(rawPath));
+
+  if (!rawBaseName || rawBaseName === "." || rawBaseName === "..") {
+    return null;
+  }
+
+  const directCandidates = Array.from(VIDEO_EXTENSIONS, (ext) =>
+    path.join(directory, `${rawBaseName}.compressed${ext}`),
+  );
+
+  for (const candidate of directCandidates) {
+    if (await pathExists(candidate)) {
+      try {
+        const stats = await fs.promises.stat(candidate);
+        if (stats.isFile()) {
+          return candidate;
+        }
+      } catch (err) {
+        if (err && err.code !== "ENOENT") throw err;
+      }
+    }
+  }
+
+  let directoryEntries;
+  try {
+    directoryEntries = await fs.promises.readdir(directory, {
+      withFileTypes: true,
+    });
+  } catch (err) {
+    if (err && err.code === "ENOENT") {
+      return null;
+    }
+    throw err;
+  }
+
+  const prefix = `${rawBaseName}.compressed`;
+  for (const entry of directoryEntries) {
+    if (!entry.isFile()) continue;
+    if (!entry.name.startsWith(prefix)) continue;
+    const ext = path.extname(entry.name).toLowerCase();
+    if (!VIDEO_EXTENSIONS.has(ext)) continue;
+    return path.join(directory, entry.name);
+  }
+
+  return null;
 }
 
 async function resolveTrashDirectory() {
@@ -273,6 +371,9 @@ async function processAudioStage(entries, argv, force) {
     argv["audio-sample-rate"],
     "--audio-sample-rate",
   );
+  const audioOutputOption = argv["audio-output"]
+    ? path.resolve(argv["audio-output"])
+    : null;
 
   if (skipAudio) {
     console.log("[1/3] Audio extraction skipped.");
@@ -308,7 +409,7 @@ async function processAudioStage(entries, argv, force) {
         try {
           const audioResult = await extractAudio({
             inputPath: entry.inputVideo,
-            outputPath: argv["audio-output"],
+            outputPath: audioOutputOption || entry.targetBasePath,
             outputExtension: argv["audio-format"],
             audioStreamIndex: streamIndex,
             force,
@@ -327,7 +428,7 @@ async function processAudioStage(entries, argv, force) {
           if (err && err.code === "OUTPUT_EXISTS" && !force) {
             const existingOutput =
               outputExistsPathFromError(err) ||
-              (argv["audio-output"] ? path.resolve(argv["audio-output"]) : "");
+              (audioOutputOption ? audioOutputOption : "");
             const resolvedExisting = existingOutput || null;
             const fallbackSource = resolvedExisting || entry.inputVideo;
             await ensureReadable(fallbackSource, "Existing audio output");
@@ -351,10 +452,7 @@ async function processAudioStage(entries, argv, force) {
         }
       } else {
         if (!entry.audioForTranscription) {
-          const defaultAudioPath = path.join(
-            path.dirname(entry.inputVideo),
-            `${path.basename(entry.inputVideo, path.extname(entry.inputVideo))}.m4a`,
-          );
+          const defaultAudioPath = `${entry.targetBasePath}.m4a`;
           if (await pathExists(defaultAudioPath)) {
             entry.audioForTranscription = defaultAudioPath;
           } else {
@@ -425,9 +523,7 @@ async function processTranscriptionStage(entries, argv, force) {
     try {
       const baseDirForTranscript = transcriptDirOption
         ? path.resolve(transcriptDirOption)
-        : audioForTranscription
-          ? path.dirname(audioForTranscription)
-          : path.dirname(entry.inputVideo);
+        : entry.targetDir;
 
       const resolvedTranscriptOutput = transcriptOutputArg
         ? path.resolve(transcriptOutputArg)
@@ -437,12 +533,7 @@ async function processTranscriptionStage(entries, argv, force) {
         : baseDirForTranscript;
       const transcriptBaseName = resolvedTranscriptOutput
         ? path.parse(resolvedTranscriptOutput).name
-        : audioForTranscription
-          ? path.basename(
-              audioForTranscription,
-              path.extname(audioForTranscription),
-            )
-          : path.basename(entry.inputVideo, path.extname(entry.inputVideo));
+        : entry.targetBaseName;
 
       const transcriptTargets = transcriptFormats.map((format) => ({
         format,
@@ -597,6 +688,9 @@ async function processCompressionStage(entries, argv, force) {
     argv["compress-max-height"],
     "--compress-max-height",
   );
+  const compressOutputOption = argv["compress-output"]
+    ? path.resolve(argv["compress-output"])
+    : null;
 
   for (const entry of entries) {
     if (!entry || !entry.summary) continue;
@@ -609,7 +703,8 @@ async function processCompressionStage(entries, argv, force) {
       try {
         const compressResult = await compressVideo({
           inputPath: entry.inputVideo,
-          outputPath: argv["compress-output"],
+          outputPath:
+            compressOutputOption || `${entry.targetBasePath}.compressed.mp4`,
           force,
           crf: crfValue,
           preset: argv["compress-preset"] || "medium",
@@ -655,6 +750,12 @@ async function processCompressionStage(entries, argv, force) {
   }
 }
 
+async function processEntrySequentially(entry, argv, force) {
+  await processAudioStage([entry], argv, force);
+  await processTranscriptionStage([entry], argv, force);
+  await processCompressionStage([entry], argv, force);
+}
+
 async function main() {
   const argv = minimist(process.argv.slice(2), {
     string: [
@@ -686,6 +787,7 @@ async function main() {
       "compress-extra",
       "ffmpeg",
       "ffprobe",
+      "job-mode",
     ],
     boolean: [
       "help",
@@ -704,6 +806,15 @@ async function main() {
     return;
   }
 
+  const rawJobMode = argv["job-mode"] || argv.jobMode;
+  const jobMode = rawJobMode
+    ? String(rawJobMode).toLowerCase()
+    : DEFAULT_JOB_MODE;
+  if (!JOB_MODE_VALUES.has(jobMode)) {
+    console.error("Error: --job-mode must be either 'step' or 'file'.");
+    process.exit(1);
+  }
+
   const rawInputs = argv._.length ? argv._ : argv.input ? [argv.input] : [];
   if (!rawInputs.length) {
     console.error("Error: input video file is required.");
@@ -711,47 +822,89 @@ async function main() {
     process.exit(1);
   }
 
-  let inputs = rawInputs.map((item) => path.resolve(item));
+  const resolvedInputs = rawInputs.map((item) => path.resolve(item));
+  const entrySpecs = [];
 
-  const expandedInputs = [];
-  for (const candidate of inputs) {
+  for (const candidate of resolvedInputs) {
+    let stats;
     try {
-      await ensureReadable(candidate, "Input path");
-      const stats = await fs.promises.stat(candidate);
-      if (stats.isDirectory()) {
-        const entries = await fs.promises.readdir(candidate, {
-          withFileTypes: true,
-        });
-        const videoFiles = entries
-          .filter(
-            (entry) =>
-              entry.isFile() &&
-              VIDEO_EXTENSIONS.has(path.extname(entry.name).toLowerCase()),
-          )
-          .map((entry) => path.join(candidate, entry.name))
-          .sort();
-        if (!videoFiles.length) {
-          console.error(
-            `Error: directory contains no supported video files: ${candidate}`,
-          );
-          process.exit(1);
-        }
-        expandedInputs.push(...videoFiles);
-      } else {
-        expandedInputs.push(candidate);
-      }
+      stats = await fs.promises.stat(candidate);
     } catch (err) {
+      if (err && err.code === "ENOENT") {
+        const ext = path.extname(candidate).toLowerCase();
+        if (VIDEO_EXTENSIONS.has(ext)) {
+          try {
+            const fallback = await findCompressedFallback(candidate);
+            if (fallback) {
+              entrySpecs.push({
+                requestedPath: candidate,
+                actualPath: fallback,
+                usedFallback: true,
+              });
+              continue;
+            }
+          } catch (fallbackErr) {
+            console.error(
+              `Error searching for compressed fallback: ${candidate}`,
+            );
+            if (fallbackErr && fallbackErr.message) {
+              console.error(fallbackErr.message);
+            }
+            process.exit(1);
+          }
+        }
+        console.error(`Error accessing input path: ${candidate}`);
+        console.error(`File not found: ${candidate}`);
+        process.exit(1);
+      }
       console.error(`Error accessing input path: ${candidate}`);
       if (err && err.message) {
         console.error(err.message);
       }
       process.exit(1);
     }
+
+    if (stats.isDirectory()) {
+      let videoFiles;
+      try {
+        videoFiles = await listVideoFilesRecursive(candidate);
+      } catch (dirErr) {
+        console.error(`Error reading directory: ${candidate}`);
+        if (dirErr && dirErr.message) {
+          console.error(dirErr.message);
+        }
+        process.exit(1);
+      }
+      if (!videoFiles.length) {
+        console.error(
+          `Error: directory contains no supported video files: ${candidate}`,
+        );
+        process.exit(1);
+      }
+      for (const filePath of videoFiles) {
+        entrySpecs.push({
+          requestedPath: filePath,
+          actualPath: filePath,
+          usedFallback: false,
+        });
+      }
+      continue;
+    }
+
+    if (stats.isFile()) {
+      entrySpecs.push({
+        requestedPath: candidate,
+        actualPath: candidate,
+        usedFallback: false,
+      });
+      continue;
+    }
+
+    console.error(`Error: unsupported input type: ${candidate}`);
+    process.exit(1);
   }
 
-  inputs = expandedInputs;
-
-  if (inputs.length > 1) {
+  if (entrySpecs.length > 1) {
     const singleOnlyOptions = [
       ["audio-output", "audioOutput"],
       ["audio-source", "audioSource"],
@@ -774,31 +927,90 @@ async function main() {
 
   const entries = [];
 
-  for (const absoluteVideo of inputs) {
+  for (const spec of entrySpecs) {
+    const actualPath = path.resolve(spec.actualPath);
+    const requestedPath = path.resolve(spec.requestedPath);
+
     try {
-      await ensureReadable(absoluteVideo, "Input video");
-      const stats = await fs.promises.stat(absoluteVideo);
-      if (stats.isDirectory()) {
+      await ensureReadable(actualPath, "Input video");
+      const fileStats = await fs.promises.stat(actualPath);
+      if (!fileStats.isFile()) {
         console.error(
-          `Error: expected a video file but got a directory: ${absoluteVideo}`,
+          `Error: expected a video file but got a directory: ${actualPath}`,
         );
         process.exit(1);
       }
     } catch (err) {
-      console.error(err.message);
+      console.error(
+        err && err.message
+          ? err.message
+          : `Input video not accessible: ${actualPath}`,
+      );
       process.exit(1);
     }
 
-    entries.push({
-      inputVideo: absoluteVideo,
-      summary: { inputVideo: absoluteVideo },
-    });
+    const referencePath = spec.usedFallback ? requestedPath : actualPath;
+    const referenceDir = path.dirname(referencePath);
+    const referenceExt = path.extname(referencePath);
+    let referenceBase = path.basename(referencePath, referenceExt);
+    if (!referenceBase) {
+      referenceBase = path.basename(actualPath, path.extname(actualPath));
+    }
+    const targetBasePath = path.join(referenceDir, referenceBase);
+
+    const entry = {
+      inputVideo: actualPath,
+      requestedVideo: requestedPath,
+      usedFallback: Boolean(spec.usedFallback),
+      targetDir: referenceDir,
+      targetBaseName: referenceBase,
+      targetBasePath,
+      summary: {
+        inputVideo: requestedPath,
+        sourceVideo: actualPath,
+      },
+    };
+
+    if (entry.usedFallback) {
+      entry.summary.fallback = {
+        requested: requestedPath,
+        source: actualPath,
+      };
+    }
+
+    entries.push(entry);
+  }
+
+  for (const entry of entries) {
+    if (entry.usedFallback) {
+      const missingDisplay = formatDisplayPath(entry.requestedVideo);
+      const replacementDisplay = formatDisplayPath(entry.inputVideo);
+      console.warn(
+        `⚠ Raw video missing at ${missingDisplay}; using compressed file ${replacementDisplay}.`,
+      );
+    }
   }
 
   try {
-    await processAudioStage(entries, argv, force);
-    await processTranscriptionStage(entries, argv, force);
-    await processCompressionStage(entries, argv, force);
+    if (jobMode === JOB_MODE_FILE) {
+      for (let index = 0; index < entries.length; index += 1) {
+        const entry = entries[index];
+        if (entries.length > 1) {
+          const displayTarget = formatDisplayPath(
+            entry.requestedVideo || entry.inputVideo,
+          );
+          console.log("");
+          console.log(
+            `Processing file (${index + 1}/${entries.length}): ${displayTarget}`,
+          );
+        }
+        await processEntrySequentially(entry, argv, force);
+      }
+    } else {
+      await processAudioStage(entries, argv, force);
+      await processTranscriptionStage(entries, argv, force);
+      await processCompressionStage(entries, argv, force);
+    }
   } catch (err) {
     console.error("");
     console.error(`Failed: ${err.message}`);
@@ -836,6 +1048,11 @@ async function main() {
     console.log(`Processed ${summaries.length} files:`);
     for (const item of summaries) {
       console.log(`  - ${item.inputVideo}`);
+      if (item.fallback && item.fallback.source) {
+        console.log(
+          `      Fallback: used ${formatDisplayPath(item.fallback.source)}`,
+        );
+      }
       if (item.audio && item.audio.outputPath) {
         const suffix =
           item.audio.skipped && item.audio.reason === "exists"
