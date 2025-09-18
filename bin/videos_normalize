@@ -264,163 +264,221 @@ async function ensureReadable(filePath, label) {
   }
 }
 
-async function processVideoPipeline(absoluteVideo, argv, force) {
-  const summary = { inputVideo: absoluteVideo };
-
-  // Step 1: Audio extraction
+async function processAudioStage(entries, argv, force) {
   const skipAudio = Boolean(argv["skip-audio"] || argv.skipAudio);
-  let audioForTranscription = argv["audio-source"]
+  const initialAudioSource = argv["audio-source"]
     ? path.resolve(argv["audio-source"])
     : null;
+  const fallbackSampleRate = parseNumber(
+    argv["audio-sample-rate"],
+    "--audio-sample-rate",
+  );
+
+  if (skipAudio) {
+    console.log("[1/3] Audio extraction skipped.");
+  } else {
+    const label =
+      entries.length > 1
+        ? "[1/3] Extracting audio for all files..."
+        : "[1/3] Extracting audio...";
+    console.log(label);
+  }
+
+  let streamIndex = 0;
   if (!skipAudio) {
     const streamIndexRaw = argv["audio-stream"];
-    const streamIndex =
-      streamIndexRaw !== undefined ? Number(streamIndexRaw) : 0;
+    streamIndex = streamIndexRaw !== undefined ? Number(streamIndexRaw) : 0;
     if (Number.isNaN(streamIndex) || streamIndex < 0) {
       throw new Error("Audio stream index must be a non-negative integer.");
     }
-    const fallbackSampleRate = parseNumber(
-      argv["audio-sample-rate"],
-      "--audio-sample-rate",
-    );
-    console.log("[1/3] Extracting audio...");
+  }
+
+  for (const entry of entries) {
+    if (!entry || !entry.summary) continue;
+
+    entry.audioForTranscription = initialAudioSource;
+    const displayPath = formatDisplayPath(entry.inputVideo);
+
+    if (!skipAudio && entries.length > 1) {
+      console.log(`  • ${displayPath}`);
+    }
+
     try {
-      const audioResult = await extractAudio({
-        inputPath: absoluteVideo,
-        outputPath: argv["audio-output"],
-        outputExtension: argv["audio-format"],
-        audioStreamIndex: streamIndex,
-        force,
-        preferCopy: true,
-        allowTranscodeFallback: true,
-        fallbackBitrate: argv["audio-bitrate"] || "192k",
-        fallbackSampleRate,
-        ffmpegPath: argv.ffmpeg,
-        ffprobePath: argv.ffprobe,
-        logger: console,
-      });
-      audioForTranscription = audioResult.outputPath;
-      summary.audio = audioResult;
-      console.log(`    ✓ Audio saved to ${audioResult.outputPath}`);
-    } catch (err) {
-      if (err && err.code === "OUTPUT_EXISTS" && !force) {
-        const existingOutput =
-          outputExistsPathFromError(err) ||
-          (argv["audio-output"] ? path.resolve(argv["audio-output"]) : "");
-        const resolvedExisting = existingOutput || null;
-        const fallbackSource = resolvedExisting || absoluteVideo;
+      if (!skipAudio) {
         try {
-          await ensureReadable(fallbackSource, "Existing audio output");
-        } catch (readErr) {
-          throw readErr;
-        }
-        audioForTranscription = fallbackSource;
-        summary.audio = { skipped: true, reason: "exists" };
-        if (resolvedExisting) {
-          summary.audio.outputPath = resolvedExisting;
-          summary.audio.source = resolvedExisting;
-          console.log(
-            `    • Audio already exists at ${resolvedExisting}; skipping (use --force to regenerate).`,
-          );
-        } else {
-          summary.audio.source = fallbackSource;
-          console.log(
-            "    • Audio output already exists; skipping (use --force to regenerate).",
-          );
+          const audioResult = await extractAudio({
+            inputPath: entry.inputVideo,
+            outputPath: argv["audio-output"],
+            outputExtension: argv["audio-format"],
+            audioStreamIndex: streamIndex,
+            force,
+            preferCopy: true,
+            allowTranscodeFallback: true,
+            fallbackBitrate: argv["audio-bitrate"] || "192k",
+            fallbackSampleRate,
+            ffmpegPath: argv.ffmpeg,
+            ffprobePath: argv.ffprobe,
+            logger: console,
+          });
+          entry.audioForTranscription = audioResult.outputPath;
+          entry.summary.audio = audioResult;
+          console.log(`    ✓ Audio saved to ${audioResult.outputPath}`);
+        } catch (err) {
+          if (err && err.code === "OUTPUT_EXISTS" && !force) {
+            const existingOutput =
+              outputExistsPathFromError(err) ||
+              (argv["audio-output"] ? path.resolve(argv["audio-output"]) : "");
+            const resolvedExisting = existingOutput || null;
+            const fallbackSource = resolvedExisting || entry.inputVideo;
+            await ensureReadable(fallbackSource, "Existing audio output");
+            entry.audioForTranscription = fallbackSource;
+            entry.summary.audio = { skipped: true, reason: "exists" };
+            if (resolvedExisting) {
+              entry.summary.audio.outputPath = resolvedExisting;
+              entry.summary.audio.source = resolvedExisting;
+              console.log(
+                `    • Audio already exists at ${resolvedExisting}; skipping (use --force to regenerate).`,
+              );
+            } else {
+              entry.summary.audio.source = fallbackSource;
+              console.log(
+                "    • Audio output already exists; skipping (use --force to regenerate).",
+              );
+            }
+          } else {
+            throw err;
+          }
         }
       } else {
-        throw err;
+        if (!entry.audioForTranscription) {
+          const defaultAudioPath = path.join(
+            path.dirname(entry.inputVideo),
+            `${path.basename(entry.inputVideo, path.extname(entry.inputVideo))}.m4a`,
+          );
+          if (await pathExists(defaultAudioPath)) {
+            entry.audioForTranscription = defaultAudioPath;
+          } else {
+            entry.audioForTranscription = entry.inputVideo;
+          }
+        }
+        entry.summary.audio = {
+          skipped: true,
+          source: entry.audioForTranscription,
+        };
       }
-    }
-  } else {
-    console.log("[1/3] Audio extraction skipped.");
-    if (!audioForTranscription) {
-      const defaultAudioPath = path.join(
-        path.dirname(absoluteVideo),
-        `${path.basename(absoluteVideo, path.extname(absoluteVideo))}.m4a`,
-      );
-      if (await pathExists(defaultAudioPath)) {
-        audioForTranscription = defaultAudioPath;
-      } else {
-        audioForTranscription = absoluteVideo;
+
+      if (entry.audioForTranscription) {
+        await ensureReadable(
+          entry.audioForTranscription,
+          "Audio source for transcription",
+        );
       }
+    } catch (err) {
+      const message = err && err.message ? err.message : "Unknown audio error";
+      throw new Error(`Audio processing failed for ${displayPath}: ${message}`);
     }
-    summary.audio = { skipped: true, source: audioForTranscription };
   }
+}
 
-  if (audioForTranscription) {
-    await ensureReadable(
-      audioForTranscription,
-      "Audio source for transcription",
-    );
-  }
-
-  // Step 2: Transcription
+async function processTranscriptionStage(entries, argv, force) {
   const skipTranscript = Boolean(
     argv["skip-transcript"] || argv.skipTranscript,
   );
-  if (!skipTranscript) {
-    console.log("[2/3] Transcribing with whisper...");
-    const transcriptOutputArg = argv["transcript-output"];
-    const transcriptDirOption =
-      argv["transcript-dir"] ||
-      (transcriptOutputArg
-        ? path.dirname(path.resolve(transcriptOutputArg))
-        : undefined);
-    const whisperExtraArgs = parseRepeatable(argv["whisper-extra"]);
-    const transcriptFormats = normalizeTranscriptFormats(
-      argv["transcript-format"],
-    );
-    const baseDirForTranscript = transcriptDirOption
-      ? path.resolve(transcriptDirOption)
-      : audioForTranscription
-        ? path.dirname(audioForTranscription)
-        : path.dirname(absoluteVideo);
-    const resolvedTranscriptOutput = transcriptOutputArg
-      ? path.resolve(transcriptOutputArg)
-      : null;
-    const targetBaseDir = resolvedTranscriptOutput
-      ? path.dirname(resolvedTranscriptOutput)
-      : baseDirForTranscript;
-    const transcriptBaseName = resolvedTranscriptOutput
-      ? path.parse(resolvedTranscriptOutput).name
-      : audioForTranscription
-        ? path.basename(
-            audioForTranscription,
-            path.extname(audioForTranscription),
-          )
-        : path.basename(absoluteVideo, path.extname(absoluteVideo));
-    const transcriptTargets = transcriptFormats.map((format) => ({
-      format,
-      path: path.join(targetBaseDir, `${transcriptBaseName}.${format}`),
-    }));
 
-    let missingTargets = transcriptTargets;
-    if (!force) {
-      const checks = await Promise.all(
-        transcriptTargets.map((target) => pathExists(target.path)),
-      );
-      missingTargets = transcriptTargets.filter((_, index) => !checks[index]);
+  if (skipTranscript) {
+    console.log("[2/3] Transcription skipped.");
+    entries.forEach((entry) => {
+      if (entry && entry.summary) {
+        entry.summary.transcript = { skipped: true };
+      }
+    });
+    return;
+  }
+
+  const transcriptOutputArg = argv["transcript-output"];
+  const transcriptDirOption =
+    argv["transcript-dir"] ||
+    (transcriptOutputArg
+      ? path.dirname(path.resolve(transcriptOutputArg))
+      : undefined);
+  const whisperExtraArgs = parseRepeatable(argv["whisper-extra"]);
+  const transcriptFormats = normalizeTranscriptFormats(
+    argv["transcript-format"],
+  );
+
+  const label =
+    entries.length > 1
+      ? "[2/3] Transcribing with whisper for all files..."
+      : "[2/3] Transcribing with whisper...";
+  console.log(label);
+
+  for (const entry of entries) {
+    if (!entry || !entry.summary) continue;
+    const displayPath = formatDisplayPath(entry.inputVideo);
+    if (entries.length > 1) {
+      console.log(`  • ${displayPath}`);
     }
 
-    if (!force && missingTargets.length === 0) {
-      transcriptTargets.forEach((target) => {
-        console.log(
-          `    • Transcript already exists at ${target.path}; skipping (delete or use --force to regenerate).`,
+    const audioForTranscription =
+      entry.audioForTranscription || entry.inputVideo;
+
+    try {
+      const baseDirForTranscript = transcriptDirOption
+        ? path.resolve(transcriptDirOption)
+        : audioForTranscription
+          ? path.dirname(audioForTranscription)
+          : path.dirname(entry.inputVideo);
+
+      const resolvedTranscriptOutput = transcriptOutputArg
+        ? path.resolve(transcriptOutputArg)
+        : null;
+      const targetBaseDir = resolvedTranscriptOutput
+        ? path.dirname(resolvedTranscriptOutput)
+        : baseDirForTranscript;
+      const transcriptBaseName = resolvedTranscriptOutput
+        ? path.parse(resolvedTranscriptOutput).name
+        : audioForTranscription
+          ? path.basename(
+              audioForTranscription,
+              path.extname(audioForTranscription),
+            )
+          : path.basename(entry.inputVideo, path.extname(entry.inputVideo));
+
+      const transcriptTargets = transcriptFormats.map((format) => ({
+        format,
+        path: path.join(targetBaseDir, `${transcriptBaseName}.${format}`),
+      }));
+
+      let missingTargets = transcriptTargets;
+      if (!force) {
+        const checks = await Promise.all(
+          transcriptTargets.map((target) => pathExists(target.path)),
         );
-      });
-      summary.transcript = {
-        outputs: transcriptTargets.map((target) => ({
-          format: target.format,
-          path: target.path,
+        missingTargets = transcriptTargets.filter((_, index) => !checks[index]);
+      }
+
+      if (!force && missingTargets.length === 0) {
+        transcriptTargets.forEach((target) => {
+          console.log(
+            `    • Transcript already exists at ${target.path}; skipping (delete or use --force to regenerate).`,
+          );
+        });
+        entry.summary.transcript = {
+          outputs: transcriptTargets.map((target) => ({
+            format: target.format,
+            path: target.path,
+            skipped: true,
+            reason: "exists",
+          })),
           skipped: true,
           reason: "exists",
-        })),
-        skipped: true,
-        reason: "exists",
-        path: transcriptTargets.length ? transcriptTargets[0].path : undefined,
-      };
-    } else {
+          path: transcriptTargets.length
+            ? transcriptTargets[0].path
+            : undefined,
+        };
+        continue;
+      }
+
       try {
         const transcriptResult = await transcribeWithWhisper({
           inputPath: audioForTranscription,
@@ -439,7 +497,7 @@ async function processVideoPipeline(absoluteVideo, argv, force) {
         const finalOutputs = [];
         for (const target of transcriptTargets) {
           const produced = (transcriptResult.outputs || []).find(
-            (entry) => entry.format === target.format,
+            (item) => item.format === target.format,
           );
           let producedPath = produced
             ? produced.path
@@ -488,7 +546,7 @@ async function processVideoPipeline(absoluteVideo, argv, force) {
           }
         });
 
-        summary.transcript = {
+        entry.summary.transcript = {
           outputs: finalOutputs,
           flavor: transcriptResult.flavor,
           path: finalOutputs.length ? finalOutputs[0].path : undefined,
@@ -498,125 +556,103 @@ async function processVideoPipeline(absoluteVideo, argv, force) {
           console.warn(
             "    ⚠ Whisper CLI not found; transcription skipped. Install openai-whisper or faster-whisper, or pass --skip-transcript to silence this message.",
           );
-          summary.transcript = { skipped: true, reason: "whisper-not-found" };
+          entry.summary.transcript = {
+            skipped: true,
+            reason: "whisper-not-found",
+          };
         } else {
           throw err;
         }
       }
-    }
-  } else {
-    console.log("[2/3] Transcription skipped.");
-    summary.transcript = { skipped: true };
-  }
-
-  // Step 3: Compression
-  const skipCompress = Boolean(argv["skip-compress"] || argv.skipCompress);
-  if (!skipCompress) {
-    console.log("[3/3] Compressing video...");
-    const compressExtraArgs = parseRepeatable(argv["compress-extra"]);
-    try {
-      const compressResult = await compressVideo({
-        inputPath: absoluteVideo,
-        outputPath: argv["compress-output"],
-        force,
-        crf: parseNumber(argv["compress-crf"], "--compress-crf") ?? 23,
-        preset: argv["compress-preset"] || "medium",
-        audioBitrate: argv["compress-audio-bitrate"] || "128k",
-        videoCodec: argv["compress-video-codec"] || "libx264",
-        audioCodec: argv["compress-audio-codec"] || "aac",
-        pixFormat: argv["compress-pix-format"] || "yuv420p",
-        maxHeight:
-          parseNumber(argv["compress-max-height"], "--compress-max-height") ??
-          1080,
-        keepResolution: Boolean(
-          argv["compress-keep-resolution"] || argv.compressKeepResolution,
-        ),
-        tune: argv["compress-tune"],
-        extraArgs: compressExtraArgs,
-        ffmpegPath: argv.ffmpeg,
-        logger: console,
-      });
-      summary.compression = compressResult;
-      console.log(
-        `    ✓ Compressed video saved to ${compressResult.outputPath}`,
-      );
     } catch (err) {
-      if (err && err.code === "OUTPUT_EXISTS" && !force) {
-        const fallbackOutput =
-          outputExistsPathFromError(err) ||
-          (argv["compress-output"]
-            ? path.resolve(argv["compress-output"])
-            : path.join(
-                path.dirname(absoluteVideo),
-                `${path.basename(absoluteVideo, path.extname(absoluteVideo))}.compressed.mp4`,
-              ));
-        summary.compression = {
-          skipped: true,
-          reason: "exists",
-          outputPath: fallbackOutput,
-        };
-        console.log(
-          `    • Compressed video already exists at ${fallbackOutput}; skipping (use --force to regenerate).`,
-        );
-      } else {
-        throw err;
-      }
+      const message =
+        err && err.message ? err.message : "Unknown transcription error";
+      throw new Error(`Transcription failed for ${displayPath}: ${message}`);
     }
-  } else {
+  }
+}
+
+async function processCompressionStage(entries, argv, force) {
+  const skipCompress = Boolean(argv["skip-compress"] || argv.skipCompress);
+
+  if (skipCompress) {
     console.log("[3/3] Compression skipped.");
-    summary.compression = { skipped: true };
+    entries.forEach((entry) => {
+      if (entry && entry.summary) {
+        entry.summary.compression = { skipped: true };
+      }
+    });
+    return;
   }
 
-  console.log("");
-  console.log("All done.");
-  if (summary.audio) {
-    if (summary.audio.outputPath) {
-      const suffix =
-        summary.audio.skipped && summary.audio.reason === "exists"
-          ? " (already exists)"
-          : "";
-      console.log(`  Audio:      ${summary.audio.outputPath}${suffix}`);
-    } else if (summary.audio.skipped) {
-      const reason = describeSkipReason(summary.audio.reason);
-      console.log(`  Audio: skipped${reason ? ` (${reason})` : ""}`);
-    }
-  }
-  if (summary.transcript) {
-    if (summary.transcript.outputs && summary.transcript.outputs.length) {
-      const parts = summary.transcript.outputs.map((output) => {
-        const suffix =
-          output.skipped && output.reason === "exists"
-            ? " (already exists)"
-            : "";
-        const label = output.format ? ` [${output.format}]` : "";
-        return `${output.path}${suffix}${label}`;
-      });
-      console.log(`  Transcript: ${parts.join(", ")}`);
-    } else if (summary.transcript.path) {
-      const suffix =
-        summary.transcript.skipped && summary.transcript.reason === "exists"
-          ? " (already exists)"
-          : "";
-      console.log(`  Transcript: ${summary.transcript.path}${suffix}`);
-    } else if (summary.transcript.skipped) {
-      const reason = describeSkipReason(summary.transcript.reason);
-      console.log(`  Transcript: skipped${reason ? ` (${reason})` : ""}`);
-    }
-  }
-  if (summary.compression) {
-    if (summary.compression.outputPath) {
-      const suffix =
-        summary.compression.skipped && summary.compression.reason === "exists"
-          ? " (already exists)"
-          : "";
-      console.log(`  Video:      ${summary.compression.outputPath}${suffix}`);
-    } else if (summary.compression.skipped) {
-      const reason = describeSkipReason(summary.compression.reason);
-      console.log(`  Video: skipped${reason ? ` (${reason})` : ""}`);
-    }
-  }
+  const compressExtraArgs = parseRepeatable(argv["compress-extra"]);
+  const label =
+    entries.length > 1
+      ? "[3/3] Compressing videos for all files..."
+      : "[3/3] Compressing video...";
+  console.log(label);
 
-  return summary;
+  const crfValue = parseNumber(argv["compress-crf"], "--compress-crf") ?? 23;
+  const maxHeightValue = parseNumber(
+    argv["compress-max-height"],
+    "--compress-max-height",
+  );
+
+  for (const entry of entries) {
+    if (!entry || !entry.summary) continue;
+    const displayPath = formatDisplayPath(entry.inputVideo);
+    if (entries.length > 1) {
+      console.log(`  • ${displayPath}`);
+    }
+
+    try {
+      try {
+        const compressResult = await compressVideo({
+          inputPath: entry.inputVideo,
+          outputPath: argv["compress-output"],
+          force,
+          crf: crfValue,
+          preset: argv["compress-preset"] || "medium",
+          audioBitrate: argv["compress-audio-bitrate"] || "128k",
+          videoCodec: argv["compress-video-codec"] || "libx264",
+          audioCodec: argv["compress-audio-codec"] || "aac",
+          pixelFormat: argv["compress-pix-format"] || "yuv420p",
+          keepResolution: Boolean(argv["compress-keep-resolution"]),
+          maxHeight: maxHeightValue,
+          tune: argv["compress-tune"],
+          extraArgs: compressExtraArgs,
+          ffmpegPath: argv.ffmpeg,
+          logger: console,
+        });
+        entry.summary.compression = compressResult;
+        console.log(`    ✓ Video saved to ${compressResult.outputPath}`);
+      } catch (err) {
+        if (err && err.code === "OUTPUT_EXISTS" && !force) {
+          const existingOutput = outputExistsPathFromError(err);
+          entry.summary.compression = {
+            skipped: true,
+            reason: "exists",
+            outputPath: existingOutput,
+          };
+          if (existingOutput) {
+            console.log(
+              `    • Compressed video already exists at ${existingOutput}; skipping (use --force to regenerate).`,
+            );
+          } else {
+            console.log(
+              "    • Compressed video output already exists; skipping (use --force to regenerate).",
+            );
+          }
+        } else {
+          throw err;
+        }
+      }
+    } catch (err) {
+      const message =
+        err && err.message ? err.message : "Unknown compression error";
+      throw new Error(`Compression failed for ${displayPath}: ${message}`);
+    }
+  }
 }
 
 async function main() {
@@ -735,10 +771,10 @@ async function main() {
 
   const force = Boolean(argv.force);
   const trashInput = Boolean(argv["trash-input"] || argv.trashInput);
-  const summaries = [];
 
-  for (let idx = 0; idx < inputs.length; idx += 1) {
-    const absoluteVideo = inputs[idx];
+  const entries = [];
+
+  for (const absoluteVideo of inputs) {
     try {
       await ensureReadable(absoluteVideo, "Input video");
       const stats = await fs.promises.stat(absoluteVideo);
@@ -753,40 +789,46 @@ async function main() {
       process.exit(1);
     }
 
-    if (inputs.length > 1) {
-      console.log("");
-      console.log(
-        `=== Processing ${idx + 1}/${inputs.length}: ${absoluteVideo}`,
-      );
-    }
+    entries.push({
+      inputVideo: absoluteVideo,
+      summary: { inputVideo: absoluteVideo },
+    });
+  }
 
-    try {
-      const summary = await processVideoPipeline(absoluteVideo, argv, force);
-      if (trashInput) {
-        try {
-          const trashedPath = await moveToTrash(absoluteVideo);
-          const displayPath = formatDisplayPath(trashedPath);
-          summary.original = {
-            trashed: true,
-            trashPath: trashedPath,
-          };
-          console.log(`  Original:   moved to trash -> ${displayPath}`);
-        } catch (trashErr) {
-          console.warn(
-            `  ⚠ Failed to move original video to trash: ${trashErr.message}`,
-          );
-          summary.original = {
-            trashed: false,
-            error: trashErr.message,
-          };
-        }
+  try {
+    await processAudioStage(entries, argv, force);
+    await processTranscriptionStage(entries, argv, force);
+    await processCompressionStage(entries, argv, force);
+  } catch (err) {
+    console.error("");
+    console.error(`Failed: ${err.message}`);
+    process.exit(1);
+  }
+
+  const summaries = [];
+
+  for (const entry of entries) {
+    const summary = entry.summary;
+    if (trashInput) {
+      try {
+        const trashedPath = await moveToTrash(entry.inputVideo);
+        const displayPath = formatDisplayPath(trashedPath);
+        summary.original = {
+          trashed: true,
+          trashPath: trashedPath,
+        };
+        console.log(`  Original:   moved to trash -> ${displayPath}`);
+      } catch (trashErr) {
+        console.warn(
+          `  ⚠ Failed to move original video to trash: ${trashErr.message}`,
+        );
+        summary.original = {
+          trashed: false,
+          error: trashErr.message,
+        };
       }
-      summaries.push(summary);
-    } catch (err) {
-      console.error("");
-      console.error(`Failed: ${err.message}`);
-      process.exit(1);
     }
+    summaries.push(summary);
   }
 
   if (summaries.length > 1) {
