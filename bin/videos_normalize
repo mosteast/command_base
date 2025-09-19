@@ -340,6 +340,74 @@ function describeSkipReason(reason) {
   return reason;
 }
 
+const LOG_FILE_PREFIX = "/tmp/log.videos_normalize";
+const STAGE_KEYS = ["audio", "transcript", "compression"];
+
+function createLogFilePath() {
+  const timestamp = Math.floor(Date.now() / 1000);
+  return `${LOG_FILE_PREFIX}.${timestamp}.txt`;
+}
+
+let runLogFilePath = createLogFilePath();
+
+const runStatistics = {
+  stages: STAGE_KEYS.reduce((acc, key) => {
+    acc[key] = { success: 0, errors: 0 };
+    return acc;
+  }, {}),
+  errors: [],
+  fatalError: null,
+};
+
+function resolveErrorMessage(err, fallback = "Unknown error") {
+  if (!err) return fallback;
+  if (typeof err === "string") {
+    return err || fallback;
+  }
+  if (err.stderr && typeof err.stderr === "string" && err.stderr.trim()) {
+    return err.stderr.trim();
+  }
+  if (err.stdout && typeof err.stdout === "string" && err.stdout.trim()) {
+    return err.stdout.trim();
+  }
+  if (typeof err.message === "string" && err.message.trim()) {
+    return err.message.trim();
+  }
+  return fallback;
+}
+
+function recordStageSuccess(stageKey) {
+  if (!stageKey) return;
+  const bucket = runStatistics.stages[stageKey];
+  if (bucket) {
+    bucket.success += 1;
+  }
+}
+
+function recordStageFailure(entry, stageKey, message, options = {}) {
+  if (!entry || !entry.summary) return;
+  const reasonOverride = options.reason || "error";
+  entry.summary[stageKey] = {
+    skipped: true,
+    reason: reasonOverride,
+    error: message,
+  };
+  if (!entry.summary.failures) {
+    entry.summary.failures = [];
+  }
+  entry.summary.failures.push({ stage: stageKey, message });
+  const bucket = runStatistics.stages[stageKey];
+  if (bucket) {
+    bucket.errors += 1;
+  }
+  const displayPath = formatDisplayPath(
+    entry.inputVideo || entry.requestedVideo || entry.summary.inputVideo || "",
+  );
+  const stageLabel = stageKey || "unknown";
+  const location = displayPath || "<unknown>";
+  runStatistics.errors.push(`[${stageLabel}] ${location}: ${message}`);
+}
+
 function normalizeTranscriptFormats(rawValue) {
   const initial = parseRepeatable(rawValue);
   const flattened = initial
@@ -424,6 +492,7 @@ async function processAudioStage(entries, argv, force) {
           entry.audioForTranscription = audioResult.outputPath;
           entry.summary.audio = audioResult;
           console.log(`    ✓ Audio saved to ${audioResult.outputPath}`);
+          recordStageSuccess("audio");
         } catch (err) {
           if (err && err.code === "OUTPUT_EXISTS" && !force) {
             const existingOutput =
@@ -446,8 +515,16 @@ async function processAudioStage(entries, argv, force) {
                 "    • Audio output already exists; skipping (use --force to regenerate).",
               );
             }
+            recordStageSuccess("audio");
           } else {
-            throw err;
+            const message = resolveErrorMessage(
+              err,
+              `Audio extraction failed for ${displayPath}`,
+            );
+            console.error(`    ✗ Audio extraction failed: ${message}`);
+            recordStageFailure(entry, "audio", message);
+            entry.audioForTranscription = null;
+            continue;
           }
         }
       } else {
@@ -472,8 +549,14 @@ async function processAudioStage(entries, argv, force) {
         );
       }
     } catch (err) {
-      const message = err && err.message ? err.message : "Unknown audio error";
-      throw new Error(`Audio processing failed for ${displayPath}: ${message}`);
+      const message = resolveErrorMessage(
+        err,
+        `Audio processing failed for ${displayPath}`,
+      );
+      console.error(`    ✗ Audio processing failed: ${message}`);
+      recordStageFailure(entry, "audio", message);
+      entry.audioForTranscription = null;
+      continue;
     }
   }
 }
@@ -567,6 +650,7 @@ async function processTranscriptionStage(entries, argv, force) {
             ? transcriptTargets[0].path
             : undefined,
         };
+        recordStageSuccess("transcript");
         continue;
       }
 
@@ -642,23 +726,27 @@ async function processTranscriptionStage(entries, argv, force) {
           flavor: transcriptResult.flavor,
           path: finalOutputs.length ? finalOutputs[0].path : undefined,
         };
+        recordStageSuccess("transcript");
       } catch (err) {
         if (err && err.code === "WHISPER_NOT_FOUND") {
           console.warn(
             "    ⚠ Whisper CLI not found; transcription skipped. Install openai-whisper or faster-whisper, or pass --skip-transcript to silence this message.",
           );
-          entry.summary.transcript = {
-            skipped: true,
+          recordStageFailure(entry, "transcript", "Whisper CLI not found", {
             reason: "whisper-not-found",
-          };
+          });
         } else {
           throw err;
         }
       }
     } catch (err) {
-      const message =
-        err && err.message ? err.message : "Unknown transcription error";
-      throw new Error(`Transcription failed for ${displayPath}: ${message}`);
+      const resolved = resolveErrorMessage(
+        err,
+        `Transcription failed for ${displayPath}`,
+      );
+      console.error(`    ✗ Transcription failed: ${resolved}`);
+      recordStageFailure(entry, "transcript", resolved);
+      continue;
     }
   }
 }
@@ -721,6 +809,7 @@ async function processCompressionStage(entries, argv, force) {
         });
         entry.summary.compression = compressResult;
         console.log(`    ✓ Video saved to ${compressResult.outputPath}`);
+        recordStageSuccess("compression");
       } catch (err) {
         if (err && err.code === "OUTPUT_EXISTS" && !force) {
           const existingOutput = outputExistsPathFromError(err);
@@ -738,14 +827,19 @@ async function processCompressionStage(entries, argv, force) {
               "    • Compressed video output already exists; skipping (use --force to regenerate).",
             );
           }
+          recordStageSuccess("compression");
         } else {
           throw err;
         }
       }
     } catch (err) {
-      const message =
-        err && err.message ? err.message : "Unknown compression error";
-      throw new Error(`Compression failed for ${displayPath}: ${message}`);
+      const resolved = resolveErrorMessage(
+        err,
+        `Compression failed for ${displayPath}`,
+      );
+      console.error(`    ✗ Compression failed: ${resolved}`);
+      recordStageFailure(entry, "compression", resolved);
+      continue;
     }
   }
 }
@@ -754,6 +848,57 @@ async function processEntrySequentially(entry, argv, force) {
   await processAudioStage([entry], argv, force);
   await processTranscriptionStage([entry], argv, force);
   await processCompressionStage([entry], argv, force);
+}
+
+async function writeRunLog(entries, options = {}) {
+  const { fatalError } = options;
+  if (fatalError) {
+    runStatistics.fatalError = resolveErrorMessage(
+      fatalError,
+      fatalError && fatalError.message
+        ? fatalError.message
+        : "Unknown fatal error",
+    );
+  }
+
+  const lines = [];
+  lines.push(`# videos_normalize run - ${new Date().toISOString()}`);
+  lines.push(`files_processed=${entries.length}`);
+  lines.push("");
+  lines.push("Stage results:");
+  STAGE_KEYS.forEach((key) => {
+    const bucket = runStatistics.stages[key] || { success: 0, errors: 0 };
+    lines.push(`- ${key}: success=${bucket.success} error=${bucket.errors}`);
+  });
+
+  lines.push("");
+  if (runStatistics.errors.length) {
+    lines.push("Errors:");
+    runStatistics.errors.forEach((entry, index) => {
+      lines.push(`${index + 1}. ${entry}`);
+    });
+  } else {
+    lines.push("Errors: none");
+  }
+
+  if (runStatistics.fatalError) {
+    lines.push("");
+    lines.push(`Fatal error: ${runStatistics.fatalError}`);
+  }
+
+  lines.push("");
+
+  try {
+    await fs.promises.writeFile(
+      runLogFilePath,
+      `${lines.join("\n")}\n`,
+      "utf8",
+    );
+  } catch (err) {
+    console.error(
+      `⚠ Failed to write log file at ${runLogFilePath}: ${resolveErrorMessage(err)}`,
+    );
+  }
 }
 
 async function main() {
@@ -823,6 +968,9 @@ async function main() {
   }
 
   const resolvedInputs = rawInputs.map((item) => path.resolve(item));
+  if (runLogFilePath) {
+    console.log(`Run log will be written to ${runLogFilePath}`);
+  }
   const entrySpecs = [];
 
   for (const candidate of resolvedInputs) {
@@ -1014,6 +1162,7 @@ async function main() {
   } catch (err) {
     console.error("");
     console.error(`Failed: ${err.message}`);
+    await writeRunLog(entries, { fatalError: err });
     process.exit(1);
   }
 
@@ -1061,7 +1210,10 @@ async function main() {
         console.log(`      Audio: ${item.audio.outputPath}${suffix}`);
       } else if (item.audio && item.audio.skipped) {
         const reason = describeSkipReason(item.audio.reason);
-        console.log(`      Audio: skipped${reason ? ` (${reason})` : ""}`);
+        const detail = item.audio.error ? ` - ${item.audio.error}` : "";
+        console.log(
+          `      Audio: skipped${reason ? ` (${reason})` : ""}${detail}`,
+        );
       }
       if (
         item.transcript &&
@@ -1085,7 +1237,10 @@ async function main() {
         console.log(`      Transcript: ${item.transcript.path}${suffix}`);
       } else if (item.transcript && item.transcript.skipped) {
         const reason = describeSkipReason(item.transcript.reason) || "skipped";
-        console.log(`      Transcript: ${reason}`);
+        const detail = item.transcript.error
+          ? ` - ${item.transcript.error}`
+          : "";
+        console.log(`      Transcript: ${reason}${detail}`);
       }
       if (item.compression && item.compression.outputPath) {
         const suffix =
@@ -1095,7 +1250,12 @@ async function main() {
         console.log(`      Video: ${item.compression.outputPath}${suffix}`);
       } else if (item.compression && item.compression.skipped) {
         const reason = describeSkipReason(item.compression.reason);
-        console.log(`      Video: skipped${reason ? ` (${reason})` : ""}`);
+        const detail = item.compression.error
+          ? ` - ${item.compression.error}`
+          : "";
+        console.log(
+          `      Video: skipped${reason ? ` (${reason})` : ""}${detail}`,
+        );
       }
       if (item.original) {
         if (item.original.trashed && item.original.trashPath) {
@@ -1108,6 +1268,8 @@ async function main() {
       }
     }
   }
+
+  await writeRunLog(entries);
 }
 
 main();
