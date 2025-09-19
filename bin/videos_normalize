@@ -131,7 +131,7 @@ function showHelp() {
   console.log(`  ${cmd} --force ~/videos/raw.mp4`);
   console.log(`  ${cmd} --skip-transcript ~/videos/project`);
   console.log(
-    `  ${cmd} --compress-output ~/videos/raw.compressed.mp4 ~/videos/raw.mp4`,
+    `  ${cmd} --compress-output ~/videos/raw.compressed.medium.mp4 ~/videos/raw.mp4`,
   );
   console.log(`  ${cmd} --skip-compress ~/videos/*.mp4`);
   console.log(`  ${cmd} --job-mode file --skip-transcript ~/videos/**/*.mp4`);
@@ -349,6 +349,7 @@ function createLogFilePath() {
 }
 
 let runLogFilePath = createLogFilePath();
+let currentRunEntries = null;
 
 const runStatistics = {
   stages: STAGE_KEYS.reduce((acc, key) => {
@@ -358,6 +359,11 @@ const runStatistics = {
   errors: [],
   fatalError: null,
 };
+
+async function updateRunLog(options = {}) {
+  if (!currentRunEntries) return;
+  await writeRunLog(currentRunEntries, options);
+}
 
 function resolveErrorMessage(err, fallback = "Unknown error") {
   if (!err) return fallback;
@@ -557,6 +563,8 @@ async function processAudioStage(entries, argv, force) {
       recordStageFailure(entry, "audio", message);
       entry.audioForTranscription = null;
       continue;
+    } finally {
+      await updateRunLog();
     }
   }
 }
@@ -573,6 +581,7 @@ async function processTranscriptionStage(entries, argv, force) {
         entry.summary.transcript = { skipped: true };
       }
     });
+    await updateRunLog();
     return;
   }
 
@@ -747,6 +756,8 @@ async function processTranscriptionStage(entries, argv, force) {
       console.error(`    ✗ Transcription failed: ${resolved}`);
       recordStageFailure(entry, "transcript", resolved);
       continue;
+    } finally {
+      await updateRunLog();
     }
   }
 }
@@ -761,6 +772,7 @@ async function processCompressionStage(entries, argv, force) {
         entry.summary.compression = { skipped: true };
       }
     });
+    await updateRunLog();
     return;
   }
 
@@ -779,6 +791,13 @@ async function processCompressionStage(entries, argv, force) {
   const compressOutputOption = argv["compress-output"]
     ? path.resolve(argv["compress-output"])
     : null;
+  let presetValue = argv["compress-preset"];
+  if (presetValue === undefined || presetValue === null) {
+    presetValue = "medium";
+  } else {
+    presetValue = `${presetValue}`.trim() || "medium";
+  }
+  const presetLabel = presetValue.replace(/\s+/g, "-");
 
   for (const entry of entries) {
     if (!entry || !entry.summary) continue;
@@ -792,10 +811,11 @@ async function processCompressionStage(entries, argv, force) {
         const compressResult = await compressVideo({
           inputPath: entry.inputVideo,
           outputPath:
-            compressOutputOption || `${entry.targetBasePath}.compressed.mp4`,
+            compressOutputOption ||
+            `${entry.targetBasePath}.compressed.${presetLabel}.mp4`,
           force,
           crf: crfValue,
-          preset: argv["compress-preset"] || "medium",
+          preset: presetValue,
           audioBitrate: argv["compress-audio-bitrate"] || "128k",
           videoCodec: argv["compress-video-codec"] || "libx264",
           audioCodec: argv["compress-audio-codec"] || "aac",
@@ -840,6 +860,8 @@ async function processCompressionStage(entries, argv, force) {
       console.error(`    ✗ Compression failed: ${resolved}`);
       recordStageFailure(entry, "compression", resolved);
       continue;
+    } finally {
+      await updateRunLog();
     }
   }
 }
@@ -1138,6 +1160,9 @@ async function main() {
       );
     }
   }
+
+  currentRunEntries = entries;
+  await updateRunLog();
 
   try {
     if (jobMode === JOB_MODE_FILE) {

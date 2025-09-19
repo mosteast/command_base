@@ -48,7 +48,7 @@ function showHelp() {
   console.log("");
   console.log("Options:");
   console.log(
-    "  -o, --output PATH        Output video path (default: <name>.compressed.mp4)",
+    "  -o, --output PATH        Output video path (default: <name>.compressed.<preset>.mp4)",
   );
   console.log("      --crf VALUE          Constant Rate Factor (default: 23)");
   console.log("      --preset NAME        x264 preset (default: medium)");
