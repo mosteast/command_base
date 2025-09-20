@@ -1096,6 +1096,7 @@ async function main() {
   const trashInput = Boolean(argv["trash-input"] || argv.trashInput);
 
   const entries = [];
+  const seenJobTargets = new Map();
 
   for (const spec of entrySpecs) {
     const actualPath = path.resolve(spec.actualPath);
@@ -1128,6 +1129,17 @@ async function main() {
     }
     const targetBasePath = path.join(referenceDir, referenceBase);
 
+    const dedupeKey = path.resolve(targetBasePath);
+    if (!force && seenJobTargets.has(dedupeKey)) {
+      const previous = seenJobTargets.get(dedupeKey);
+      const currentLabel = formatDisplayPath(requestedPath);
+      const previousLabel = formatDisplayPath(previous.requestedPath);
+      console.log(
+        `Skipping duplicate job for ${currentLabel}; already scheduled for ${previousLabel}. Use --force to rerun.`,
+      );
+      continue;
+    }
+
     const entry = {
       inputVideo: actualPath,
       requestedVideo: requestedPath,
@@ -1147,6 +1159,11 @@ async function main() {
         source: actualPath,
       };
     }
+
+    seenJobTargets.set(dedupeKey, {
+      requestedPath,
+      actualPath,
+    });
 
     entries.push(entry);
   }
