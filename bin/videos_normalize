@@ -3,7 +3,7 @@
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
-const minimist = require("minimist");
+const yargs = require("yargs/yargs");
 
 const { extractAudio } = require("../lib/live_media/extract_audio");
 const {
@@ -150,6 +150,14 @@ function parseRepeatable(value) {
   if (!value) return [];
   if (Array.isArray(value)) return value;
   return [value];
+}
+
+function coerceArrayOfStrings(value) {
+  if (value === undefined || value === null) return [];
+  const values = Array.isArray(value) ? value : [value];
+  return values
+    .filter((item) => item !== undefined && item !== null)
+    .map((item) => String(item));
 }
 
 function optionProvided(argv, ...names) {
@@ -924,39 +932,47 @@ async function writeRunLog(entries, options = {}) {
 }
 
 async function main() {
-  const argv = minimist(process.argv.slice(2), {
-    string: [
-      "audio-output",
-      "audio-format",
-      "audio-stream",
-      "audio-bitrate",
-      "audio-sample-rate",
-      "audio-source",
-      "transcript-dir",
-      "transcript-output",
-      "transcript-format",
-      "whisper-model",
-      "whisper-language",
-      "whisper-task",
-      "whisper-device",
-      "whisper-compute-type",
-      "whisper-bin",
-      "whisper-extra",
-      "compress-output",
-      "compress-crf",
-      "compress-preset",
-      "compress-audio-bitrate",
-      "compress-video-codec",
-      "compress-audio-codec",
-      "compress-pix-format",
-      "compress-max-height",
-      "compress-tune",
-      "compress-extra",
-      "ffmpeg",
-      "ffprobe",
-      "job-mode",
-    ],
-    boolean: [
+  const parser = yargs(process.argv.slice(2))
+    .parserConfiguration({
+      "camel-case-expansion": true,
+      "duplicate-arguments-array": true,
+      "flatten-duplicate-arrays": false,
+      "strip-aliased": true,
+    })
+    .help(false)
+    .version(false)
+    .alias("h", "help")
+    .option("audio-output", { type: "string" })
+    .option("audio-format", { type: "string" })
+    .option("audio-stream", { type: "string" })
+    .option("audio-bitrate", { type: "string" })
+    .option("audio-sample-rate", { type: "string" })
+    .option("audio-source", { type: "string" })
+    .option("transcript-dir", { type: "string" })
+    .option("transcript-output", { type: "string" })
+    .option("transcript-format", { type: "string" })
+    .option("whisper-model", { type: "string" })
+    .option("whisper-language", { type: "string" })
+    .option("whisper-task", { type: "string" })
+    .option("whisper-device", { type: "string" })
+    .option("whisper-compute-type", { type: "string" })
+    .option("whisper-bin", { type: "string" })
+    .option("whisper-extra", { type: "array" })
+    .option("compress-output", { type: "string" })
+    .option("compress-crf", { type: "string" })
+    .option("compress-preset", { type: "string" })
+    .option("compress-audio-bitrate", { type: "string" })
+    .option("compress-video-codec", { type: "string" })
+    .option("compress-audio-codec", { type: "string" })
+    .option("compress-pix-format", { type: "string" })
+    .option("compress-max-height", { type: "string" })
+    .option("compress-tune", { type: "string" })
+    .option("compress-extra", { type: "array" })
+    .option("ffmpeg", { type: "string" })
+    .option("ffprobe", { type: "string" })
+    .option("job-mode", { type: "string" })
+    .option("input", { type: "string" })
+    .boolean([
       "help",
       "skip-audio",
       "skip-transcript",
@@ -964,9 +980,12 @@ async function main() {
       "force",
       "compress-keep-resolution",
       "trash-input",
-    ],
-    alias: { h: "help" },
-  });
+    ])
+    .coerce("whisper-extra", coerceArrayOfStrings)
+    .coerce("compress-extra", coerceArrayOfStrings)
+    .wrap(null);
+
+  const argv = parser.parse();
 
   if (argv.help) {
     showHelp();

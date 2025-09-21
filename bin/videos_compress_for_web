@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 const path = require("path");
-const minimist = require("minimist");
+const yargs = require("yargs/yargs");
 
 const { compressVideo } = require("../lib/live_media/compress_video");
 
@@ -95,23 +95,41 @@ function parseNumber(value, label) {
 }
 
 async function main() {
-  const argv = minimist(process.argv.slice(2), {
-    string: [
-      "output",
-      "crf",
-      "preset",
-      "audio-bitrate",
-      "video-codec",
-      "audio-codec",
-      "pix-format",
-      "max-height",
-      "tune",
-      "extra",
-      "ffmpeg",
-    ],
-    boolean: ["help", "keep-resolution", "force"],
-    alias: { o: "output", h: "help" },
-  });
+  const coerceArrayOfStrings = (value) => {
+    if (value === undefined || value === null) return [];
+    const values = Array.isArray(value) ? value : [value];
+    return values
+      .filter((item) => item !== undefined && item !== null)
+      .map((item) => String(item));
+  };
+
+  const parser = yargs(process.argv.slice(2))
+    .parserConfiguration({
+      "camel-case-expansion": true,
+      "duplicate-arguments-array": true,
+      "flatten-duplicate-arrays": false,
+      "strip-aliased": true,
+    })
+    .help(false)
+    .version(false)
+    .alias({ o: "output", h: "help" })
+    .option("output", { type: "string" })
+    .option("crf", { type: "string" })
+    .option("preset", { type: "string" })
+    .option("audio-bitrate", { type: "string" })
+    .option("video-codec", { type: "string" })
+    .option("audio-codec", { type: "string" })
+    .option("pix-format", { type: "string" })
+    .option("max-height", { type: "string" })
+    .option("tune", { type: "string" })
+    .option("extra", { type: "array" })
+    .option("ffmpeg", { type: "string" })
+    .option("input", { type: "string" })
+    .boolean(["help", "keep-resolution", "force"])
+    .coerce("extra", coerceArrayOfStrings)
+    .wrap(null);
+
+  const argv = parser.parse();
 
   if (argv.help) {
     showHelp();

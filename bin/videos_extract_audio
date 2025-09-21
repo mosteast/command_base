@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 const path = require("path");
-const minimist = require("minimist");
+const yargs = require("yargs/yargs");
 
 const { extractAudio } = require("../lib/live_media/extract_audio");
 
@@ -43,12 +43,28 @@ function parseNumber(value, label) {
 }
 
 async function main() {
-  const argv = minimist(process.argv.slice(2), {
-    boolean: ["help", "force", "fallback"],
-    string: ["output", "format", "bitrate", "sample-rate", "ffmpeg", "ffprobe"],
-    alias: { o: "output", f: "format", h: "help" },
-    default: { fallback: true },
-  });
+  const parser = yargs(process.argv.slice(2))
+    .parserConfiguration({
+      "camel-case-expansion": true,
+      "duplicate-arguments-array": true,
+      "strip-aliased": true,
+    })
+    .help(false)
+    .version(false)
+    .alias({ o: "output", f: "format", h: "help" })
+    .option("output", { type: "string" })
+    .option("format", { type: "string" })
+    .option("stream", { type: "string" })
+    .option("bitrate", { type: "string" })
+    .option("sample-rate", { type: "string" })
+    .option("ffmpeg", { type: "string" })
+    .option("ffprobe", { type: "string" })
+    .option("input", { type: "string" })
+    .boolean(["help", "force", "fallback", "transcode-only"])
+    .default({ fallback: true })
+    .wrap(null);
+
+  const argv = parser.parse();
 
   if (argv.help) {
     showHelp();
