@@ -4,12 +4,25 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 const yargs = require("yargs/yargs");
+const chalk = require("chalk");
 
 const { extractAudio } = require("../lib/live_media/extract_audio");
 const {
   transcribeWithWhisper,
 } = require("../lib/live_media/whisper_transcribe");
 const { compressVideo } = require("../lib/live_media/compress_video");
+
+const palette = {
+  headline: chalk.cyanBright.bold,
+  stage: chalk.cyanBright,
+  success: chalk.greenBright,
+  warn: chalk.yellowBright,
+  error: chalk.redBright,
+  dim: chalk.gray,
+  path: chalk.cyanBright,
+};
+
+const highlightPath = (value) => (value ? palette.path(value) : value);
 
 const VIDEO_EXTENSIONS = new Set([
   ".mp4",
@@ -46,95 +59,169 @@ if (existingExtraDirs.length) {
 
 function showHelp() {
   const cmd = path.basename(process.argv[1] || "videos_normalize");
-  console.log("Usage:");
-  console.log(`  ${cmd} <video-file> [options]`);
+  console.log(palette.headline("Usage:"));
+  console.log(`  ${palette.stage(cmd)} <video-file> [options]`);
   console.log("");
-  console.log("Audio extraction options:");
-  console.log("      --audio-output PATH        Audio output path");
-  console.log("      --audio-format EXT         Audio extension override");
+  console.log(palette.headline("Audio extraction options:"));
   console.log(
-    "      --audio-stream INDEX       Audio stream index (default: 0)",
+    palette.dim("      --audio-output PATH        Audio output path"),
   );
   console.log(
-    "      --audio-bitrate RATE       Fallback transcode bitrate (default: 192k)",
+    palette.dim("      --audio-format EXT         Audio extension override"),
   );
   console.log(
-    "      --audio-sample-rate HZ     Fallback transcode sample rate",
+    palette.dim(
+      "      --audio-stream INDEX       Audio stream index (default: 0)",
+    ),
   );
   console.log(
-    "      --audio-source PATH        Use existing audio file (skip extraction)",
-  );
-  console.log("      --skip-audio               Skip audio extraction step");
-  console.log("");
-  console.log("Transcription options:");
-  console.log("      --skip-transcript          Skip transcription");
-  console.log("      --transcript-dir DIR       Directory for transcripts");
-  console.log("      --transcript-output PATH   Desired transcript file path");
-  console.log(
-    "      --transcript-format FORMAT Transcript format(s), repeat or comma-separated (default: srt,vtt)",
+    palette.dim(
+      "      --audio-bitrate RATE       Fallback transcode bitrate (default: 192k)",
+    ),
   );
   console.log(
-    `      --whisper-model NAME       Whisper model (default: ${DEFAULT_WHISPER_MODEL})`,
+    palette.dim(
+      "      --audio-sample-rate HZ     Fallback transcode sample rate",
+    ),
   );
-  console.log("      --whisper-language CODE    Force language");
   console.log(
-    "      --whisper-task TASK        transcribe (default) or translate",
+    palette.dim(
+      "      --audio-source PATH        Use existing audio file (skip extraction)",
+    ),
   );
-  console.log("      --whisper-device DEVICE    Device, e.g. cpu or cuda");
   console.log(
-    "      --whisper-compute-type VAL Compute type for faster-whisper",
-  );
-  console.log("      --whisper-bin PATH         Path to whisper executable");
-  console.log(
-    "      --whisper-extra ARG        Extra whisper CLI args (repeatable)",
+    palette.dim("      --skip-audio               Skip audio extraction step"),
   );
   console.log("");
-  console.log("Compression options:");
-  console.log("      --skip-compress            Skip video compression");
-  console.log("      --compress-output PATH     Output video path");
-  console.log("      --compress-crf VALUE       CRF value (default: 23)");
-  console.log("      --compress-preset NAME     Preset (default: medium)");
+  console.log(palette.headline("Transcription options:"));
   console.log(
-    "      --compress-audio-bitrate RATE Audio bitrate (default: 128k)",
+    palette.dim("      --skip-transcript          Skip transcription"),
   );
   console.log(
-    "      --compress-video-codec NAME Video codec (default: libx264)",
-  );
-  console.log("      --compress-audio-codec NAME Audio codec (default: aac)");
-  console.log(
-    "      --compress-pix-format NAME Pixel format (default: yuv420p)",
+    palette.dim("      --transcript-dir DIR       Directory for transcripts"),
   );
   console.log(
-    "      --compress-max-height PX   Downscale max height (default: 1080)",
-  );
-  console.log("      --compress-keep-resolution Keep original resolution");
-  console.log(
-    "      --compress-tune NAME       Optional tune (film, animation, etc.)",
+    palette.dim(
+      "      --transcript-output PATH   Desired transcript file path",
+    ),
   );
   console.log(
-    "      --compress-extra ARG       Extra ffmpeg args (repeatable)",
+    palette.dim(
+      "      --transcript-format FORMAT Transcript format(s), repeat or comma-separated (default: srt,vtt)",
+    ),
+  );
+  console.log(
+    palette.dim(
+      `      --whisper-model NAME       Whisper model (default: ${DEFAULT_WHISPER_MODEL})`,
+    ),
+  );
+  console.log(palette.dim("      --whisper-language CODE    Force language"));
+  console.log(
+    palette.dim(
+      "      --whisper-task TASK        transcribe (default) or translate",
+    ),
+  );
+  console.log(
+    palette.dim("      --whisper-device DEVICE    Device, e.g. cpu or cuda"),
+  );
+  console.log(
+    palette.dim(
+      "      --whisper-compute-type VAL Compute type for faster-whisper",
+    ),
+  );
+  console.log(
+    palette.dim("      --whisper-bin PATH         Path to whisper executable"),
+  );
+  console.log(
+    palette.dim(
+      "      --whisper-extra ARG        Extra whisper CLI args (repeatable)",
+    ),
   );
   console.log("");
-  console.log("Shared options:");
-  console.log("      --ffmpeg PATH              Path to ffmpeg");
-  console.log("      --ffprobe PATH             Path to ffprobe");
+  console.log(palette.headline("Compression options:"));
   console.log(
-    "      --trash-input              Move processed input videos to trash",
+    palette.dim("      --skip-compress            Skip video compression"),
   );
   console.log(
-    "      --job-mode MODE           Processing strategy: step (default) or file",
+    palette.dim("      --compress-output PATH     Output video path"),
   );
-  console.log("      --force                    Overwrite existing outputs");
-  console.log("  -h, --help                     Show this help message");
+  console.log(
+    palette.dim("      --compress-crf VALUE       CRF value (default: 23)"),
+  );
+  console.log(
+    palette.dim("      --compress-preset NAME     Preset (default: medium)"),
+  );
+  console.log(
+    palette.dim(
+      "      --compress-audio-bitrate RATE Audio bitrate (default: 128k)",
+    ),
+  );
+  console.log(
+    palette.dim(
+      "      --compress-video-codec NAME Video codec (default: libx264)",
+    ),
+  );
+  console.log(
+    palette.dim("      --compress-audio-codec NAME Audio codec (default: aac)"),
+  );
+  console.log(
+    palette.dim(
+      "      --compress-pix-format NAME Pixel format (default: yuv420p)",
+    ),
+  );
+  console.log(
+    palette.dim(
+      "      --compress-max-height PX   Downscale max height (default: 1080)",
+    ),
+  );
+  console.log(
+    palette.dim("      --compress-keep-resolution Keep original resolution"),
+  );
+  console.log(
+    palette.dim(
+      "      --compress-tune NAME       Optional tune (film, animation, etc.)",
+    ),
+  );
+  console.log(
+    palette.dim(
+      "      --compress-extra ARG       Extra ffmpeg args (repeatable)",
+    ),
+  );
   console.log("");
-  console.log("Examples:");
-  console.log(`  ${cmd} --force ~/videos/raw.mp4`);
-  console.log(`  ${cmd} --skip-transcript ~/videos/project`);
+  console.log(palette.headline("Shared options:"));
+  console.log(palette.dim("      --ffmpeg PATH              Path to ffmpeg"));
+  console.log(palette.dim("      --ffprobe PATH             Path to ffprobe"));
   console.log(
-    `  ${cmd} --compress-output ~/videos/raw.compressed.medium.mp4 ~/videos/raw.mp4`,
+    palette.dim(
+      "      --trash-input              Move processed input videos to trash",
+    ),
   );
-  console.log(`  ${cmd} --skip-compress ~/videos/*.mp4`);
-  console.log(`  ${cmd} --job-mode file --skip-transcript ~/videos/**/*.mp4`);
+  console.log(
+    palette.dim(
+      "      --job-mode MODE           Processing strategy: step (default) or file",
+    ),
+  );
+  console.log(
+    palette.dim("      --force                    Overwrite existing outputs"),
+  );
+  console.log(
+    palette.dim("  -h, --help                     Show this help message"),
+  );
+  console.log("");
+  console.log(palette.headline("Examples:"));
+  console.log(palette.stage(`  ${cmd} --force ~/videos/raw.mp4`));
+  console.log(palette.stage(`  ${cmd} --skip-transcript ~/videos/project`));
+  console.log(
+    palette.stage(
+      `  ${cmd} --compress-output ~/videos/raw.compressed.medium.mp4 ~/videos/raw.mp4`,
+    ),
+  );
+  console.log(palette.stage(`  ${cmd} --skip-compress ~/videos/*.mp4`));
+  console.log(
+    palette.stage(
+      `  ${cmd} --job-mode file --skip-transcript ~/videos/**/*.mp4`,
+    ),
+  );
 }
 
 function parseNumber(value, label) {
@@ -458,13 +545,13 @@ async function processAudioStage(entries, argv, force) {
     : null;
 
   if (skipAudio) {
-    console.log("[1/3] Audio extraction skipped.");
+    console.log(palette.dim("[1/3] Audio extraction skipped."));
   } else {
     const label =
       entries.length > 1
         ? "[1/3] Extracting audio for all files..."
         : "[1/3] Extracting audio...";
-    console.log(label);
+    console.log(palette.stage(label));
   }
 
   let streamIndex = 0;
@@ -483,7 +570,7 @@ async function processAudioStage(entries, argv, force) {
     const displayPath = formatDisplayPath(entry.inputVideo);
 
     if (!skipAudio && entries.length > 1) {
-      console.log(`  • ${displayPath}`);
+      console.log(`${palette.dim("  • ")}${highlightPath(displayPath)}`);
     }
 
     try {
@@ -505,7 +592,11 @@ async function processAudioStage(entries, argv, force) {
           });
           entry.audioForTranscription = audioResult.outputPath;
           entry.summary.audio = audioResult;
-          console.log(`    ✓ Audio saved to ${audioResult.outputPath}`);
+          console.log(
+            `${palette.success("    ✓ Audio saved to ")}${highlightPath(
+              audioResult.outputPath,
+            )}`,
+          );
           recordStageSuccess("audio");
         } catch (err) {
           if (err && err.code === "OUTPUT_EXISTS" && !force) {
@@ -521,12 +612,16 @@ async function processAudioStage(entries, argv, force) {
               entry.summary.audio.outputPath = resolvedExisting;
               entry.summary.audio.source = resolvedExisting;
               console.log(
-                `    • Audio already exists at ${resolvedExisting}; skipping (use --force to regenerate).`,
+                `${palette.dim("    • Audio already exists at ")}${highlightPath(
+                  resolvedExisting,
+                )}${palette.dim("; skipping (use --force to regenerate).")}`,
               );
             } else {
               entry.summary.audio.source = fallbackSource;
               console.log(
-                "    • Audio output already exists; skipping (use --force to regenerate).",
+                palette.dim(
+                  "    • Audio output already exists; skipping (use --force to regenerate).",
+                ),
               );
             }
             recordStageSuccess("audio");
@@ -535,7 +630,9 @@ async function processAudioStage(entries, argv, force) {
               err,
               `Audio extraction failed for ${displayPath}`,
             );
-            console.error(`    ✗ Audio extraction failed: ${message}`);
+            console.error(
+              palette.error(`    ✗ Audio extraction failed: ${message}`),
+            );
             recordStageFailure(entry, "audio", message);
             entry.audioForTranscription = null;
             continue;
@@ -567,7 +664,7 @@ async function processAudioStage(entries, argv, force) {
         err,
         `Audio processing failed for ${displayPath}`,
       );
-      console.error(`    ✗ Audio processing failed: ${message}`);
+      console.error(palette.error(`    ✗ Audio processing failed: ${message}`));
       recordStageFailure(entry, "audio", message);
       entry.audioForTranscription = null;
       continue;
@@ -583,7 +680,7 @@ async function processTranscriptionStage(entries, argv, force) {
   );
 
   if (skipTranscript) {
-    console.log("[2/3] Transcription skipped.");
+    console.log(palette.dim("[2/3] Transcription skipped."));
     entries.forEach((entry) => {
       if (entry && entry.summary) {
         entry.summary.transcript = { skipped: true };
@@ -608,13 +705,13 @@ async function processTranscriptionStage(entries, argv, force) {
     entries.length > 1
       ? "[2/3] Transcribing with whisper for all files..."
       : "[2/3] Transcribing with whisper...";
-  console.log(label);
+  console.log(palette.stage(label));
 
   for (const entry of entries) {
     if (!entry || !entry.summary) continue;
     const displayPath = formatDisplayPath(entry.inputVideo);
     if (entries.length > 1) {
-      console.log(`  • ${displayPath}`);
+      console.log(`${palette.dim("  • ")}${highlightPath(displayPath)}`);
     }
 
     const audioForTranscription =
@@ -651,7 +748,9 @@ async function processTranscriptionStage(entries, argv, force) {
       if (!force && missingTargets.length === 0) {
         transcriptTargets.forEach((target) => {
           console.log(
-            `    • Transcript already exists at ${target.path}; skipping (delete or use --force to regenerate).`,
+            `${palette.dim("    • Transcript already exists at ")}${highlightPath(
+              target.path,
+            )}${palette.dim("; skipping (delete or use --force to regenerate).")}`,
           );
         });
         entry.summary.transcript = {
@@ -731,10 +830,16 @@ async function processTranscriptionStage(entries, argv, force) {
         finalOutputs.forEach((output, index) => {
           if (index === 0) {
             console.log(
-              `    ✓ Transcript saved to ${output.path} [${output.format}]`,
+              `${palette.success("    ✓ Transcript saved to ")}${highlightPath(
+                output.path,
+              )}${palette.success(` [${output.format}]`)}`,
             );
           } else {
-            console.log(`      • ${output.path} [${output.format}]`);
+            console.log(
+              `${palette.dim("      • ")}${highlightPath(output.path)}${palette.dim(
+                ` [${output.format}]`,
+              )}`,
+            );
           }
         });
 
@@ -747,7 +852,9 @@ async function processTranscriptionStage(entries, argv, force) {
       } catch (err) {
         if (err && err.code === "WHISPER_NOT_FOUND") {
           console.warn(
-            "    ⚠ Whisper CLI not found; transcription skipped. Install openai-whisper or faster-whisper, or pass --skip-transcript to silence this message.",
+            palette.warn(
+              "    ⚠ Whisper CLI not found; transcription skipped. Install openai-whisper or faster-whisper, or pass --skip-transcript to silence this message.",
+            ),
           );
           recordStageFailure(entry, "transcript", "Whisper CLI not found", {
             reason: "whisper-not-found",
@@ -761,7 +868,7 @@ async function processTranscriptionStage(entries, argv, force) {
         err,
         `Transcription failed for ${displayPath}`,
       );
-      console.error(`    ✗ Transcription failed: ${resolved}`);
+      console.error(palette.error(`    ✗ Transcription failed: ${resolved}`));
       recordStageFailure(entry, "transcript", resolved);
       continue;
     } finally {
@@ -774,7 +881,7 @@ async function processCompressionStage(entries, argv, force) {
   const skipCompress = Boolean(argv["skip-compress"] || argv.skipCompress);
 
   if (skipCompress) {
-    console.log("[3/3] Compression skipped.");
+    console.log(palette.dim("[3/3] Compression skipped."));
     entries.forEach((entry) => {
       if (entry && entry.summary) {
         entry.summary.compression = { skipped: true };
@@ -789,7 +896,7 @@ async function processCompressionStage(entries, argv, force) {
     entries.length > 1
       ? "[3/3] Compressing videos for all files..."
       : "[3/3] Compressing video...";
-  console.log(label);
+  console.log(palette.stage(label));
 
   const crfValue = parseNumber(argv["compress-crf"], "--compress-crf") ?? 23;
   const maxHeightValue = parseNumber(
@@ -811,7 +918,7 @@ async function processCompressionStage(entries, argv, force) {
     if (!entry || !entry.summary) continue;
     const displayPath = formatDisplayPath(entry.inputVideo);
     if (entries.length > 1) {
-      console.log(`  • ${displayPath}`);
+      console.log(`${palette.dim("  • ")}${highlightPath(displayPath)}`);
     }
 
     try {
@@ -836,7 +943,11 @@ async function processCompressionStage(entries, argv, force) {
           logger: console,
         });
         entry.summary.compression = compressResult;
-        console.log(`    ✓ Video saved to ${compressResult.outputPath}`);
+        console.log(
+          `${palette.success("    ✓ Video saved to ")}${highlightPath(
+            compressResult.outputPath,
+          )}`,
+        );
         recordStageSuccess("compression");
       } catch (err) {
         if (err && err.code === "OUTPUT_EXISTS" && !force) {
@@ -848,11 +959,15 @@ async function processCompressionStage(entries, argv, force) {
           };
           if (existingOutput) {
             console.log(
-              `    • Compressed video already exists at ${existingOutput}; skipping (use --force to regenerate).`,
+              `${palette.dim("    • Compressed video already exists at ")}${highlightPath(
+                existingOutput,
+              )}${palette.dim("; skipping (use --force to regenerate).")}`,
             );
           } else {
             console.log(
-              "    • Compressed video output already exists; skipping (use --force to regenerate).",
+              palette.dim(
+                "    • Compressed video output already exists; skipping (use --force to regenerate).",
+              ),
             );
           }
           recordStageSuccess("compression");
@@ -865,7 +980,7 @@ async function processCompressionStage(entries, argv, force) {
         err,
         `Compression failed for ${displayPath}`,
       );
-      console.error(`    ✗ Compression failed: ${resolved}`);
+      console.error(palette.error(`    ✗ Compression failed: ${resolved}`));
       recordStageFailure(entry, "compression", resolved);
       continue;
     } finally {
@@ -997,20 +1112,26 @@ async function main() {
     ? String(rawJobMode).toLowerCase()
     : DEFAULT_JOB_MODE;
   if (!JOB_MODE_VALUES.has(jobMode)) {
-    console.error("Error: --job-mode must be either 'step' or 'file'.");
+    console.error(
+      palette.error("Error: --job-mode must be either 'step' or 'file'."),
+    );
     process.exit(1);
   }
 
   const rawInputs = argv._.length ? argv._ : argv.input ? [argv.input] : [];
   if (!rawInputs.length) {
-    console.error("Error: input video file is required.");
+    console.error(palette.error("Error: input video file is required."));
     showHelp();
     process.exit(1);
   }
 
   const resolvedInputs = rawInputs.map((item) => path.resolve(item));
   if (runLogFilePath) {
-    console.log(`Run log will be written to ${runLogFilePath}`);
+    console.log(
+      `${palette.dim("Run log will be written to ")}${highlightPath(
+        runLogFilePath,
+      )}`,
+    );
   }
   const entrySpecs = [];
 
@@ -1034,21 +1155,25 @@ async function main() {
             }
           } catch (fallbackErr) {
             console.error(
-              `Error searching for compressed fallback: ${candidate}`,
+              palette.error(
+                `Error searching for compressed fallback: ${candidate}`,
+              ),
             );
             if (fallbackErr && fallbackErr.message) {
-              console.error(fallbackErr.message);
+              console.error(palette.error(fallbackErr.message));
             }
             process.exit(1);
           }
         }
-        console.error(`Error accessing input path: ${candidate}`);
-        console.error(`File not found: ${candidate}`);
+        console.error(
+          palette.error(`Error accessing input path: ${candidate}`),
+        );
+        console.error(palette.error(`File not found: ${candidate}`));
         process.exit(1);
       }
-      console.error(`Error accessing input path: ${candidate}`);
+      console.error(palette.error(`Error accessing input path: ${candidate}`));
       if (err && err.message) {
-        console.error(err.message);
+        console.error(palette.error(err.message));
       }
       process.exit(1);
     }
@@ -1058,15 +1183,17 @@ async function main() {
       try {
         videoFiles = await listVideoFilesRecursive(candidate);
       } catch (dirErr) {
-        console.error(`Error reading directory: ${candidate}`);
+        console.error(palette.error(`Error reading directory: ${candidate}`));
         if (dirErr && dirErr.message) {
-          console.error(dirErr.message);
+          console.error(palette.error(dirErr.message));
         }
         process.exit(1);
       }
       if (!videoFiles.length) {
         console.error(
-          `Error: directory contains no supported video files: ${candidate}`,
+          palette.error(
+            `Error: directory contains no supported video files: ${candidate}`,
+          ),
         );
         process.exit(1);
       }
@@ -1089,7 +1216,7 @@ async function main() {
       continue;
     }
 
-    console.error(`Error: unsupported input type: ${candidate}`);
+    console.error(palette.error(`Error: unsupported input type: ${candidate}`));
     process.exit(1);
   }
 
@@ -1104,7 +1231,9 @@ async function main() {
     for (const names of singleOnlyOptions) {
       if (optionProvided(argv, ...names)) {
         console.error(
-          `Error: --${names[0]} can only be used when processing a single input file.`,
+          palette.error(
+            `Error: --${names[0]} can only be used when processing a single input file.`,
+          ),
         );
         process.exit(1);
       }
@@ -1126,15 +1255,19 @@ async function main() {
       const fileStats = await fs.promises.stat(actualPath);
       if (!fileStats.isFile()) {
         console.error(
-          `Error: expected a video file but got a directory: ${actualPath}`,
+          palette.error(
+            `Error: expected a video file but got a directory: ${actualPath}`,
+          ),
         );
         process.exit(1);
       }
     } catch (err) {
       console.error(
-        err && err.message
-          ? err.message
-          : `Input video not accessible: ${actualPath}`,
+        palette.error(
+          err && err.message
+            ? err.message
+            : `Input video not accessible: ${actualPath}`,
+        ),
       );
       process.exit(1);
     }
@@ -1154,7 +1287,11 @@ async function main() {
       const currentLabel = formatDisplayPath(requestedPath);
       const previousLabel = formatDisplayPath(previous.requestedPath);
       console.log(
-        `Skipping duplicate job for ${currentLabel}; already scheduled for ${previousLabel}. Use --force to rerun.`,
+        `${palette.dim("Skipping duplicate job for ")}${highlightPath(
+          currentLabel,
+        )}${palette.dim("; already scheduled for ")}${highlightPath(
+          previousLabel,
+        )}${palette.dim(". Use --force to rerun.")}`,
       );
       continue;
     }
@@ -1192,7 +1329,11 @@ async function main() {
       const missingDisplay = formatDisplayPath(entry.requestedVideo);
       const replacementDisplay = formatDisplayPath(entry.inputVideo);
       console.warn(
-        `⚠ Raw video missing at ${missingDisplay}; using compressed file ${replacementDisplay}.`,
+        `${palette.warn("⚠ Raw video missing at ")}${highlightPath(
+          missingDisplay,
+        )}${palette.warn("; using compressed file ")}${highlightPath(
+          replacementDisplay,
+        )}${palette.warn(".")}`,
       );
     }
   }
@@ -1210,7 +1351,9 @@ async function main() {
           );
           console.log("");
           console.log(
-            `Processing file (${index + 1}/${entries.length}): ${displayTarget}`,
+            `${palette.stage(
+              `Processing file (${index + 1}/${entries.length}): `,
+            )}${highlightPath(displayTarget)}`,
           );
         }
         await processEntrySequentially(entry, argv, force);
@@ -1222,7 +1365,7 @@ async function main() {
     }
   } catch (err) {
     console.error("");
-    console.error(`Failed: ${err.message}`);
+    console.error(palette.error(`Failed: ${err.message}`));
     await writeRunLog(entries, { fatalError: err });
     process.exit(1);
   }
@@ -1239,10 +1382,16 @@ async function main() {
           trashed: true,
           trashPath: trashedPath,
         };
-        console.log(`  Original:   moved to trash -> ${displayPath}`);
+        console.log(
+          `${palette.dim("  Original:   moved to trash -> ")}${highlightPath(
+            displayPath,
+          )}`,
+        );
       } catch (trashErr) {
         console.warn(
-          `  ⚠ Failed to move original video to trash: ${trashErr.message}`,
+          palette.warn(
+            `  ⚠ Failed to move original video to trash: ${trashErr.message}`,
+          ),
         );
         summary.original = {
           trashed: false,
@@ -1255,25 +1404,36 @@ async function main() {
 
   if (summaries.length > 1) {
     console.log("");
-    console.log(`Processed ${summaries.length} files:`);
+    console.log(palette.headline(`Processed ${summaries.length} files:`));
     for (const item of summaries) {
-      console.log(`  - ${item.inputVideo}`);
+      const inputDisplay = formatDisplayPath(item.inputVideo);
+      console.log(`${palette.stage("  - ")}${highlightPath(inputDisplay)}`);
       if (item.fallback && item.fallback.source) {
+        const fallbackDisplay = formatDisplayPath(item.fallback.source);
         console.log(
-          `      Fallback: used ${formatDisplayPath(item.fallback.source)}`,
+          `${palette.dim("      Fallback: used ")}${highlightPath(
+            fallbackDisplay,
+          )}`,
         );
       }
       if (item.audio && item.audio.outputPath) {
+        const audioDisplay = formatDisplayPath(item.audio.outputPath);
         const suffix =
           item.audio.skipped && item.audio.reason === "exists"
-            ? " (already exists)"
+            ? palette.dim(" (already exists)")
             : "";
-        console.log(`      Audio: ${item.audio.outputPath}${suffix}`);
+        console.log(
+          `${palette.success("      Audio: ")}${highlightPath(
+            audioDisplay,
+          )}${suffix}`,
+        );
       } else if (item.audio && item.audio.skipped) {
         const reason = describeSkipReason(item.audio.reason);
         const detail = item.audio.error ? ` - ${item.audio.error}` : "";
         console.log(
-          `      Audio: skipped${reason ? ` (${reason})` : ""}${detail}`,
+          palette.dim(
+            `      Audio: skipped${reason ? ` (${reason})` : ""}${detail}`,
+          ),
         );
       }
       if (
@@ -1282,49 +1442,72 @@ async function main() {
         item.transcript.outputs.length
       ) {
         const parts = item.transcript.outputs.map((output) => {
+          const transcriptDisplay = formatDisplayPath(output.path);
           const suffix =
             output.skipped && output.reason === "exists"
-              ? " (already exists)"
+              ? palette.dim(" (already exists)")
               : "";
-          const label = output.format ? ` [${output.format}]` : "";
-          return `${output.path}${suffix}${label}`;
+          const label = output.format ? palette.dim(` [${output.format}]`) : "";
+          return `${highlightPath(transcriptDisplay)}${suffix}${label}`;
         });
-        console.log(`      Transcript: ${parts.join(", ")}`);
+        const separator = palette.dim(", ");
+        console.log(
+          `${palette.success("      Transcript: ")}${parts.join(separator)}`,
+        );
       } else if (item.transcript && item.transcript.path) {
+        const transcriptDisplay = formatDisplayPath(item.transcript.path);
         const suffix =
           item.transcript.skipped && item.transcript.reason === "exists"
-            ? " (already exists)"
+            ? palette.dim(" (already exists)")
             : "";
-        console.log(`      Transcript: ${item.transcript.path}${suffix}`);
+        console.log(
+          `${palette.success("      Transcript: ")}${highlightPath(
+            transcriptDisplay,
+          )}${suffix}`,
+        );
       } else if (item.transcript && item.transcript.skipped) {
         const reason = describeSkipReason(item.transcript.reason) || "skipped";
         const detail = item.transcript.error
           ? ` - ${item.transcript.error}`
           : "";
-        console.log(`      Transcript: ${reason}${detail}`);
+        console.log(palette.dim(`      Transcript: ${reason}${detail}`));
       }
       if (item.compression && item.compression.outputPath) {
+        const videoDisplay = formatDisplayPath(item.compression.outputPath);
         const suffix =
           item.compression.skipped && item.compression.reason === "exists"
-            ? " (already exists)"
+            ? palette.dim(" (already exists)")
             : "";
-        console.log(`      Video: ${item.compression.outputPath}${suffix}`);
+        console.log(
+          `${palette.success("      Video: ")}${highlightPath(
+            videoDisplay,
+          )}${suffix}`,
+        );
       } else if (item.compression && item.compression.skipped) {
         const reason = describeSkipReason(item.compression.reason);
         const detail = item.compression.error
           ? ` - ${item.compression.error}`
           : "";
         console.log(
-          `      Video: skipped${reason ? ` (${reason})` : ""}${detail}`,
+          palette.dim(
+            `      Video: skipped${reason ? ` (${reason})` : ""}${detail}`,
+          ),
         );
       }
       if (item.original) {
         if (item.original.trashed && item.original.trashPath) {
+          const trashDisplay = formatDisplayPath(item.original.trashPath);
           console.log(
-            `      Original: trashed -> ${formatDisplayPath(item.original.trashPath)}`,
+            `${palette.dim("      Original: trashed -> ")}${highlightPath(
+              trashDisplay,
+            )}`,
           );
         } else if (item.original.error) {
-          console.log(`      Original: trash failed (${item.original.error})`);
+          console.log(
+            palette.warn(
+              `      Original: trash failed (${item.original.error})`,
+            ),
+          );
         }
       }
     }
