@@ -1,0 +1,674 @@
+#!/usr/bin/env node
+
+"use strict";
+
+const path = require("path");
+const fs = require("fs");
+const fs_extra = require("fs-extra");
+const axios = require("axios");
+const glob = require("glob");
+const chalk = require("chalk");
+const YAML = require("yaml");
+const { spawn } = require("child_process");
+const { JSDOM } = require("jsdom");
+const { Readability } = require("@mozilla/readability");
+const TurndownService = require("turndown");
+const yargs = require("yargs/yargs");
+const playwright = require("playwright");
+
+const palette = {
+  headline: chalk.cyanBright.bold,
+  info: chalk.cyanBright,
+  success: chalk.greenBright,
+  warn: chalk.yellowBright,
+  error: chalk.redBright,
+  detail: chalk.gray,
+  path: chalk.magentaBright,
+};
+
+const default_output_root =
+  "/Users/hailang/Library/Mobile Documents/com~apple~CloudDocs/main/download/text/article";
+const summarizer_command = path.resolve(__dirname, "text_summarize");
+const default_render_mode = "browser";
+
+const valid_render_modes = ["browser", "auto", "http"];
+
+const turndown_service = new TurndownService({
+  headingStyle: "atx",
+  codeBlockStyle: "fenced",
+  bulletListMarker: "-",
+});
+turndown_service.keep(["table", "thead", "tbody", "tr", "th", "td"]);
+
+const argv = yargs(process.argv.slice(2))
+  .usage(
+    [
+      "Usage: $0 [options] <url ...>",
+      "",
+      "Description:",
+      "  Download a web page, convert the main content to Markdown, and summarize it",
+      "  with the existing text_summarize command.",
+    ].join("\n"),
+  )
+  .option("url-file", {
+    alias: "u",
+    type: "array",
+    describe:
+      "Glob patterns to text files containing newline-separated URLs. Blank lines and lines starting with # are ignored.",
+  })
+  .option("output-root", {
+    alias: "o",
+    type: "string",
+    describe: "Root directory where article folders are created.",
+    default: default_output_root,
+  })
+  .option("force", {
+    alias: "f",
+    type: "boolean",
+    default: false,
+    describe:
+      "Overwrite the destination directory if it already exists instead of creating a suffixed copy.",
+  })
+  .option("timeout", {
+    type: "number",
+    default: 20000,
+    describe: "Request timeout in milliseconds for downloading the page.",
+  })
+  .option("max-redirects", {
+    type: "number",
+    default: 5,
+    describe: "Maximum number of HTTP redirects to follow during download.",
+  })
+  .option("render-mode", {
+    type: "string",
+    choices: valid_render_modes,
+    default: default_render_mode,
+    describe:
+      "Rendering strategy: browser (headless Chromium), auto (browser with HTTP fallback), or http (direct request).",
+  })
+  .option("wait-after-load", {
+    type: "number",
+    default: 1000,
+    describe:
+      "Extra delay in milliseconds after load/networkidle events to allow async content to render when using the browser mode.",
+  })
+  .option("skip-summary", {
+    type: "boolean",
+    default: false,
+    describe: "Skip invoking the text_summarize command after Markdown export.",
+  })
+  .example(
+    "$0 https://example.com/article.html",
+    "Download one article, store Markdown and summary under the default article directory.",
+  )
+  .example(
+    '$0 --url-file "urls/*.txt"',
+    "Load URLs from text files via glob patterns and process them sequentially.",
+  )
+  .example(
+    '$0 -o ~/Downloads/articles https://example.com/a https://example.com/b',
+    "Write outputs under a custom root directory.",
+  )
+  .example(
+    '$0 --render-mode auto https://example.com/app',
+    "Let the tool try headless Chromium first and gracefully fall back to HTTP if the browser fails.",
+  )
+  .wrap(Math.min(120, process.stdout.columns || 120))
+  .alias("h", "help")
+  .alias("v", "version")
+  .strict()
+  .parse();
+
+function normalize_whitespace(value) {
+  if (!value) return "";
+  return String(value).replace(/\s+/g, " ").trim();
+}
+
+function extract_heading_text(article_html, document) {
+  const selectors = ["h1", "h2", "h3", "h4"];
+
+  if (article_html) {
+    try {
+      const article_dom = new JSDOM(`<body>${article_html}</body>`);
+      const article_doc = article_dom.window.document;
+      for (const selector of selectors) {
+        const node = article_doc.querySelector(selector);
+        if (!node) continue;
+        const text = normalize_whitespace(node.textContent);
+        if (text) return text;
+      }
+    } catch (err) {
+      // Ignore parsing issues; fall back to other strategies.
+    }
+  }
+
+  if (document) {
+    for (const selector of selectors) {
+      const node = document.querySelector(selector);
+      if (!node) continue;
+      const text = normalize_whitespace(node.textContent);
+      if (text) return text;
+    }
+  }
+
+  return undefined;
+}
+
+function to_directory_segment(value) {
+  const normalized = normalize_whitespace(value);
+  if (!normalized) return "untitled";
+
+  const without_quotes = normalized.replace(/["'“”‘’]/g, "");
+
+  const simplified = without_quotes
+    .normalize("NFKC")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^\p{Letter}\p{Number}\s]+/gu, " ")
+    .replace(/[\s]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+
+  if (!simplified) {
+    return "untitled";
+  }
+
+  return simplified.toLowerCase();
+}
+
+function sanitize_excerpt(value) {
+  const normalized = normalize_whitespace(value);
+  if (!normalized) return undefined;
+  return normalized.length > 220 ? `${normalized.slice(0, 217)}...` : normalized;
+}
+
+async function gather_urls(cli_urls, url_files) {
+  const url_set = new Set();
+  for (const candidate of cli_urls) {
+    const normalized = normalize_whitespace(candidate);
+    if (normalized) url_set.add(normalized);
+  }
+
+  if (Array.isArray(url_files)) {
+    for (const pattern of url_files) {
+      const expanded = glob.sync(pattern, { nodir: true, dot: false });
+      if (!expanded.length) {
+        console.log(
+          palette.warn(`No files matched pattern ${palette.path(pattern)}.`),
+        );
+      }
+      for (const file_path of expanded) {
+        try {
+          const file_text = await fs.promises.readFile(file_path, "utf8");
+          const lines = file_text.split(/\r?\n/);
+          for (const raw_line of lines) {
+            const trimmed = normalize_whitespace(raw_line);
+            if (!trimmed || trimmed.startsWith("#")) continue;
+            url_set.add(trimmed);
+          }
+        } catch (err) {
+          console.error(
+            palette.error(
+              `Failed to read URL file ${palette.path(file_path)}: ${err.message}`,
+            ),
+          );
+        }
+      }
+    }
+  }
+
+  return Array.from(url_set);
+}
+
+async function ensure_article_directory(base_dir, folder_name, force) {
+  const primary_path = path.join(base_dir, folder_name);
+  if (force) {
+    if (await fs_extra.pathExists(primary_path)) {
+      await fs_extra.remove(primary_path);
+    }
+    await fs_extra.ensureDir(primary_path);
+    return primary_path;
+  }
+
+  if (!(await fs_extra.pathExists(primary_path))) {
+    await fs_extra.ensureDir(primary_path);
+    return primary_path;
+  }
+
+  let counter = 2;
+  while (true) {
+    const candidate_name = `${folder_name}__${counter}`;
+    const candidate_path = path.join(base_dir, candidate_name);
+    // eslint-disable-next-line no-await-in-loop
+    const exists = await fs_extra.pathExists(candidate_path);
+    if (!exists) {
+      await fs_extra.ensureDir(candidate_path);
+      return candidate_path;
+    }
+    counter += 1;
+  }
+}
+
+function resolve_final_url(response, fallback_url) {
+  const response_url =
+    (response &&
+      response.request &&
+      response.request.res &&
+      response.request.res.responseUrl) ||
+    fallback_url;
+  return response_url || fallback_url;
+}
+
+function resolve_title(article, document) {
+  const heading_title = extract_heading_text(article && article.content, document);
+  if (heading_title) return heading_title;
+
+  const readable_title = normalize_whitespace(article && article.title);
+  if (readable_title) return readable_title;
+
+  return "Untitled Article";
+}
+
+function resolve_author(article, document) {
+  const direct_author = normalize_whitespace(article && article.byline);
+  if (direct_author) return direct_author;
+
+  if (!document) return "Unknown Author";
+  const meta_selectors = [
+    'meta[name="author"]',
+    'meta[name="byline"]',
+    'meta[property="article:author"]',
+    'meta[property="og:author"]',
+  ];
+  for (const selector of meta_selectors) {
+    const node = document.querySelector(selector);
+    if (!node) continue;
+    const candidate = normalize_whitespace(
+      node.getAttribute("content") || node.getAttribute("value"),
+    );
+    if (candidate) return candidate;
+  }
+
+  const rel_author = document.querySelector('[rel="author"], .author, .byline');
+  if (rel_author) {
+    const text_candidate = normalize_whitespace(rel_author.textContent);
+    if (text_candidate) return text_candidate;
+  }
+
+  return "Unknown Author";
+}
+
+function build_request_headers() {
+  return {
+    "User-Agent":
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_2) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.3 Safari/605.1.15",
+    Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    Connection: "keep-alive",
+    "Cache-Control": "no-cache",
+  };
+}
+
+async function fetch_with_http(target_url, options) {
+  const { timeout, max_redirects } = options;
+  const headers = build_request_headers();
+
+  const response = await axios.get(target_url, {
+    headers,
+    timeout,
+    maxRedirects: max_redirects,
+    responseType: "text",
+    validateStatus: (status) => status >= 200 && status < 400,
+  });
+
+  const html_text = response.data;
+  if (!html_text || !html_text.trim()) {
+    throw new Error("Downloaded HTML is empty.");
+  }
+
+  return {
+    html_text,
+    final_url: resolve_final_url(response, target_url),
+  };
+}
+
+async function fetch_with_browser(target_url, options) {
+  const { timeout } = options;
+  const wait_after_load = Math.max(0, Number(options.wait_after_load) || 0);
+  const headers = build_request_headers();
+
+  const browser = await playwright.chromium.launch({ headless: true });
+  const context = await browser.newContext({
+    userAgent: headers["User-Agent"],
+    viewport: null,
+    extraHTTPHeaders: {
+      Accept: headers.Accept,
+      "Accept-Language": headers["Accept-Language"],
+      Connection: headers.Connection,
+      "Cache-Control": headers["Cache-Control"],
+    },
+  });
+  const page = await context.newPage();
+  page.setDefaultTimeout(timeout);
+
+  try {
+    await page.goto(target_url, {
+      waitUntil: "domcontentloaded",
+      timeout,
+    });
+
+    try {
+      await page.waitForLoadState("networkidle", {
+        timeout: Math.max(500, Math.min(timeout, 15000)),
+      });
+    } catch (err) {
+      // It is acceptable for some pages to never reach networkidle; continue.
+    }
+
+    if (wait_after_load > 0) {
+      await page.waitForTimeout(wait_after_load);
+    }
+
+    const html_text = await page.content();
+    const final_url = page.url();
+
+    if (!html_text || !html_text.trim()) {
+      throw new Error("Rendered HTML is empty.");
+    }
+
+    return { html_text, final_url: final_url || target_url };
+  } finally {
+    try {
+      await context.close();
+    } catch (_) {
+      // ignore cleanup failures
+    }
+    try {
+      await browser.close();
+    } catch (_) {
+      // ignore cleanup failures
+    }
+  }
+}
+
+async function download_html(target_url, options) {
+  const mode = valid_render_modes.includes(options.render_mode)
+    ? options.render_mode
+    : default_render_mode;
+
+  if (mode === "http") {
+    return await fetch_with_http(target_url, options);
+  }
+
+  if (mode === "browser") {
+    return await fetch_with_browser(target_url, options);
+  }
+
+  // auto mode: try browser first, fall back to HTTP on failure.
+  try {
+    return await fetch_with_browser(target_url, options);
+  } catch (err) {
+    console.log(
+      palette.warn(
+        `Headless browser fetch failed (${err.message}). Falling back to HTTP.`,
+      ),
+    );
+    return await fetch_with_http(target_url, options);
+  }
+}
+
+async function run_summarizer(markdown_path, skip_summary) {
+  if (skip_summary) {
+    return false;
+  }
+
+  const summarizer_exists = await fs_extra.pathExists(summarizer_command);
+  if (!summarizer_exists) {
+    console.log(
+      palette.warn(
+        `Summarizer command not found at ${palette.path(summarizer_command)}. Skipping summarize step.`,
+      ),
+    );
+    return false;
+  }
+
+  return await new Promise((resolve, reject) => {
+    const child = spawn(summarizer_command, [markdown_path], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    child.stdout.on("data", (chunk) => {
+      const text = chunk.toString();
+      if (text.includes("当前目录为只读")) {
+        console.log(palette.warn("Summarizer reported the target directory as read-only; cleaning output."));
+        return;
+      }
+      process.stdout.write(palette.detail(text));
+    });
+    child.stderr.on("data", (chunk) => {
+      process.stderr.write(palette.warn(chunk.toString()));
+    });
+
+    child.on("error", (error) => {
+      reject(new Error(`Failed to launch summarizer: ${error.message}`));
+    });
+
+    child.on("close", (code) => {
+      if (code === 0) {
+        resolve(true);
+      } else {
+        reject(new Error(`Summarizer exited with status ${code}`));
+      }
+    });
+  });
+}
+
+function clean_summary_text(text) {
+  if (!text) return text;
+  const lines = text.split(/\r?\n/);
+  if (!lines.length) return text;
+
+  const firstContentIndex = lines.findIndex((line) => line.trim().length > 0);
+  if (firstContentIndex === -1) return text;
+
+  const firstLine = lines[firstContentIndex];
+  const warningPatterns = [
+    /当前目录为只读/,
+    /只读沙盒/,
+    /无法写入/,
+    /请自行创建/,
+    /请手动保存/,
+  ];
+  const hasWarning = warningPatterns.some((pattern) => pattern.test(firstLine));
+  if (!hasWarning) return text;
+
+  let startIndex = firstContentIndex + 1;
+  while (startIndex < lines.length && !lines[startIndex].trim()) {
+    startIndex += 1;
+  }
+
+  const trimmed = lines.slice(startIndex).join("\n").replace(/^\s+/, "");
+  return trimmed;
+}
+
+async function process_url(target_url, settings) {
+  console.log(palette.headline(`Processing ${target_url}`));
+
+  const { output_root, force, timeout, max_redirects, render_mode, wait_after_load } =
+    settings;
+  const download_result = await download_html(target_url, {
+    timeout,
+    max_redirects,
+    render_mode,
+    wait_after_load,
+  });
+
+  console.log(palette.info(`Downloaded content from ${download_result.final_url}`));
+
+  const dom = new JSDOM(download_result.html_text, {
+    url: download_result.final_url,
+    pretendToBeVisual: false,
+  });
+  const document = dom.window.document;
+  const readability = new Readability(document);
+  const article = readability.parse();
+  if (!article || !article.content) {
+    throw new Error("Failed to extract main article content using Readability.");
+  }
+
+  const article_title = resolve_title(article, document);
+  const article_author = resolve_author(article, document);
+  const folder_name = `${to_directory_segment(article_title)}_${to_directory_segment(article_author)}`;
+
+  await fs_extra.ensureDir(output_root);
+  const article_directory = await ensure_article_directory(
+    output_root,
+    folder_name,
+    force,
+  );
+
+  console.log(
+    palette.info(`Saving article to ${palette.path(article_directory)}`),
+  );
+
+  const metadata = {
+    title: article_title,
+    author: article_author,
+    source_url: download_result.final_url,
+    original_url: target_url,
+    retrieved_at: new Date().toISOString(),
+    excerpt: sanitize_excerpt(article.excerpt),
+    word_count: article.length || undefined,
+  };
+
+  const raw_html_path = path.join(article_directory, "source.html");
+  const article_html_path = path.join(article_directory, "article.html");
+  const markdown_path = path.join(article_directory, "content.md");
+  const metadata_json_path = path.join(article_directory, "metadata.json");
+
+  await fs.promises.writeFile(raw_html_path, download_result.html_text, "utf8");
+  await fs.promises.writeFile(article_html_path, article.content, "utf8");
+
+  const front_matter_yaml = YAML.stringify(
+    Object.fromEntries(
+      Object.entries(metadata).filter(([, value]) => value !== undefined),
+    ),
+    { defaultStringType: "QUOTE_DOUBLE" },
+  );
+  const markdown_body = turndown_service.turndown(article.content);
+  const markdown_output = `---\n${front_matter_yaml}---\n\n${markdown_body.trim()}\n`;
+  await fs.promises.writeFile(markdown_path, markdown_output, "utf8");
+
+  await fs_extra.writeJson(metadata_json_path, metadata, { spaces: 2 });
+
+  console.log(palette.success("Markdown export completed."));
+
+  try {
+    const summary_invoked = await run_summarizer(
+      markdown_path,
+      settings.skip_summary,
+    );
+    if (summary_invoked) {
+      const generated_summary_path = `${markdown_path}.总结.md`;
+      const final_summary_path = path.join(article_directory, "summary.md");
+      if (await fs_extra.pathExists(generated_summary_path)) {
+        const raw_summary = await fs.promises.readFile(
+          generated_summary_path,
+          "utf8",
+        );
+        const cleaned_summary = clean_summary_text(raw_summary);
+        await fs.promises.writeFile(
+          generated_summary_path,
+          cleaned_summary.trimEnd() + "\n",
+          "utf8",
+        );
+        await fs_extra.move(generated_summary_path, final_summary_path, {
+          overwrite: true,
+        });
+        console.log(
+          palette.success(
+            `Summary ready at ${palette.path(final_summary_path)}`,
+          ),
+        );
+      } else {
+        console.log(
+          palette.warn(
+            "Summarizer finished but output file was not found. Check text_summarize configuration.",
+          ),
+        );
+      }
+    } else if (!settings.skip_summary) {
+      console.log(palette.warn("Summary step skipped."));
+    }
+  } catch (summary_error) {
+    console.error(palette.warn(summary_error.message));
+  }
+
+  return article_directory;
+}
+
+(async () => {
+  const cli_urls = argv._ || [];
+  const url_files_option = argv["url-file"];
+  const skip_summary = Boolean(argv["skip-summary"]);
+  const url_list = await gather_urls(cli_urls, url_files_option);
+
+  if (!url_list.length) {
+    console.error(palette.error("No URLs provided. Nothing to do."));
+    process.exitCode = 1;
+    return;
+  }
+
+  const settings = {
+    output_root: path.resolve(argv["output-root"] || default_output_root),
+    force: Boolean(argv.force),
+    timeout: Number(argv.timeout),
+    max_redirects: Number(argv["max-redirects"]),
+    skip_summary,
+    render_mode: argv["render-mode"] || default_render_mode,
+    wait_after_load: Number(argv["wait-after-load"]),
+  };
+
+  console.log(
+    palette.headline(
+      `Target output directory: ${palette.path(settings.output_root)}`,
+    ),
+  );
+
+  await fs_extra.ensureDir(settings.output_root);
+
+  let success_count = 0;
+  let failure_count = 0;
+  const failure_details = [];
+
+  for (const target_url of url_list) {
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      await process_url(target_url, settings);
+      success_count += 1;
+    } catch (err) {
+      failure_count += 1;
+      failure_details.push({ url: target_url, message: err.message });
+      console.error(
+        palette.error(
+          `Failed to process ${target_url}: ${err.message || "Unknown error"}`,
+        ),
+      );
+    }
+  }
+
+  const summary_parts = [
+    palette.success(`${success_count} succeeded`),
+    failure_count
+      ? palette.error(`${failure_count} failed`)
+      : palette.info("0 failed"),
+  ];
+  console.log(palette.headline(`Done (${summary_parts.join(", ")}).`));
+
+  if (failure_details.length) {
+    console.log(palette.warn("Failures:"));
+    for (const failure of failure_details) {
+      console.log(
+        `${palette.warn("-")}${chalk.reset(" ")}${palette.path(failure.url)} ${palette.detail(failure.message)}`,
+      );
+    }
+  }
+})();
