@@ -3,38 +3,53 @@
 const fs = require("fs");
 const path = require("path");
 const minimist = require("minimist");
+const chalk = require("chalk");
+const { globSync } = require("glob");
 
 const {
-  transcribeWithWhisper,
+  transcribeWithWhisper: transcribe_with_whisper,
 } = require("../lib/live_media/whisper_transcribe");
 
 const DEFAULT_WHISPER_MODEL = process.env.WHISPER_DEFAULT_MODEL || "turbo";
 const DEFAULT_TRANSCRIPT_FORMATS = ["srt", "vtt"];
+const DEFAULT_CONCURRENCY = 3;
 
-const extraBinDirs = [];
+const extra_bin_dirs = [];
 if (process.env.HOME) {
-  extraBinDirs.push(path.join(process.env.HOME, ".local/bin"));
-  extraBinDirs.push(path.join(process.env.HOME, "Library/Python/3.9/bin"));
+  extra_bin_dirs.push(path.join(process.env.HOME, ".local/bin"));
+  extra_bin_dirs.push(path.join(process.env.HOME, "Library/Python/3.9/bin"));
 }
-const existingExtraDirs = extraBinDirs.filter((dir) => {
+const existing_extra_dirs = extra_bin_dirs.filter((dir_path) => {
   try {
-    fs.accessSync(dir, fs.constants.X_OK);
+    fs.accessSync(dir_path, fs.constants.X_OK);
     return true;
-  } catch (err) {
+  } catch (error) {
     return false;
   }
 });
-if (existingExtraDirs.length) {
-  const currentPath = process.env.PATH || "";
-  process.env.PATH = `${existingExtraDirs.join(path.delimiter)}${currentPath ? `${path.delimiter}${currentPath}` : ""}`;
+if (existing_extra_dirs.length) {
+  const current_path = process.env.PATH || "";
+  process.env.PATH = `${existing_extra_dirs.join(path.delimiter)}${current_path ? `${path.delimiter}${current_path}` : ""}`;
 }
 
-function showHelp() {
+const label_start = chalk.bold.blue("START");
+const label_done = chalk.bold.green("DONE");
+const label_fail = chalk.bold.red("FAIL");
+const label_warn = chalk.bold.yellow("WARN");
+
+function show_help() {
   const cmd = path.basename(process.argv[1] || "videos_transcribe_whisper");
-  console.log("Usage:");
-  console.log(`  ${cmd} <audio-or-video-file> [options]`);
+  console.log(chalk.bold("Usage:"));
+  console.log(
+    `  ${chalk.cyan(cmd)} ${chalk.yellow("<audio-or-video-file> [...more files]")} [options]`,
+  );
   console.log("");
-  console.log("Options:");
+  console.log(chalk.bold("Description:"));
+  console.log(
+    "  Transcribe audio or video sources with Whisper, supporting globs and batches.",
+  );
+  console.log("");
+  console.log(chalk.bold("Options:"));
   console.log("  -o, --output-dir DIR      Directory for transcript outputs");
   console.log(
     "      --format FORMAT       Output format(s) (repeat or comma-separated, default: srt,vtt)",
@@ -54,17 +69,25 @@ function showHelp() {
     "      --compute-type TYPE   Only for faster-whisper (e.g. float16)",
   );
   console.log("      --whisper-bin PATH    Path to whisper executable");
+  console.log(
+    "      --concurrency N       Number of files to process in parallel (default: 3)",
+  );
   console.log("      --extra ARG           Additional CLI args (repeatable)");
   console.log("  -h, --help                Show this help message");
   console.log("");
-  console.log("Examples:");
-  console.log(`  ${cmd} input.m4a --model turbo`);
+  console.log(chalk.bold("Examples:"));
   console.log(
-    `  ${cmd} input.mp4 --output-dir transcripts --format srt --extra --max_line_width --extra 120`,
+    `  ${chalk.cyan(cmd)} ${chalk.yellow('"input/*.mp4"')} --output-dir transcripts`,
+  );
+  console.log(
+    `  ${chalk.cyan(cmd)} ${chalk.yellow("episode.m4a lesson.mp4")} --format srt --concurrency 4`,
+  );
+  console.log(
+    `  ${chalk.cyan(cmd)} ${chalk.yellow("video.mov")} --extra --max_line_width --extra 120`,
   );
 }
 
-function parseNumber(value, label) {
+function parse_number(value, label) {
   if (value === undefined || value === null || value === "") return undefined;
   const num = Number(value);
   if (Number.isNaN(num)) {
@@ -73,14 +96,14 @@ function parseNumber(value, label) {
   return num;
 }
 
-function parseRepeatable(value) {
+function parse_repeatable(value) {
   if (!value) return [];
   if (Array.isArray(value)) return value;
   return [value];
 }
 
-function normalizeFormats(rawValue) {
-  const initial = parseRepeatable(rawValue);
+function normalize_formats(raw_value) {
+  const initial = parse_repeatable(raw_value);
   const flattened = initial
     .flatMap((entry) => `${entry}`.split(",").map((part) => part.trim()))
     .filter((part) => part.length > 0);
@@ -91,6 +114,74 @@ function normalizeFormats(rawValue) {
     formats = ["txt", "vtt", "srt", "tsv", "json"];
   }
   return Array.from(new Set(formats));
+}
+
+function expand_input_patterns(patterns) {
+  const unique_paths = new Set();
+  const files = [];
+  const unmatched = [];
+
+  patterns.forEach((pattern) => {
+    const matches = globSync(pattern, { nodir: true, dot: true });
+    if (!matches.length) {
+      try {
+        const stats = fs.statSync(pattern);
+        if (stats.isFile()) {
+          if (!unique_paths.has(pattern)) {
+            unique_paths.add(pattern);
+            files.push(pattern);
+          }
+          return;
+        }
+      } catch (error) {
+        // ignore, treat as unmatched
+      }
+      unmatched.push(pattern);
+      return;
+    }
+
+    matches.forEach((match_path) => {
+      if (!unique_paths.has(match_path)) {
+        unique_paths.add(match_path);
+        files.push(match_path);
+      }
+    });
+  });
+
+  return { files, unmatched };
+}
+
+async function run_with_concurrency(items, limit, runner) {
+  const capped_limit = Math.max(1, Math.min(limit, items.length || 1));
+  const results = new Array(items.length);
+  const errors = [];
+  let next_index = 0;
+
+  async function worker() {
+    for (;;) {
+      let current_index;
+      if (next_index >= items.length) break;
+      current_index = next_index;
+      next_index += 1;
+      try {
+        results[current_index] = await runner(
+          items[current_index],
+          current_index,
+        );
+      } catch (error) {
+        errors.push({
+          index: current_index,
+          item: items[current_index],
+          error,
+        });
+      }
+    }
+  }
+
+  const worker_count = Math.min(capped_limit, items.length || 1);
+  await Promise.all(Array.from({ length: worker_count }, () => worker()));
+
+  return { results, errors };
 }
 
 async function main() {
@@ -108,74 +199,158 @@ async function main() {
       "compute-type",
       "whisper-bin",
       "extra",
+      "concurrency",
     ],
     boolean: ["help"],
-    alias: { o: "output-dir", h: "help" },
+    alias: { o: "output-dir", h: "help", c: "concurrency" },
   });
 
   if (argv.help) {
-    showHelp();
+    show_help();
     return;
   }
 
-  const inputPath = argv._[0] || argv.input;
-  if (!inputPath) {
-    console.error("Error: input audio or video file is required.");
-    showHelp();
-    process.exit(1);
-  }
-
-  let extraArgs = [];
-  if (Array.isArray(argv.extra)) {
-    extraArgs = argv.extra;
-  } else if (typeof argv.extra === "string") {
-    extraArgs = [argv.extra];
-  }
-
   try {
-    const formats = normalizeFormats(argv.format);
-    const result = await transcribeWithWhisper({
-      inputPath,
+    const positional_inputs = Array.isArray(argv._) ? argv._ : [];
+    const flagged_inputs = parse_repeatable(argv.input);
+    const raw_inputs = [...positional_inputs, ...flagged_inputs].filter(
+      (entry) => typeof entry === "string" && entry.trim().length,
+    );
+
+    if (!raw_inputs.length) {
+      console.error(
+        chalk.red("Error: at least one input audio or video file is required."),
+      );
+      show_help();
+      process.exit(1);
+    }
+
+    const { files: input_paths, unmatched } = expand_input_patterns(raw_inputs);
+
+    if (unmatched.length) {
+      unmatched.forEach((pattern) => {
+        console.warn(
+          `${label_warn} No files matched pattern: ${chalk.yellow(pattern)}`,
+        );
+      });
+    }
+
+    if (!input_paths.length) {
+      console.error(chalk.red("Error: no input files could be resolved."));
+      process.exit(1);
+    }
+
+    const requested_concurrency = parse_number(
+      argv.concurrency,
+      "--concurrency",
+    );
+    const concurrency_limit = requested_concurrency ?? DEFAULT_CONCURRENCY;
+    if (!Number.isInteger(concurrency_limit) || concurrency_limit < 1) {
+      throw new Error("--concurrency must be a positive integer.");
+    }
+
+    let extra_args = [];
+    if (Array.isArray(argv.extra)) {
+      extra_args = argv.extra;
+    } else if (typeof argv.extra === "string" && argv.extra.length) {
+      extra_args = [argv.extra];
+    }
+
+    const formats = normalize_formats(argv.format);
+
+    const shared_options = {
       outputDir: argv["output-dir"] || argv.outputDir,
       outputFormats: formats,
       model: argv.model || DEFAULT_WHISPER_MODEL,
       language: argv.language,
       task: argv.task,
-      temperature: parseNumber(argv.temperature, "--temperature"),
-      beamSize: parseNumber(argv["beam-size"], "--beam-size"),
-      bestOf: parseNumber(argv["best-of"], "--best-of"),
+      temperature: parse_number(argv.temperature, "--temperature"),
+      beamSize: parse_number(argv["beam-size"], "--beam-size"),
+      bestOf: parse_number(argv["best-of"], "--best-of"),
       device: argv.device,
       computeType: argv["compute-type"] || argv.computeType,
       whisperPath: argv["whisper-bin"] || argv.whisperBin,
-      extraArgs,
+      extraArgs: extra_args,
       logger: console,
-    });
+    };
 
-    const outputs =
-      result.outputs && result.outputs.length
-        ? result.outputs
-        : result.primaryOutput
-          ? [{ format: formats[0], path: result.primaryOutput }]
-          : [];
-    if (outputs.length > 1) {
-      console.log("Transcripts saved to:");
-      outputs.forEach((output) => {
-        console.log(
-          `  - ${output.path}${output.format ? ` [${output.format}]` : ""}`,
-        );
+    const { errors } = await run_with_concurrency(
+      input_paths,
+      concurrency_limit,
+      async (input_path) => {
+        const file_label = chalk.bold.white(path.basename(input_path));
+        console.log(`${label_start} ${file_label}`);
+        try {
+          const result = await transcribe_with_whisper({
+            ...shared_options,
+            inputPath: input_path,
+          });
+
+          const outputs =
+            result.outputs && result.outputs.length
+              ? result.outputs
+              : result.primaryOutput
+                ? [{ format: formats[0], path: result.primaryOutput }]
+                : [];
+
+          if (outputs.length > 1) {
+            console.log(chalk.green("  Outputs:"));
+            outputs.forEach((output) => {
+              const format_suffix = output.format ? ` [${output.format}]` : "";
+              console.log(
+                `    ${chalk.green("•")} ${output.path}${format_suffix}`,
+              );
+            });
+          } else if (outputs.length === 1) {
+            const only_output = outputs[0];
+            const format_suffix = only_output.format
+              ? ` [${only_output.format}]`
+              : "";
+            console.log(
+              chalk.green(
+                `  Transcript saved to: ${only_output.path}${format_suffix}`,
+              ),
+            );
+          } else {
+            console.log(
+              chalk.yellow(
+                "  Transcription completed, but no output files were detected.",
+              ),
+            );
+          }
+
+          console.log(`${label_done} ${file_label}`);
+        } catch (error) {
+          const message =
+            error && error.message ? error.message : "Unknown error";
+          console.error(`${label_fail} ${file_label} -> ${chalk.red(message)}`);
+          throw error;
+        }
+      },
+    );
+
+    if (errors.length) {
+      console.error(
+        chalk.red(`Transcription failed for ${errors.length} file(s).`),
+      );
+      errors.forEach((entry) => {
+        const file_path = entry && entry.item ? entry.item : "<unknown>";
+        const message =
+          entry && entry.error && entry.error.message
+            ? entry.error.message
+            : "Unknown error";
+        console.error(`  - ${chalk.red(file_path)} -> ${message}`);
       });
-    } else if (outputs.length === 1) {
-      const only = outputs[0];
-      console.log(
-        `Transcript saved to: ${only.path}${only.format ? ` [${only.format}]` : ""}`,
-      );
-    } else {
-      console.log(
-        "Transcription completed, but no output files were detected.",
-      );
+      process.exit(1);
     }
-  } catch (err) {
-    console.error(`Transcription failed: ${err.message}`);
+
+    console.log(
+      chalk.bold.green(
+        `Completed ${input_paths.length} transcription${input_paths.length === 1 ? "" : "s"} successfully.`,
+      ),
+    );
+  } catch (error) {
+    console.error(chalk.red(`Transcription failed: ${error.message}`));
     process.exit(1);
   }
 }
