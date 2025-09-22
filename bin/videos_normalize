@@ -5,6 +5,8 @@ const path = require("path");
 const os = require("os");
 const yargs = require("yargs/yargs");
 const chalk = require("chalk");
+const readline = require("readline");
+const util = require("util");
 
 const { extractAudio } = require("../lib/live_media/extract_audio");
 const {
@@ -23,6 +25,351 @@ const palette = {
 };
 
 const highlightPath = (value) => (value ? palette.path(value) : value);
+
+const MAX_SUPPRESSED_MESSAGES = 800;
+const interactive_terminal = Boolean(
+  process.stdout.isTTY && process.stdin.isTTY,
+);
+
+const terminal_state = {
+  interactive: interactive_terminal,
+  logs_visible: !interactive_terminal,
+  suppressed_log_count: 0,
+  suppressed_messages: [],
+};
+
+const original_console = {
+  log: console.log.bind(console),
+  warn: console.warn.bind(console),
+  error: console.error.bind(console),
+};
+
+let progress_tracker = null;
+
+function truncate_middle(value, max_length = 60) {
+  if (!value) return "";
+  if (value.length <= max_length) return value;
+  const segment = Math.max(1, Math.floor((max_length - 3) / 2));
+  return `${value.slice(0, segment)}...${value.slice(-segment)}`;
+}
+
+function store_suppressed_line(level, text) {
+  if (text === undefined || text === null) return;
+  const normalized = `${text}`;
+  if (!normalized) return;
+  terminal_state.suppressed_messages.push({ level, text: normalized });
+  if (terminal_state.suppressed_messages.length > MAX_SUPPRESSED_MESSAGES) {
+    terminal_state.suppressed_messages.splice(
+      0,
+      terminal_state.suppressed_messages.length - MAX_SUPPRESSED_MESSAGES,
+    );
+  }
+  terminal_state.suppressed_log_count += 1;
+}
+
+function flush_suppressed_messages() {
+  if (!terminal_state.suppressed_messages.length) return;
+  for (const entry of terminal_state.suppressed_messages) {
+    const target = original_console[entry.level] || original_console.log;
+    target(entry.text);
+  }
+  terminal_state.suppressed_messages.length = 0;
+  terminal_state.suppressed_log_count = 0;
+}
+
+function emit_line(level, line, force = false) {
+  const resolved_level = level === "info" ? "log" : level;
+  const text = line;
+  const should_print = terminal_state.logs_visible || force;
+  const should_store = !terminal_state.logs_visible || (force && text);
+
+  if (should_print) {
+    const resume =
+      progress_tracker && typeof progress_tracker.pause === "function"
+        ? progress_tracker.pause()
+        : () => {};
+    try {
+      const target = original_console[resolved_level] || original_console.log;
+      target(text);
+    } finally {
+      resume();
+    }
+  }
+
+  if (should_store && text) {
+    store_suppressed_line(resolved_level, text);
+  }
+}
+
+function process_output(level, message, options = {}) {
+  if (message === undefined || message === null) return;
+  const { force = false } = options;
+  const resolved_level = level === "info" ? "log" : level;
+  const text = `${message}`;
+  if (!text) return;
+
+  const normalized = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const parts = normalized.split("\n");
+  for (let index = 0; index < parts.length; index += 1) {
+    const part = parts[index];
+    const isTrailingEmpty = index === parts.length - 1 && part.length === 0;
+    if (isTrailingEmpty) continue;
+    emit_line(resolved_level, part, force);
+  }
+}
+
+function handle_child_stream(level, chunk) {
+  if (chunk === undefined || chunk === null) return;
+  const text = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : `${chunk}`;
+  if (!text) return;
+  process_output(level, text);
+}
+
+const child_stdout_handler = (chunk) => handle_child_stream("log", chunk);
+const child_stderr_handler = (chunk) => handle_child_stream("warn", chunk);
+
+function create_progress_tracker(state) {
+  const tracker_state = {
+    active: false,
+    stage_label: "",
+    stage_index: 0,
+    stage_total: 0,
+    item_total: 0,
+    completed_count: 0,
+    detail: "",
+    last_render: "",
+    pause_depth: 0,
+  };
+
+  function is_ready() {
+    return Boolean(state.interactive && tracker_state.active);
+  }
+
+  function clamp_percent(value) {
+    if (Number.isNaN(value)) return 0;
+    if (value < 0) return 0;
+    if (value > 100) return 100;
+    return value;
+  }
+
+  function render_line() {
+    if (!state.interactive || !tracker_state.active) return;
+    if (tracker_state.pause_depth > 0) return;
+    const total_items =
+      tracker_state.item_total >= 0 ? tracker_state.item_total : 0;
+    const completed = Math.min(tracker_state.completed_count, total_items);
+    const ratio = total_items > 0 ? completed / total_items : 1;
+    const percent = clamp_percent(Math.round(ratio * 100));
+    const bar_width = 20;
+    const filled = total_items > 0 ? Math.round(ratio * bar_width) : bar_width;
+    const empty = Math.max(bar_width - filled, 0);
+    const filled_bar = filled > 0 ? palette.success("#".repeat(filled)) : "";
+    const empty_bar = empty > 0 ? palette.dim("-".repeat(empty)) : "";
+    const stage_total = tracker_state.stage_total || 1;
+    const stage_index_label = `${
+      tracker_state.stage_index > 0 ? tracker_state.stage_index : 1
+    }/${stage_total}`;
+    const stage_segment = palette.stage(
+      `[${stage_index_label}] ${tracker_state.stage_label || "Processing"}`,
+    );
+    const counts_segment = palette.stage(`${completed}/${total_items}`);
+    const percent_segment = palette.dim(`${percent}%`);
+    const detail_segment = tracker_state.detail
+      ? ` ${tracker_state.detail}`
+      : "";
+    const line = `${stage_segment} ${filled_bar}${empty_bar} ${counts_segment} ${percent_segment}${detail_segment}`;
+    if (line === tracker_state.last_render) {
+      return;
+    }
+    readline.clearLine(process.stdout, 0);
+    readline.cursorTo(process.stdout, 0);
+    process.stdout.write(line);
+    tracker_state.last_render = line;
+  }
+
+  function erase_line() {
+    if (!state.interactive) return;
+    readline.clearLine(process.stdout, 0);
+    readline.cursorTo(process.stdout, 0);
+    tracker_state.last_render = "";
+  }
+
+  function start_stage(config = {}) {
+    tracker_state.item_total = Number(config.item_total || 0);
+    tracker_state.stage_label = config.stage_label || "Processing";
+    tracker_state.stage_index = Number(config.stage_index || 1);
+    tracker_state.stage_total = Number(config.stage_total || 1);
+    tracker_state.completed_count = 0;
+    tracker_state.detail = "";
+    tracker_state.pause_depth = 0;
+    tracker_state.last_render = "";
+
+    if (!state.interactive) {
+      tracker_state.active = false;
+      return false;
+    }
+
+    if (tracker_state.item_total <= 0) {
+      tracker_state.active = false;
+      return false;
+    }
+
+    tracker_state.active = true;
+    render_line();
+    return true;
+  }
+
+  function begin_item(detail) {
+    if (!is_ready()) return;
+    tracker_state.detail = detail || "";
+    render_line();
+  }
+
+  function complete_item(detail) {
+    if (!tracker_state.active) return;
+    if (detail !== undefined && detail !== null) {
+      tracker_state.detail = detail;
+    }
+    if (tracker_state.completed_count < tracker_state.item_total) {
+      tracker_state.completed_count += 1;
+    }
+    render_line();
+  }
+
+  function finish_stage() {
+    if (!tracker_state.active) return;
+    tracker_state.active = false;
+    tracker_state.pause_depth = 0;
+    tracker_state.last_render = "";
+    if (state.interactive) {
+      process.stdout.write("\n");
+    }
+  }
+
+  function pause() {
+    if (!is_ready()) {
+      return () => {};
+    }
+    tracker_state.pause_depth += 1;
+    if (tracker_state.pause_depth === 1) {
+      erase_line();
+    }
+    return () => {
+      if (!state.interactive) return;
+      tracker_state.pause_depth = Math.max(0, tracker_state.pause_depth - 1);
+      if (tracker_state.pause_depth === 0 && tracker_state.active) {
+        tracker_state.last_render = "";
+        render_line();
+      }
+    };
+  }
+
+  async function run_with_pause(fn) {
+    const resume = pause();
+    try {
+      return await fn();
+    } finally {
+      resume();
+    }
+  }
+
+  return {
+    start_stage,
+    begin_item,
+    complete_item,
+    finish_stage,
+    erase_line,
+    render_line,
+    pause,
+    run_with_pause,
+    is_active: () =>
+      Boolean(
+        state.interactive &&
+          tracker_state.active &&
+          tracker_state.item_total > 0,
+      ),
+  };
+}
+
+progress_tracker = create_progress_tracker(terminal_state);
+
+function handle_console_output(level, args) {
+  const resolved_level = level === "info" ? "log" : level;
+  const message = util.format(...args);
+  const force = resolved_level === "error";
+  process_output(resolved_level, message, { force });
+}
+
+console.log = (...args) => handle_console_output("log", args);
+console.info = (...args) => handle_console_output("log", args);
+console.warn = (...args) => handle_console_output("warn", args);
+console.error = (...args) => handle_console_output("error", args);
+
+function toggle_logs() {
+  const resume =
+    progress_tracker && typeof progress_tracker.pause === "function"
+      ? progress_tracker.pause()
+      : () => {};
+  try {
+    if (terminal_state.logs_visible) {
+      terminal_state.logs_visible = false;
+      original_console.log(palette.dim("Logs hidden. Press 'l' to show logs."));
+      return;
+    }
+
+    terminal_state.logs_visible = true;
+    const buffered = terminal_state.suppressed_messages.length;
+    const count = terminal_state.suppressed_log_count;
+    const suffix = count
+      ? ` (${count} buffered message${count === 1 ? "" : "s"})`
+      : "";
+    original_console.log(palette.stage(`Logs enabled${suffix}.`));
+    flush_suppressed_messages();
+  } finally {
+    resume();
+  }
+}
+
+function setup_keypress_listener() {
+  if (!terminal_state.interactive) return;
+  try {
+    process.stdin.setRawMode(true);
+  } catch (err) {
+    return;
+  }
+  process.stdin.resume();
+  process.stdin.setEncoding("utf8");
+  process.stdin.on("data", (data) => {
+    if (!data) return;
+    for (const char of `${data}`) {
+      if (char === "l" || char === "L") {
+        toggle_logs();
+      } else if (char === "\u0003") {
+        progress_tracker.erase_line();
+        try {
+          process.stdin.setRawMode(false);
+        } catch (innerErr) {
+          // ignore cleanup failure
+        }
+        process.stdin.pause();
+        process.exit(130);
+      }
+    }
+  });
+  process.on("exit", () => {
+    if (process.stdin.isTTY) {
+      try {
+        process.stdin.setRawMode(false);
+      } catch (err) {
+        // ignore cleanup failure
+      }
+    }
+  });
+}
+
+if (terminal_state.interactive) {
+  setup_keypress_listener();
+}
 
 const VIDEO_EXTENSIONS = new Set([
   ".mp4",
@@ -437,6 +784,28 @@ function describeSkipReason(reason) {
 
 const LOG_FILE_PREFIX = "/tmp/log.videos_normalize";
 const STAGE_KEYS = ["audio", "transcript", "compression"];
+const STAGE_LABELS = {
+  audio: "Audio",
+  transcript: "Transcription",
+  compression: "Compression",
+};
+
+function stage_prefix(stage_key) {
+  const index = STAGE_KEYS.indexOf(stage_key);
+  if (index === -1) return stage_key;
+  const label = STAGE_LABELS[stage_key] || stage_key;
+  return `[${index + 1}/${STAGE_KEYS.length}] ${label}`;
+}
+
+function stage_files_phrase(count) {
+  if (count === 1) return "Processing 1 file...";
+  return `Processing ${count} files...`;
+}
+
+function stage_banner(stage_key, message, formatter = palette.stage) {
+  const prefix = stage_prefix(stage_key);
+  emit_line("log", formatter(`${prefix} ${message}`), true);
+}
 
 function createLogFilePath() {
   const timestamp = Math.floor(Date.now() / 1000);
@@ -543,15 +912,19 @@ async function processAudioStage(entries, argv, force) {
   const audioOutputOption = argv["audio-output"]
     ? path.resolve(argv["audio-output"])
     : null;
+  const stage_entries = entries.filter((entry) => entry && entry.summary);
+
+  const stage_key = "audio";
+  const stage_item_count = stage_entries.length;
 
   if (skipAudio) {
-    console.log(palette.dim("[1/3] Audio extraction skipped."));
+    stage_banner(stage_key, "Skipped.", palette.dim);
+  } else if (!stage_item_count) {
+    stage_banner(stage_key, "No files to process.", palette.dim);
+    await updateRunLog();
+    return;
   } else {
-    const label =
-      entries.length > 1
-        ? "[1/3] Extracting audio for all files..."
-        : "[1/3] Extracting audio...";
-    console.log(palette.stage(label));
+    stage_banner(stage_key, stage_files_phrase(stage_item_count));
   }
 
   let streamIndex = 0;
@@ -561,116 +934,138 @@ async function processAudioStage(entries, argv, force) {
     if (Number.isNaN(streamIndex) || streamIndex < 0) {
       throw new Error("Audio stream index must be a non-negative integer.");
     }
+    progress_tracker.start_stage({
+      stage_label: "Audio",
+      stage_index: STAGE_KEYS.indexOf("audio") + 1,
+      stage_total: STAGE_KEYS.length,
+      item_total: stage_item_count,
+    });
   }
 
-  for (const entry of entries) {
-    if (!entry || !entry.summary) continue;
+  try {
+    for (const entry of stage_entries) {
+      entry.audioForTranscription = initialAudioSource;
+      const displayPath = formatDisplayPath(entry.inputVideo);
+      const truncated_display = truncate_middle(displayPath, 60);
 
-    entry.audioForTranscription = initialAudioSource;
-    const displayPath = formatDisplayPath(entry.inputVideo);
+      if (!skipAudio && stage_entries.length > 1) {
+        console.log(`${palette.dim("  • ")}${highlightPath(displayPath)}`);
+      }
 
-    if (!skipAudio && entries.length > 1) {
-      console.log(`${palette.dim("  • ")}${highlightPath(displayPath)}`);
-    }
-
-    try {
       if (!skipAudio) {
-        try {
-          const audioResult = await extractAudio({
-            inputPath: entry.inputVideo,
-            outputPath: audioOutputOption || entry.targetBasePath,
-            outputExtension: argv["audio-format"],
-            audioStreamIndex: streamIndex,
-            force,
-            preferCopy: true,
-            allowTranscodeFallback: true,
-            fallbackBitrate: argv["audio-bitrate"] || "192k",
-            fallbackSampleRate,
-            ffmpegPath: argv.ffmpeg,
-            ffprobePath: argv.ffprobe,
-            logger: console,
-          });
-          entry.audioForTranscription = audioResult.outputPath;
-          entry.summary.audio = audioResult;
-          console.log(
-            `${palette.success("    ✓ Audio saved to ")}${highlightPath(
-              audioResult.outputPath,
-            )}`,
-          );
-          recordStageSuccess("audio");
-        } catch (err) {
-          if (err && err.code === "OUTPUT_EXISTS" && !force) {
-            const existingOutput =
-              outputExistsPathFromError(err) ||
-              (audioOutputOption ? audioOutputOption : "");
-            const resolvedExisting = existingOutput || null;
-            const fallbackSource = resolvedExisting || entry.inputVideo;
-            await ensureReadable(fallbackSource, "Existing audio output");
-            entry.audioForTranscription = fallbackSource;
-            entry.summary.audio = { skipped: true, reason: "exists" };
-            if (resolvedExisting) {
-              entry.summary.audio.outputPath = resolvedExisting;
-              entry.summary.audio.source = resolvedExisting;
-              console.log(
-                `${palette.dim("    • Audio already exists at ")}${highlightPath(
-                  resolvedExisting,
-                )}${palette.dim("; skipping (use --force to regenerate).")}`,
-              );
-            } else {
-              entry.summary.audio.source = fallbackSource;
-              console.log(
-                palette.dim(
-                  "    • Audio output already exists; skipping (use --force to regenerate).",
-                ),
-              );
-            }
-            recordStageSuccess("audio");
-          } else {
-            const message = resolveErrorMessage(
-              err,
-              `Audio extraction failed for ${displayPath}`,
-            );
-            console.error(
-              palette.error(`    ✗ Audio extraction failed: ${message}`),
-            );
-            recordStageFailure(entry, "audio", message);
-            entry.audioForTranscription = null;
-            continue;
-          }
-        }
-      } else {
-        if (!entry.audioForTranscription) {
-          const defaultAudioPath = `${entry.targetBasePath}.m4a`;
-          if (await pathExists(defaultAudioPath)) {
-            entry.audioForTranscription = defaultAudioPath;
-          } else {
-            entry.audioForTranscription = entry.inputVideo;
-          }
-        }
-        entry.summary.audio = {
-          skipped: true,
-          source: entry.audioForTranscription,
-        };
+        const detail_label = `${palette.dim("Processing:")} ${highlightPath(
+          truncated_display,
+        )}`;
+        progress_tracker.begin_item(detail_label);
       }
 
-      if (entry.audioForTranscription) {
-        await ensureReadable(
-          entry.audioForTranscription,
-          "Audio source for transcription",
+      try {
+        if (!skipAudio) {
+          try {
+            const audioResult = await extractAudio({
+              inputPath: entry.inputVideo,
+              outputPath: audioOutputOption || entry.targetBasePath,
+              outputExtension: argv["audio-format"],
+              audioStreamIndex: streamIndex,
+              force,
+              preferCopy: true,
+              allowTranscodeFallback: true,
+              fallbackBitrate: argv["audio-bitrate"] || "192k",
+              fallbackSampleRate,
+              ffmpegPath: argv.ffmpeg,
+              ffprobePath: argv.ffprobe,
+              logger: console,
+              commandSilent: true,
+              onCommandStdout: child_stdout_handler,
+              onCommandStderr: child_stderr_handler,
+            });
+            entry.audioForTranscription = audioResult.outputPath;
+            entry.summary.audio = audioResult;
+            console.log(
+              `${palette.success("    ✓ Audio saved to ")}${highlightPath(
+                audioResult.outputPath,
+              )}`,
+            );
+            recordStageSuccess("audio");
+          } catch (err) {
+            if (err && err.code === "OUTPUT_EXISTS" && !force) {
+              const existingOutput =
+                outputExistsPathFromError(err) ||
+                (audioOutputOption ? audioOutputOption : "");
+              const resolvedExisting = existingOutput || null;
+              const fallbackSource = resolvedExisting || entry.inputVideo;
+              await ensureReadable(fallbackSource, "Existing audio output");
+              entry.audioForTranscription = fallbackSource;
+              entry.summary.audio = { skipped: true, reason: "exists" };
+              if (resolvedExisting) {
+                entry.summary.audio.outputPath = resolvedExisting;
+                entry.summary.audio.source = resolvedExisting;
+                console.log(
+                  `${palette.dim("    • Audio already exists at ")}${highlightPath(
+                    resolvedExisting,
+                  )}${palette.dim("; skipping (use --force to regenerate).")}`,
+                );
+              } else {
+                entry.summary.audio.source = fallbackSource;
+                console.log(
+                  palette.dim(
+                    "    • Audio output already exists; skipping (use --force to regenerate).",
+                  ),
+                );
+              }
+              recordStageSuccess("audio");
+            } else {
+              const message = resolveErrorMessage(
+                err,
+                `Audio extraction failed for ${displayPath}`,
+              );
+              console.error(
+                palette.error(`    ✗ Audio extraction failed: ${message}`),
+              );
+              recordStageFailure(entry, "audio", message);
+              entry.audioForTranscription = null;
+              continue;
+            }
+          }
+        } else {
+          if (!entry.audioForTranscription) {
+            const defaultAudioPath = `${entry.targetBasePath}.m4a`;
+            if (await pathExists(defaultAudioPath)) {
+              entry.audioForTranscription = defaultAudioPath;
+            } else {
+              entry.audioForTranscription = entry.inputVideo;
+            }
+          }
+          entry.summary.audio = {
+            skipped: true,
+            source: entry.audioForTranscription,
+          };
+        }
+
+        if (entry.audioForTranscription) {
+          await ensureReadable(
+            entry.audioForTranscription,
+            "Audio source for transcription",
+          );
+        }
+      } catch (err) {
+        const message = resolveErrorMessage(
+          err,
+          `Audio processing failed for ${displayPath}`,
         );
+        console.error(
+          palette.error(`    ✗ Audio processing failed: ${message}`),
+        );
+        recordStageFailure(entry, "audio", message);
+        entry.audioForTranscription = null;
+        continue;
+      } finally {
+        progress_tracker.complete_item();
+        await updateRunLog();
       }
-    } catch (err) {
-      const message = resolveErrorMessage(
-        err,
-        `Audio processing failed for ${displayPath}`,
-      );
-      console.error(palette.error(`    ✗ Audio processing failed: ${message}`));
-      recordStageFailure(entry, "audio", message);
-      entry.audioForTranscription = null;
-      continue;
-    } finally {
-      await updateRunLog();
     }
+  } finally {
+    progress_tracker.finish_stage();
   }
 }
 
@@ -678,17 +1073,26 @@ async function processTranscriptionStage(entries, argv, force) {
   const skipTranscript = Boolean(
     argv["skip-transcript"] || argv.skipTranscript,
   );
+  const stage_entries = entries.filter((entry) => entry && entry.summary);
+  const stage_key = "transcript";
+  const stage_item_count = stage_entries.length;
 
   if (skipTranscript) {
-    console.log(palette.dim("[2/3] Transcription skipped."));
-    entries.forEach((entry) => {
-      if (entry && entry.summary) {
-        entry.summary.transcript = { skipped: true };
-      }
+    stage_banner(stage_key, "Skipped.", palette.dim);
+    stage_entries.forEach((entry) => {
+      entry.summary.transcript = { skipped: true };
     });
     await updateRunLog();
     return;
   }
+
+  if (!stage_item_count) {
+    stage_banner(stage_key, "No files to process.", palette.dim);
+    await updateRunLog();
+    return;
+  }
+
+  stage_banner(stage_key, stage_files_phrase(stage_item_count));
 
   const transcriptOutputArg = argv["transcript-output"];
   const transcriptDirOption =
@@ -701,188 +1105,204 @@ async function processTranscriptionStage(entries, argv, force) {
     argv["transcript-format"],
   );
 
-  const label =
-    entries.length > 1
-      ? "[2/3] Transcribing with whisper for all files..."
-      : "[2/3] Transcribing with whisper...";
-  console.log(palette.stage(label));
+  progress_tracker.start_stage({
+    stage_label: "Transcription",
+    stage_index: STAGE_KEYS.indexOf("transcript") + 1,
+    stage_total: STAGE_KEYS.length,
+    item_total: stage_item_count,
+  });
 
-  for (const entry of entries) {
-    if (!entry || !entry.summary) continue;
-    const displayPath = formatDisplayPath(entry.inputVideo);
-    if (entries.length > 1) {
-      console.log(`${palette.dim("  • ")}${highlightPath(displayPath)}`);
-    }
-
-    const audioForTranscription =
-      entry.audioForTranscription || entry.inputVideo;
-
-    try {
-      const baseDirForTranscript = transcriptDirOption
-        ? path.resolve(transcriptDirOption)
-        : entry.targetDir;
-
-      const resolvedTranscriptOutput = transcriptOutputArg
-        ? path.resolve(transcriptOutputArg)
-        : null;
-      const targetBaseDir = resolvedTranscriptOutput
-        ? path.dirname(resolvedTranscriptOutput)
-        : baseDirForTranscript;
-      const transcriptBaseName = resolvedTranscriptOutput
-        ? path.parse(resolvedTranscriptOutput).name
-        : entry.targetBaseName;
-
-      const transcriptTargets = transcriptFormats.map((format) => ({
-        format,
-        path: path.join(targetBaseDir, `${transcriptBaseName}.${format}`),
-      }));
-
-      let missingTargets = transcriptTargets;
-      if (!force) {
-        const checks = await Promise.all(
-          transcriptTargets.map((target) => pathExists(target.path)),
-        );
-        missingTargets = transcriptTargets.filter((_, index) => !checks[index]);
+  try {
+    for (const entry of stage_entries) {
+      const displayPath = formatDisplayPath(entry.inputVideo);
+      const truncated_display = truncate_middle(displayPath, 60);
+      if (stage_entries.length > 1) {
+        console.log(`${palette.dim("  • ")}${highlightPath(displayPath)}`);
       }
 
-      if (!force && missingTargets.length === 0) {
-        transcriptTargets.forEach((target) => {
-          console.log(
-            `${palette.dim("    • Transcript already exists at ")}${highlightPath(
-              target.path,
-            )}${palette.dim("; skipping (delete or use --force to regenerate).")}`,
-          );
-        });
-        entry.summary.transcript = {
-          outputs: transcriptTargets.map((target) => ({
-            format: target.format,
-            path: target.path,
-            skipped: true,
-            reason: "exists",
-          })),
-          skipped: true,
-          reason: "exists",
-          path: transcriptTargets.length
-            ? transcriptTargets[0].path
-            : undefined,
-        };
-        recordStageSuccess("transcript");
-        continue;
-      }
+      const audioForTranscription =
+        entry.audioForTranscription || entry.inputVideo;
+
+      progress_tracker.begin_item(
+        `${palette.dim("Transcribing:")} ${highlightPath(truncated_display)}`,
+      );
 
       try {
-        const transcriptResult = await transcribeWithWhisper({
-          inputPath: audioForTranscription,
-          outputDir: transcriptDirOption,
-          outputFormats: transcriptFormats,
-          model: argv["whisper-model"] || DEFAULT_WHISPER_MODEL,
-          language: argv["whisper-language"],
-          task: argv["whisper-task"],
-          device: argv["whisper-device"],
-          computeType: argv["whisper-compute-type"],
-          whisperPath: argv["whisper-bin"],
-          extraArgs: whisperExtraArgs,
-          logger: console,
-        });
+        const baseDirForTranscript = transcriptDirOption
+          ? path.resolve(transcriptDirOption)
+          : entry.targetDir;
 
-        const finalOutputs = [];
-        for (const target of transcriptTargets) {
-          const produced = (transcriptResult.outputs || []).find(
-            (item) => item.format === target.format,
+        const resolvedTranscriptOutput = transcriptOutputArg
+          ? path.resolve(transcriptOutputArg)
+          : null;
+        const targetBaseDir = resolvedTranscriptOutput
+          ? path.dirname(resolvedTranscriptOutput)
+          : baseDirForTranscript;
+        const transcriptBaseName = resolvedTranscriptOutput
+          ? path.parse(resolvedTranscriptOutput).name
+          : entry.targetBaseName;
+
+        const transcriptTargets = transcriptFormats.map((format) => ({
+          format,
+          path: path.join(targetBaseDir, `${transcriptBaseName}.${format}`),
+        }));
+
+        let missingTargets = transcriptTargets;
+        if (!force) {
+          const checks = await Promise.all(
+            transcriptTargets.map((target) => pathExists(target.path)),
           );
-          let producedPath = produced
-            ? produced.path
-            : path.join(
-                baseDirForTranscript,
-                `${transcriptBaseName}.${target.format}`,
-              );
-          const resolvedProducedPath = path.resolve(producedPath);
-          const resolvedTargetPath = path.resolve(target.path);
+          missingTargets = transcriptTargets.filter(
+            (_, index) => !checks[index],
+          );
+        }
 
-          if (resolvedProducedPath !== resolvedTargetPath) {
-            await fs.promises.mkdir(path.dirname(resolvedTargetPath), {
-              recursive: true,
-            });
-            if (force) {
-              try {
-                await fs.promises.unlink(resolvedTargetPath);
-              } catch (unlinkErr) {
-                if (unlinkErr.code !== "ENOENT") throw unlinkErr;
+        if (!force && missingTargets.length === 0) {
+          transcriptTargets.forEach((target) => {
+            console.log(
+              `${palette.dim("    • Transcript already exists at ")}${highlightPath(
+                target.path,
+              )}${palette.dim("; skipping (delete or use --force to regenerate).")}`,
+            );
+          });
+          entry.summary.transcript = {
+            outputs: transcriptTargets.map((target) => ({
+              format: target.format,
+              path: target.path,
+              skipped: true,
+              reason: "exists",
+            })),
+            skipped: true,
+            reason: "exists",
+            path: transcriptTargets.length
+              ? transcriptTargets[0].path
+              : undefined,
+          };
+          recordStageSuccess("transcript");
+          continue;
+        }
+
+        try {
+          const transcriptResult = await transcribeWithWhisper({
+            inputPath: audioForTranscription,
+            outputDir: transcriptDirOption,
+            outputFormats: transcriptFormats,
+            model: argv["whisper-model"] || DEFAULT_WHISPER_MODEL,
+            language: argv["whisper-language"],
+            task: argv["whisper-task"],
+            device: argv["whisper-device"],
+            computeType: argv["whisper-compute-type"],
+            whisperPath: argv["whisper-bin"],
+            extraArgs: whisperExtraArgs,
+            logger: console,
+            commandSilent: true,
+            onCommandStdout: child_stdout_handler,
+            onCommandStderr: child_stderr_handler,
+          });
+
+          const finalOutputs = [];
+          for (const target of transcriptTargets) {
+            const produced = (transcriptResult.outputs || []).find(
+              (item) => item.format === target.format,
+            );
+            let producedPath = produced
+              ? produced.path
+              : path.join(
+                  baseDirForTranscript,
+                  `${transcriptBaseName}.${target.format}`,
+                );
+            const resolvedProducedPath = path.resolve(producedPath);
+            const resolvedTargetPath = path.resolve(target.path);
+
+            if (resolvedProducedPath !== resolvedTargetPath) {
+              await fs.promises.mkdir(path.dirname(resolvedTargetPath), {
+                recursive: true,
+              });
+              if (force) {
+                try {
+                  await fs.promises.unlink(resolvedTargetPath);
+                } catch (unlinkErr) {
+                  if (unlinkErr.code !== "ENOENT") throw unlinkErr;
+                }
+              }
+              if (await pathExists(resolvedProducedPath)) {
+                await fs.promises.rename(
+                  resolvedProducedPath,
+                  resolvedTargetPath,
+                );
+                producedPath = resolvedTargetPath;
               }
             }
-            if (await pathExists(resolvedProducedPath)) {
-              await fs.promises.rename(
-                resolvedProducedPath,
-                resolvedTargetPath,
-              );
-              producedPath = resolvedTargetPath;
+
+            if (await pathExists(path.resolve(producedPath))) {
+              finalOutputs.push({
+                format: target.format,
+                path: path.resolve(producedPath),
+              });
             }
           }
 
-          if (await pathExists(path.resolve(producedPath))) {
-            finalOutputs.push({
-              format: target.format,
-              path: path.resolve(producedPath),
-            });
-          }
-        }
-
-        finalOutputs.forEach((output, index) => {
-          if (index === 0) {
-            console.log(
-              `${palette.success("    ✓ Transcript saved to ")}${highlightPath(
-                output.path,
-              )}${palette.success(` [${output.format}]`)}`,
-            );
-          } else {
-            console.log(
-              `${palette.dim("      • ")}${highlightPath(output.path)}${palette.dim(
-                ` [${output.format}]`,
-              )}`,
-            );
-          }
-        });
-
-        entry.summary.transcript = {
-          outputs: finalOutputs,
-          flavor: transcriptResult.flavor,
-          path: finalOutputs.length ? finalOutputs[0].path : undefined,
-        };
-        recordStageSuccess("transcript");
-      } catch (err) {
-        if (err && err.code === "WHISPER_NOT_FOUND") {
-          console.warn(
-            palette.warn(
-              "    ⚠ Whisper CLI not found; transcription skipped. Install openai-whisper or faster-whisper, or pass --skip-transcript to silence this message.",
-            ),
-          );
-          recordStageFailure(entry, "transcript", "Whisper CLI not found", {
-            reason: "whisper-not-found",
+          finalOutputs.forEach((output, index) => {
+            if (index === 0) {
+              console.log(
+                `${palette.success("    ✓ Transcript saved to ")}${highlightPath(
+                  output.path,
+                )}${palette.success(` [${output.format}]`)}`,
+              );
+            } else {
+              console.log(
+                `${palette.dim("      • ")}${highlightPath(output.path)}${palette.dim(
+                  ` [${output.format}]`,
+                )}`,
+              );
+            }
           });
-        } else {
-          throw err;
+
+          entry.summary.transcript = {
+            outputs: finalOutputs,
+            flavor: transcriptResult.flavor,
+            path: finalOutputs.length ? finalOutputs[0].path : undefined,
+          };
+          recordStageSuccess("transcript");
+        } catch (err) {
+          if (err && err.code === "WHISPER_NOT_FOUND") {
+            console.warn(
+              palette.warn(
+                "    ⚠ Whisper CLI not found; transcription skipped. Install openai-whisper or faster-whisper, or pass --skip-transcript to silence this message.",
+              ),
+            );
+            recordStageFailure(entry, "transcript", "Whisper CLI not found", {
+              reason: "whisper-not-found",
+            });
+          } else {
+            throw err;
+          }
         }
+      } catch (err) {
+        const resolved = resolveErrorMessage(
+          err,
+          `Transcription failed for ${displayPath}`,
+        );
+        console.error(palette.error(`    ✗ Transcription failed: ${resolved}`));
+        recordStageFailure(entry, "transcript", resolved);
+        continue;
+      } finally {
+        progress_tracker.complete_item();
+        await updateRunLog();
       }
-    } catch (err) {
-      const resolved = resolveErrorMessage(
-        err,
-        `Transcription failed for ${displayPath}`,
-      );
-      console.error(palette.error(`    ✗ Transcription failed: ${resolved}`));
-      recordStageFailure(entry, "transcript", resolved);
-      continue;
-    } finally {
-      await updateRunLog();
     }
+  } finally {
+    progress_tracker.finish_stage();
   }
 }
 
 async function processCompressionStage(entries, argv, force) {
   const skipCompress = Boolean(argv["skip-compress"] || argv.skipCompress);
+  const stage_entries = entries.filter((entry) => entry && entry.summary);
 
   if (skipCompress) {
-    console.log(palette.dim("[3/3] Compression skipped."));
-    entries.forEach((entry) => {
+    stage_banner("compression", "Skipped.", palette.dim);
+    stage_entries.forEach((entry) => {
       if (entry && entry.summary) {
         entry.summary.compression = { skipped: true };
       }
@@ -891,12 +1311,22 @@ async function processCompressionStage(entries, argv, force) {
     return;
   }
 
+  const stage_item_count = stage_entries.length;
   const compressExtraArgs = parseRepeatable(argv["compress-extra"]);
-  const label =
-    entries.length > 1
-      ? "[3/3] Compressing videos for all files..."
-      : "[3/3] Compressing video...";
-  console.log(palette.stage(label));
+  if (!stage_item_count) {
+    stage_banner("compression", "No files to process.", palette.dim);
+    await updateRunLog();
+    return;
+  }
+
+  stage_banner("compression", stage_files_phrase(stage_item_count));
+
+  progress_tracker.start_stage({
+    stage_label: "Compression",
+    stage_index: STAGE_KEYS.indexOf("compression") + 1,
+    stage_total: STAGE_KEYS.length,
+    item_total: stage_item_count,
+  });
 
   const crfValue = parseNumber(argv["compress-crf"], "--compress-crf") ?? 23;
   const maxHeightValue = parseNumber(
@@ -914,78 +1344,90 @@ async function processCompressionStage(entries, argv, force) {
   }
   const presetLabel = presetValue.replace(/\s+/g, "-");
 
-  for (const entry of entries) {
-    if (!entry || !entry.summary) continue;
-    const displayPath = formatDisplayPath(entry.inputVideo);
-    if (entries.length > 1) {
-      console.log(`${palette.dim("  • ")}${highlightPath(displayPath)}`);
-    }
-
-    try {
-      try {
-        const compressResult = await compressVideo({
-          inputPath: entry.inputVideo,
-          outputPath:
-            compressOutputOption ||
-            `${entry.targetBasePath}.compressed.${presetLabel}.mp4`,
-          force,
-          crf: crfValue,
-          preset: presetValue,
-          audioBitrate: argv["compress-audio-bitrate"] || "128k",
-          videoCodec: argv["compress-video-codec"] || "libx264",
-          audioCodec: argv["compress-audio-codec"] || "aac",
-          pixelFormat: argv["compress-pix-format"] || "yuv420p",
-          keepResolution: Boolean(argv["compress-keep-resolution"]),
-          maxHeight: maxHeightValue,
-          tune: argv["compress-tune"],
-          extraArgs: compressExtraArgs,
-          ffmpegPath: argv.ffmpeg,
-          logger: console,
-        });
-        entry.summary.compression = compressResult;
-        console.log(
-          `${palette.success("    ✓ Video saved to ")}${highlightPath(
-            compressResult.outputPath,
-          )}`,
-        );
-        recordStageSuccess("compression");
-      } catch (err) {
-        if (err && err.code === "OUTPUT_EXISTS" && !force) {
-          const existingOutput = outputExistsPathFromError(err);
-          entry.summary.compression = {
-            skipped: true,
-            reason: "exists",
-            outputPath: existingOutput,
-          };
-          if (existingOutput) {
-            console.log(
-              `${palette.dim("    • Compressed video already exists at ")}${highlightPath(
-                existingOutput,
-              )}${palette.dim("; skipping (use --force to regenerate).")}`,
-            );
-          } else {
-            console.log(
-              palette.dim(
-                "    • Compressed video output already exists; skipping (use --force to regenerate).",
-              ),
-            );
-          }
-          recordStageSuccess("compression");
-        } else {
-          throw err;
-        }
+  try {
+    for (const entry of stage_entries) {
+      const displayPath = formatDisplayPath(entry.inputVideo);
+      const truncated_display = truncate_middle(displayPath, 60);
+      if (stage_entries.length > 1) {
+        console.log(`${palette.dim("  • ")}${highlightPath(displayPath)}`);
       }
-    } catch (err) {
-      const resolved = resolveErrorMessage(
-        err,
-        `Compression failed for ${displayPath}`,
+
+      progress_tracker.begin_item(
+        `${palette.dim("Compressing:")} ${highlightPath(truncated_display)}`,
       );
-      console.error(palette.error(`    ✗ Compression failed: ${resolved}`));
-      recordStageFailure(entry, "compression", resolved);
-      continue;
-    } finally {
-      await updateRunLog();
+
+      try {
+        try {
+          const compressResult = await compressVideo({
+            inputPath: entry.inputVideo,
+            outputPath:
+              compressOutputOption ||
+              `${entry.targetBasePath}.compressed.${presetLabel}.mp4`,
+            force,
+            crf: crfValue,
+            preset: presetValue,
+            audioBitrate: argv["compress-audio-bitrate"] || "128k",
+            videoCodec: argv["compress-video-codec"] || "libx264",
+            audioCodec: argv["compress-audio-codec"] || "aac",
+            pixelFormat: argv["compress-pix-format"] || "yuv420p",
+            keepResolution: Boolean(argv["compress-keep-resolution"]),
+            maxHeight: maxHeightValue,
+            tune: argv["compress-tune"],
+            extraArgs: compressExtraArgs,
+            ffmpegPath: argv.ffmpeg,
+            logger: console,
+            commandSilent: true,
+            onCommandStdout: child_stdout_handler,
+            onCommandStderr: child_stderr_handler,
+          });
+          entry.summary.compression = compressResult;
+          console.log(
+            `${palette.success("    ✓ Video saved to ")}${highlightPath(
+              compressResult.outputPath,
+            )}`,
+          );
+          recordStageSuccess("compression");
+        } catch (err) {
+          if (err && err.code === "OUTPUT_EXISTS" && !force) {
+            const existingOutput = outputExistsPathFromError(err);
+            entry.summary.compression = {
+              skipped: true,
+              reason: "exists",
+              outputPath: existingOutput,
+            };
+            if (existingOutput) {
+              console.log(
+                `${palette.dim("    • Compressed video already exists at ")}${highlightPath(
+                  existingOutput,
+                )}${palette.dim("; skipping (use --force to regenerate).")}`,
+              );
+            } else {
+              console.log(
+                palette.dim(
+                  "    • Compressed video output already exists; skipping (use --force to regenerate).",
+                ),
+              );
+            }
+            recordStageSuccess("compression");
+          } else {
+            throw err;
+          }
+        }
+      } catch (err) {
+        const resolved = resolveErrorMessage(
+          err,
+          `Compression failed for ${displayPath}`,
+        );
+        console.error(palette.error(`    ✗ Compression failed: ${resolved}`));
+        recordStageFailure(entry, "compression", resolved);
+        continue;
+      } finally {
+        progress_tracker.complete_item();
+        await updateRunLog();
+      }
     }
+  } finally {
+    progress_tracker.finish_stage();
   }
 }
 
