@@ -654,12 +654,12 @@ function showHelp() {
   );
   console.log(
     palette.stage(
-      `  ${cmd} --job-mode file ~/videos/**/*.{mp4,ts,webm,mkv,mov}(N)`,
+      `  ${cmd} --job-mode file ~/videos/**/*.{mp4,ts,webm,mkv,mov,avi,m4v}(N)`,
     ),
   );
   console.log(
     palette.stage(
-      `  ${cmd} --compress-output ~/archive/normalized.mp4 ~/videos/**/*.{mp4,ts,webm,mkv,mov}(N)`,
+      `  ${cmd} --compress-output ~/archive/normalized.mp4 ~/videos/**/*.{mp4,ts,webm,mkv,mov,avi,m4v}(N)`,
     ),
   );
 }
