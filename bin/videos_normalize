@@ -652,6 +652,16 @@ function showHelp() {
       `  ${cmd} --job-mode file --skip-transcript ~/videos/**/*.mp4`,
     ),
   );
+  console.log(
+    palette.stage(
+      `  ${cmd} --job-mode file ~/videos/**/*.{mp4,ts,webm,mkv,mov}(N)`,
+    ),
+  );
+  console.log(
+    palette.stage(
+      `  ${cmd} --compress-output ~/archive/normalized.mp4 ~/videos/**/*.{mp4,ts,webm,mkv,mov}(N)`,
+    ),
+  );
 }
 
 function parseNumber(value, label) {
