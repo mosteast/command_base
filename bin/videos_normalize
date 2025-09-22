@@ -27,6 +27,8 @@ const palette = {
 const highlightPath = (value) => (value ? palette.path(value) : value);
 
 const MAX_SUPPRESSED_MESSAGES = 800;
+const MAX_LOG_HISTORY = 1200;
+const MAX_LOG_HISTORY_DISPLAY = 400;
 const interactive_terminal = Boolean(
   process.stdout.isTTY && process.stdin.isTTY,
 );
@@ -36,6 +38,8 @@ const terminal_state = {
   logs_visible: !interactive_terminal,
   suppressed_log_count: 0,
   suppressed_messages: [],
+  resume_progress_after_logs: null,
+  log_history: [],
 };
 
 const original_console = {
@@ -67,21 +71,44 @@ function store_suppressed_line(level, text) {
   terminal_state.suppressed_log_count += 1;
 }
 
-function flush_suppressed_messages() {
-  if (!terminal_state.suppressed_messages.length) return;
-  for (const entry of terminal_state.suppressed_messages) {
+function record_log_history(level, text) {
+  if (!text) return;
+  terminal_state.log_history.push({ level, text });
+  if (terminal_state.log_history.length > MAX_LOG_HISTORY) {
+    terminal_state.log_history.splice(
+      0,
+      terminal_state.log_history.length - MAX_LOG_HISTORY,
+    );
+  }
+}
+
+function replay_log_history() {
+  if (!terminal_state.log_history.length) return;
+  const start_index = Math.max(
+    0,
+    terminal_state.log_history.length - MAX_LOG_HISTORY_DISPLAY,
+  );
+  for (
+    let index = start_index;
+    index < terminal_state.log_history.length;
+    index += 1
+  ) {
+    const entry = terminal_state.log_history[index];
+    if (!entry || !entry.text) continue;
     const target = original_console[entry.level] || original_console.log;
     target(entry.text);
   }
-  terminal_state.suppressed_messages.length = 0;
-  terminal_state.suppressed_log_count = 0;
 }
 
 function emit_line(level, line, force = false) {
   const resolved_level = level === "info" ? "log" : level;
   const text = line;
   const should_print = terminal_state.logs_visible || force;
-  const should_store = !terminal_state.logs_visible || (force && text);
+  const should_store = !terminal_state.logs_visible && Boolean(text);
+
+  if (text) {
+    record_log_history(resolved_level, text);
+  }
 
   if (should_print) {
     const resume =
@@ -313,18 +340,74 @@ function toggle_logs() {
   try {
     if (terminal_state.logs_visible) {
       terminal_state.logs_visible = false;
+      const resume_progress = terminal_state.resume_progress_after_logs;
+      terminal_state.resume_progress_after_logs = null;
+      if (typeof resume_progress === "function") {
+        try {
+          resume_progress();
+        } catch (err) {
+          // ignore resume failure
+        }
+      }
+
+      terminal_state.suppressed_messages.length = 0;
+      terminal_state.suppressed_log_count = 0;
+
+      if (terminal_state.interactive && process.stdout.isTTY) {
+        try {
+          readline.cursorTo(process.stdout, 0, 0);
+          readline.clearScreenDown(process.stdout);
+        } catch (err) {
+          // ignore screen clear failure
+        }
+      }
+
       original_console.log(palette.dim("Logs hidden. Press 'l' to show logs."));
+
+      if (
+        progress_tracker &&
+        typeof progress_tracker.render_line === "function" &&
+        progress_tracker.is_active()
+      ) {
+        progress_tracker.render_line();
+      }
       return;
     }
 
     terminal_state.logs_visible = true;
-    const buffered = terminal_state.suppressed_messages.length;
+    if (
+      !terminal_state.resume_progress_after_logs &&
+      progress_tracker &&
+      typeof progress_tracker.pause === "function"
+    ) {
+      terminal_state.resume_progress_after_logs = progress_tracker.pause();
+    }
+
+    if (progress_tracker && typeof progress_tracker.erase_line === "function") {
+      try {
+        progress_tracker.erase_line();
+      } catch (err) {
+        // ignore erase failure
+      }
+    }
+
+    if (terminal_state.interactive && process.stdout.isTTY) {
+      try {
+        readline.cursorTo(process.stdout, 0, 0);
+        readline.clearScreenDown(process.stdout);
+      } catch (err) {
+        // ignore screen clear failure
+      }
+    }
+
     const count = terminal_state.suppressed_log_count;
     const suffix = count
       ? ` (${count} buffered message${count === 1 ? "" : "s"})`
       : "";
     original_console.log(palette.stage(`Logs enabled${suffix}.`));
-    flush_suppressed_messages();
+    replay_log_history();
+    terminal_state.suppressed_messages.length = 0;
+    terminal_state.suppressed_log_count = 0;
   } finally {
     resume();
   }
