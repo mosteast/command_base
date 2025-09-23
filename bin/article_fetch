@@ -106,11 +106,11 @@ const argv = yargs(process.argv.slice(2))
     "Load URLs from text files via glob patterns and process them sequentially.",
   )
   .example(
-    '$0 -o ~/Downloads/articles https://example.com/a https://example.com/b',
+    "$0 -o ~/Downloads/articles https://example.com/a https://example.com/b",
     "Write outputs under a custom root directory.",
   )
   .example(
-    '$0 --render-mode auto https://example.com/app',
+    "$0 --render-mode auto https://example.com/app",
     "Let the tool try headless Chromium first and gracefully fall back to HTTP if the browser fails.",
   )
   .wrap(Math.min(120, process.stdout.columns || 120))
@@ -177,7 +177,9 @@ function to_directory_segment(value) {
 function sanitize_excerpt(value) {
   const normalized = normalize_whitespace(value);
   if (!normalized) return undefined;
-  return normalized.length > 220 ? `${normalized.slice(0, 217)}...` : normalized;
+  return normalized.length > 220
+    ? `${normalized.slice(0, 217)}...`
+    : normalized;
 }
 
 async function gather_urls(cli_urls, url_files) {
@@ -258,7 +260,10 @@ function resolve_final_url(response, fallback_url) {
 }
 
 function resolve_title(article, document) {
-  const heading_title = extract_heading_text(article && article.content, document);
+  const heading_title = extract_heading_text(
+    article && article.content,
+    document,
+  );
   if (heading_title) return heading_title;
 
   const readable_title = normalize_whitespace(article && article.title);
@@ -438,7 +443,11 @@ async function run_summarizer(markdown_path, skip_summary) {
     child.stdout.on("data", (chunk) => {
       const text = chunk.toString();
       if (text.includes("当前目录为只读")) {
-        console.log(palette.warn("Summarizer reported the target directory as read-only; cleaning output."));
+        console.log(
+          palette.warn(
+            "Summarizer reported the target directory as read-only; cleaning output.",
+          ),
+        );
         return;
       }
       process.stdout.write(palette.detail(text));
@@ -492,8 +501,14 @@ function clean_summary_text(text) {
 async function process_url(target_url, settings) {
   console.log(palette.headline(`Processing ${target_url}`));
 
-  const { output_root, force, timeout, max_redirects, render_mode, wait_after_load } =
-    settings;
+  const {
+    output_root,
+    force,
+    timeout,
+    max_redirects,
+    render_mode,
+    wait_after_load,
+  } = settings;
   const download_result = await download_html(target_url, {
     timeout,
     max_redirects,
@@ -501,7 +516,9 @@ async function process_url(target_url, settings) {
     wait_after_load,
   });
 
-  console.log(palette.info(`Downloaded content from ${download_result.final_url}`));
+  console.log(
+    palette.info(`Downloaded content from ${download_result.final_url}`),
+  );
 
   const dom = new JSDOM(download_result.html_text, {
     url: download_result.final_url,
@@ -511,7 +528,9 @@ async function process_url(target_url, settings) {
   const readability = new Readability(document);
   const article = readability.parse();
   if (!article || !article.content) {
-    throw new Error("Failed to extract main article content using Readability.");
+    throw new Error(
+      "Failed to extract main article content using Readability.",
+    );
   }
 
   const article_title = resolve_title(article, document);
