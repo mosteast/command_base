@@ -49,7 +49,6 @@ const original_console = {
 };
 
 let progress_tracker = null;
-let keypress_listener_cleanup = null;
 
 function truncate_middle(value, max_length = 60) {
   if (!value) return "";
@@ -415,42 +414,32 @@ function toggle_logs() {
 }
 
 function setup_keypress_listener() {
-  if (!terminal_state.interactive) return null;
-  const data_handler = (data) => {
+  if (!terminal_state.interactive) return;
+  try {
+    process.stdin.setRawMode(true);
+  } catch (err) {
+    return;
+  }
+  process.stdin.resume();
+  process.stdin.setEncoding("utf8");
+  process.stdin.on("data", (data) => {
     if (!data) return;
     for (const char of `${data}`) {
       if (char === "l" || char === "L") {
         toggle_logs();
       } else if (char === "\u0003") {
         progress_tracker.erase_line();
-        cleanup_keypress_listener();
+        try {
+          process.stdin.setRawMode(false);
+        } catch (innerErr) {
+          // ignore cleanup failure
+        }
+        process.stdin.pause();
         process.exit(130);
       }
     }
-  };
-
-  try {
-    process.stdin.setRawMode(true);
-  } catch (err) {
-    return null;
-  }
-
-  process.stdin.resume();
-  process.stdin.setEncoding("utf8");
-  process.stdin.on("data", data_handler);
-
-  const exit_handler = () => {
-    cleanup_keypress_listener();
-  };
-
-  process.on("exit", exit_handler);
-
-  let cleaned = false;
-
-  const cleanup = () => {
-    if (cleaned) return;
-    cleaned = true;
-    process.stdin.removeListener("data", data_handler);
+  });
+  process.on("exit", () => {
     if (process.stdin.isTTY) {
       try {
         process.stdin.setRawMode(false);
@@ -458,26 +447,11 @@ function setup_keypress_listener() {
         // ignore cleanup failure
       }
     }
-    try {
-      process.stdin.pause();
-    } catch (err) {
-      // ignore pause failure
-    }
-    process.off("exit", exit_handler);
-  };
-
-  return cleanup;
-}
-
-function cleanup_keypress_listener() {
-  if (typeof keypress_listener_cleanup === "function") {
-    keypress_listener_cleanup();
-    keypress_listener_cleanup = null;
-  }
+  });
 }
 
 if (terminal_state.interactive) {
-  keypress_listener_cleanup = setup_keypress_listener();
+  setup_keypress_listener();
 }
 
 const VIDEO_EXTENSIONS = new Set([
@@ -1928,7 +1902,6 @@ async function main() {
     console.error("");
     console.error(palette.error(`Failed: ${err.message}`));
     await writeRunLog(entries, { fatalError: err });
-    cleanup_keypress_listener();
     process.exit(1);
   }
 
@@ -2076,7 +2049,6 @@ async function main() {
   }
 
   await writeRunLog(entries);
-  cleanup_keypress_listener();
 }
 
 main();
