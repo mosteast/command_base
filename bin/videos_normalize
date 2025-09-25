@@ -7,12 +7,14 @@ const yargs = require("yargs/yargs");
 const chalk = require("chalk");
 const readline = require("readline");
 const util = require("util");
+const { spawn } = require("child_process");
 
 const { extractAudio } = require("../lib/live_media/extract_audio");
 const {
   transcribeWithWhisper,
 } = require("../lib/live_media/whisper_transcribe");
 const { compressVideo } = require("../lib/live_media/compress_video");
+const { resolveExecutable } = require("../lib/live_media/process_utils");
 
 const palette = {
   headline: chalk.cyanBright.bold,
@@ -25,6 +27,42 @@ const palette = {
 };
 
 const highlightPath = (value) => (value ? palette.path(value) : value);
+
+async function play_completion_sound() {
+  const candidate_order = [
+    { command: "afplay", args: ["/System/Library/Sounds/Ping.aiff"] },
+    { command: "afplay", args: ["/System/Library/Sounds/Glass.aiff"] },
+    { command: "osascript", args: ["-e", "beep"] },
+  ];
+
+  for (const candidate of candidate_order) {
+    try {
+      const resolved = await resolveExecutable(candidate.command);
+      if (!resolved) {
+        continue;
+      }
+
+      await new Promise((resolve) => {
+        const child = spawn(resolved, candidate.args, {
+          stdio: "ignore",
+          detached: false,
+        });
+        child.on("error", () => resolve());
+        child.on("exit", () => resolve());
+      });
+
+      return true;
+    } catch (err) {
+      console.warn(
+        palette.warn(
+          `⚠ Failed to play completion sound using ${candidate.command}: ${err.message}`,
+        ),
+      );
+    }
+  }
+
+  return false;
+}
 
 const MAX_SUPPRESSED_MESSAGES = 800;
 const MAX_LOG_HISTORY = 1200;
@@ -2049,6 +2087,8 @@ async function main() {
   }
 
   await writeRunLog(entries);
+
+  await play_completion_sound();
 }
 
 main();
