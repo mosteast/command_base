@@ -87,6 +87,7 @@ const original_console = {
 };
 
 let progress_tracker = null;
+let cleanup_keypress_listener = null;
 
 function truncate_middle(value, max_length = 60) {
   if (!value) return "";
@@ -451,33 +452,54 @@ function toggle_logs() {
   }
 }
 
+function teardown_keypress_listener() {
+  if (typeof cleanup_keypress_listener === "function") {
+    try {
+      cleanup_keypress_listener();
+    } finally {
+      cleanup_keypress_listener = null;
+    }
+  } else if (terminal_state.interactive) {
+    try {
+      process.stdin.pause();
+    } catch (err) {
+      // ignore cleanup failure
+    }
+  }
+}
+
 function setup_keypress_listener() {
   if (!terminal_state.interactive) return;
+
   try {
     process.stdin.setRawMode(true);
   } catch (err) {
     return;
   }
+
   process.stdin.resume();
   process.stdin.setEncoding("utf8");
-  process.stdin.on("data", (data) => {
+
+  const keypress_handler = (data) => {
     if (!data) return;
     for (const char of `${data}`) {
       if (char === "l" || char === "L") {
         toggle_logs();
       } else if (char === "\u0003") {
-        progress_tracker.erase_line();
-        try {
-          process.stdin.setRawMode(false);
-        } catch (innerErr) {
-          // ignore cleanup failure
+        if (
+          progress_tracker &&
+          typeof progress_tracker.erase_line === "function"
+        ) {
+          progress_tracker.erase_line();
         }
-        process.stdin.pause();
+        teardown_keypress_listener();
         process.exit(130);
       }
     }
-  });
-  process.on("exit", () => {
+  };
+
+  const exit_handler = () => {
+    teardown_keypress_listener();
     if (process.stdin.isTTY) {
       try {
         process.stdin.setRawMode(false);
@@ -485,7 +507,35 @@ function setup_keypress_listener() {
         // ignore cleanup failure
       }
     }
-  });
+  };
+
+  process.stdin.on("data", keypress_handler);
+  process.on("exit", exit_handler);
+
+  cleanup_keypress_listener = () => {
+    if (typeof process.stdin.off === "function") {
+      process.stdin.off("data", keypress_handler);
+    } else {
+      process.stdin.removeListener("data", keypress_handler);
+    }
+    if (typeof process.off === "function") {
+      process.off("exit", exit_handler);
+    } else {
+      process.removeListener("exit", exit_handler);
+    }
+    if (process.stdin.isTTY) {
+      try {
+        process.stdin.setRawMode(false);
+      } catch (err) {
+        // ignore cleanup failure
+      }
+    }
+    try {
+      process.stdin.pause();
+    } catch (err) {
+      // ignore cleanup failure
+    }
+  };
 }
 
 if (terminal_state.interactive) {
@@ -1940,6 +1990,7 @@ async function main() {
     console.error("");
     console.error(palette.error(`Failed: ${err.message}`));
     await writeRunLog(entries, { fatalError: err });
+    teardown_keypress_listener();
     process.exit(1);
   }
 
@@ -2089,6 +2140,7 @@ async function main() {
   await writeRunLog(entries);
 
   await play_completion_sound();
+  teardown_keypress_listener();
 }
 
 main();
