@@ -25,7 +25,7 @@ const {
     .usage(
       "Usage: $0 [options] <file|glob ...>" +
         "\n\nDescription:" +
-        "\n  Summarize one or more files with the summarize_text prompt and write `[filename].summarized.md` next to each input file.",
+        "\n  Summarize one or more files with the summarize_text prompt and write `[filename.ext].summarized.md` next to each input file.",
     )
     .wrap(terminal_width)
     .option("refresh", {
@@ -110,33 +110,77 @@ const {
     return;
   }
 
-  logger.info(
-    `Preparing summaries for ${resolved_input_files.length} file${
-      resolved_input_files.length === 1 ? "" : "s"
-    } using batch size ${batch_size}...`,
-  );
+  const job_entries = [];
 
-  let processed_count = 0;
-  let skipped_count = 0;
-  let failed_count = 0;
-
-  const summarize_file = async (absolute_input_path) => {
+  for (const absolute_input_path of resolved_input_files) {
     const relative_input_path =
       path.relative(process.cwd(), absolute_input_path) ||
       path.basename(absolute_input_path);
     const parsed_path = path.parse(absolute_input_path);
     const output_file_path = path.join(
       parsed_path.dir,
-      `${parsed_path.name}.summarized.md`,
+      `${parsed_path.base}.summarized.md`,
     );
 
-    if (!argv.refresh && (await file_has_content(output_file_path))) {
-      skipped_count += 1;
-      console.log(
-        chalk.gray(`- Skipping existing summary: ${relative_input_path}`),
-      );
-      return;
+    const normalized_input_path = absolute_input_path.toLowerCase();
+    const is_generated_summary =
+      normalized_input_path.endsWith(".summarized.md");
+
+    let should_skip = false;
+    let skip_reason = null;
+
+    if (is_generated_summary) {
+      should_skip = true;
+      skip_reason = "already summarized";
+    } else if (!argv.refresh && (await file_has_content(output_file_path))) {
+      should_skip = true;
+      skip_reason = "existing output";
     }
+
+    job_entries.push({
+      absolute_input_path,
+      relative_input_path,
+      output_file_path,
+      should_skip,
+      skip_reason,
+    });
+  }
+
+  const pending_jobs = job_entries.filter((entry) => !entry.should_skip);
+  const skipped_jobs = job_entries.filter((entry) => entry.should_skip);
+
+  if (skipped_jobs.length > 0) {
+    logger.info(
+      `Skipping ${skipped_jobs.length} file${
+        skipped_jobs.length === 1 ? "" : "s"
+      } before summarizing:`,
+    );
+    for (const job of skipped_jobs) {
+      const reason_suffix = job.skip_reason ? ` (${job.skip_reason})` : "";
+      console.log(chalk.gray(`  - ${job.relative_input_path}${reason_suffix}`));
+    }
+  }
+
+  if (pending_jobs.length === 0) {
+    logger.info("No files require summarization; outputs are up to date.");
+    const summary_tail = skipped_jobs.length
+      ? chalk.gray(`${skipped_jobs.length} skipped`)
+      : "no actions";
+    console.log(chalk.blue(`Done (${summary_tail}).`));
+    return;
+  }
+
+  logger.info(
+    `Preparing summaries for ${pending_jobs.length} file${
+      pending_jobs.length === 1 ? "" : "s"
+    } using batch size ${batch_size}...`,
+  );
+
+  let processed_count = 0;
+  let failed_count = 0;
+
+  const summarize_job = async (job) => {
+    const { absolute_input_path, relative_input_path, output_file_path } = job;
 
     console.log(chalk.cyan(`- Summarizing: ${relative_input_path}`));
 
@@ -153,14 +197,10 @@ const {
         logger,
       });
 
-      console.log(
-        chalk.green(
-          `Saved: ${
-            path.relative(process.cwd(), output_file_path) ||
-            path.basename(output_file_path)
-          }`,
-        ),
-      );
+      const relative_output_path =
+        path.relative(process.cwd(), output_file_path) ||
+        path.basename(output_file_path);
+      console.log(chalk.green(`Saved: ${relative_output_path}`));
       processed_count += 1;
     } catch (error) {
       failed_count += 1;
@@ -169,28 +209,20 @@ const {
     }
   };
 
-  for (
-    let index = 0;
-    index < resolved_input_files.length;
-    index += batch_size
-  ) {
-    const batch = resolved_input_files.slice(index, index + batch_size);
-    await Promise.all(batch.map(summarize_file));
+  for (let index = 0; index < pending_jobs.length; index += batch_size) {
+    const batch = pending_jobs.slice(index, index + batch_size);
+    await Promise.all(batch.map(summarize_job));
   }
 
-  const summary_parts = [];
-  if (processed_count > 0) {
-    summary_parts.push(chalk.green(`${processed_count} summarized`));
-  }
-  if (skipped_count > 0) {
-    summary_parts.push(chalk.gray(`${skipped_count} skipped`));
-  }
-  if (failed_count > 0) {
-    summary_parts.push(chalk.red(`${failed_count} failed`));
-  }
-  const summary_tail =
-    summary_parts.length > 0 ? summary_parts.join(", ") : "no actions";
-  console.log(chalk.blue(`Done (${summary_tail}).`));
+  const summary_fragments = [
+    processed_count ? chalk.green(`${processed_count} summarized`) : null,
+    skipped_jobs.length ? chalk.gray(`${skipped_jobs.length} skipped`) : null,
+    failed_count ? chalk.red(`${failed_count} failed`) : null,
+  ]
+    .filter(Boolean)
+    .join(", ");
+
+  console.log(chalk.blue(`Done (${summary_fragments || "no actions"}).`));
 })().catch((error) => {
   console.error(error);
   process.exitCode = 1;
