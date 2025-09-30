@@ -17,7 +17,9 @@ function create_gemini_adapter(support_context) {
           : "https://generativelanguage.googleapis.com";
 
       const model_name =
-        request.model || process.env.GEMINI_DEFAULT_MODEL || "gemini-2.0-flash-exp";
+        request.model ||
+        process.env.GEMINI_DEFAULT_MODEL ||
+        "gemini-2.0-flash-exp";
       const endpoint = `${support.trim_trailing_slash(
         base_url,
       )}/v1beta/models/${encodeURIComponent(model_name)}:generateContent?key=${encodeURIComponent(

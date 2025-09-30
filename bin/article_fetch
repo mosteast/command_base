@@ -586,7 +586,7 @@ async function process_url(target_url, settings) {
       settings.skip_summary,
     );
     if (summary_invoked) {
-      const generated_summary_path = `${markdown_path}.总结.md`;
+      const generated_summary_path = `${markdown_path}.summarized.md`;
       const final_summary_path = path.join(article_directory, "summary.md");
       if (await fs_extra.pathExists(generated_summary_path)) {
         const raw_summary = await fs.promises.readFile(

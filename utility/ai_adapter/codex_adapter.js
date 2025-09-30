@@ -8,9 +8,7 @@ function create_codex_adapter(support_context) {
     async invoke(request, runtime_context) {
       const context = create_execution_context(support, runtime_context);
       const cli_command = process.env.CODEX_CLI_COMMAND || "codex";
-      const cli_args = context.parse_cli_arg_string(
-        process.env.CODEX_CLI_ARGS,
-      );
+      const cli_args = context.parse_cli_arg_string(process.env.CODEX_CLI_ARGS);
       const model_flag =
         process.env.CODEX_CLI_MODEL_FLAG === ""
           ? null

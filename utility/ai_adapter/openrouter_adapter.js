@@ -8,7 +8,9 @@ function create_openrouter_adapter(support_context) {
     async invoke(request) {
       const api_key = process.env.OPENROUTER_API_KEY;
       if (!api_key) {
-        throw new Error("OPENROUTER_API_KEY is required for openrouter platform");
+        throw new Error(
+          "OPENROUTER_API_KEY is required for openrouter platform",
+        );
       }
 
       const base_url =

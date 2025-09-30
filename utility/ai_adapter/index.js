@@ -28,7 +28,9 @@ function get_ai_adapter(platform_name, support_context) {
   }
   const adapter = factory(support_context || {});
   if (!adapter || typeof adapter.invoke !== "function") {
-    throw new Error(`Adapter for platform \"${normalized}\" does not expose an invoke method.`);
+    throw new Error(
+      `Adapter for platform \"${normalized}\" does not expose an invoke method.`,
+    );
   }
   return adapter;
 }

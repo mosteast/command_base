@@ -18,8 +18,7 @@ function create_openai_adapter(support_context) {
       const endpoint = `${support.trim_trailing_slash(base_url)}/chat/completions`;
 
       const payload = {
-        model:
-          request.model || process.env.OPENAI_DEFAULT_MODEL || "gpt-4o",
+        model: request.model || process.env.OPENAI_DEFAULT_MODEL || "gpt-4o",
         messages: support.build_messages(
           request.system_prompt,
           request.user_prompt,

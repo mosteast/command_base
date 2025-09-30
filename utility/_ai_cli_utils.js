@@ -40,7 +40,9 @@ const {
 
 async function fetch_fn(...args) {
   if (typeof fetch !== "function") {
-    throw new Error("Global fetch is unavailable. Please run on Node.js 18+ or provide a fetch polyfill.");
+    throw new Error(
+      "Global fetch is unavailable. Please run on Node.js 18+ or provide a fetch polyfill.",
+    );
   }
   return fetch(...args);
 }
@@ -92,6 +94,25 @@ async function ensure_prompt_build(prompt_name, options) {
   }
 
   return prompt_file_path;
+}
+
+async function ensure_prompt_source(prompt_name, options) {
+  const resolved_options = options || {};
+  if (resolved_options.external_path) {
+    const candidate_path = path.resolve(resolved_options.external_path);
+    try {
+      await fs.access(candidate_path);
+      resolved_options.logger?.info?.(
+        `Using external prompt template at ${candidate_path}`,
+      );
+      return candidate_path;
+    } catch (error) {
+      throw new Error(
+        `Failed to access external prompt for "${prompt_name}" at "${candidate_path}": ${error.message}`,
+      );
+    }
+  }
+  return ensure_prompt_build(prompt_name, resolved_options);
 }
 
 function expand_patterns(patterns, options) {
@@ -206,6 +227,20 @@ async function run_ai_command(options) {
     template_context,
   );
 
+  const template_contains_input_placeholder = /\{\{\s*input\s*\}\}/.test(
+    prompt_definition.template,
+  );
+  const normalized_input_content = input_content.trim().length
+    ? input_content
+    : "";
+  const final_user_prompt = template_contains_input_placeholder
+    ? rendered_user_prompt
+    : build_fallback_user_prompt(
+        rendered_user_prompt,
+        normalized_input_content,
+        template_context,
+      );
+
   const platform_overrides = prompt_definition.metadata.platforms || {};
   const platform_override = platform_overrides[selected_platform] || {};
 
@@ -224,7 +259,7 @@ async function run_ai_command(options) {
     platform: selected_platform,
     model,
     system_prompt: prompt_definition.metadata.system,
-    user_prompt: rendered_user_prompt,
+    user_prompt: final_user_prompt,
     temperature: resolved_temperature,
     max_tokens: resolved_max_tokens,
     logger: resolved_logger,
@@ -243,6 +278,53 @@ async function run_ai_command(options) {
   await fs.writeFile(output_file, `${ai_result.trim()}\n`, "utf8");
 
   return { output: ai_result.trim() };
+}
+
+function build_fallback_user_prompt(user_prompt, input_content, context) {
+  const safe_user_prompt =
+    typeof user_prompt === "string" ? user_prompt.trimEnd() : "";
+  const input_section = build_input_section(input_content, context);
+  if (!input_section) {
+    return safe_user_prompt;
+  }
+  return `${safe_user_prompt}\n\n${input_section}`;
+}
+
+function build_input_section(raw_input_content, context) {
+  if (typeof raw_input_content !== "string") {
+    return "";
+  }
+  const has_meaningful_content = raw_input_content.trim().length > 0;
+  if (!has_meaningful_content) {
+    return "";
+  }
+
+  const normalized_input = raw_input_content.replace(/\r\n/g, "\n");
+  const input_without_trailing_newlines = normalized_input.replace(/\s+$/u, "");
+  const content_block = input_without_trailing_newlines.length
+    ? input_without_trailing_newlines
+    : normalized_input.trim();
+
+  const section_lines = ["## 给定的内容", ""];
+
+  const relative_path = context?.relative_path;
+  const file_name = context?.file_name;
+  if (relative_path || file_name) {
+    section_lines.push("### 文件信息");
+    if (file_name) {
+      section_lines.push(`- 名称：${file_name}`);
+    }
+    if (relative_path) {
+      section_lines.push(`- 相对路径：${relative_path}`);
+    }
+    section_lines.push("");
+  }
+
+  section_lines.push("```markdown");
+  section_lines.push(content_block);
+  section_lines.push("```");
+
+  return section_lines.join("\n");
 }
 
 async function parse_prompt_file(prompt_file_path) {
@@ -380,7 +462,10 @@ async function run_cli_command(command, args, prompt_text, options) {
     env: process.env,
   };
 
-  if (resolved_options.system_prompt && resolved_options.system_prompt.length > 0) {
+  if (
+    resolved_options.system_prompt &&
+    resolved_options.system_prompt.length > 0
+  ) {
     spawn_options.env = {
       ...process.env,
       AI_SYSTEM_PROMPT: resolved_options.system_prompt,
@@ -405,7 +490,8 @@ async function run_cli_command(command, args, prompt_text, options) {
       if (code === 0) {
         resolve(stdout_buffer.trim());
       } else {
-        const error_message = stderr_buffer.trim() || `CLI exited with code ${code}`;
+        const error_message =
+          stderr_buffer.trim() || `CLI exited with code ${code}`;
         reject(new Error(error_message));
       }
     });
@@ -423,7 +509,7 @@ function parse_cli_arg_string(raw_value) {
   return tokens.map((token) => {
     const trimmed = token.trim();
     if (
-      (trimmed.startsWith("\"") && trimmed.endsWith("\"")) ||
+      (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
       (trimmed.startsWith("'") && trimmed.endsWith("'"))
     ) {
       return trimmed.slice(1, -1);
@@ -481,7 +567,9 @@ async function handle_openai_like_response(response) {
       }
       if (Array.isArray(message.content)) {
         return message.content
-          .map((segment) => (segment && typeof segment.text === "string" ? segment.text : ""))
+          .map((segment) =>
+            segment && typeof segment.text === "string" ? segment.text : "",
+          )
           .join("");
       }
       return "";
@@ -509,9 +597,12 @@ module.exports = {
   default_ai_platform,
   supported_ai_platforms,
   ensure_prompt_build,
+  ensure_prompt_source,
   expand_patterns,
   file_has_content,
   run_ai_command,
+  build_fallback_user_prompt,
+  build_input_section,
   // compatibility aliases
   DEFAULT_AI_PLATFORM: default_ai_platform,
   SUPPORTED_AI_PLATFORMS: supported_ai_platforms,

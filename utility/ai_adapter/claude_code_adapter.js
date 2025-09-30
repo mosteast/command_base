@@ -112,7 +112,9 @@ async function request_with_anthropic(context, request) {
       }
       if (Array.isArray(segment)) {
         return segment
-          .map((part) => (part && typeof part.text === "string" ? part.text : ""))
+          .map((part) =>
+            part && typeof part.text === "string" ? part.text : "",
+          )
           .join("");
       }
       if (segment.type === "text" && typeof segment.text === "string") {
