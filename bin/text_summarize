@@ -55,6 +55,13 @@ const {
       describe:
         "Maximum tokens for the AI response (falls back to prompt defaults).",
     })
+    .option("batch-size", {
+      alias: "b",
+      type: "number",
+      default: 3,
+      describe:
+        "Maximum number of files to summarize in parallel (must be a positive integer).",
+    })
     .example(
       "$0 notes/**/*.md",
       "Summarize every Markdown file inside the notes directory tree.",
@@ -63,10 +70,14 @@ const {
       "$0 report.md --refresh --ai-platform openai",
       "Regenerate the summary for report.md with the OpenAI adapter even if it already exists.",
     )
+    .example(
+      "$0 drafts/*.md --batch-size 5",
+      "Process multiple files concurrently with a custom batch size.",
+    )
     .alias("h", "help")
     .demandCommand(1, "Provide at least one file path or glob pattern.")
     .epilog(
-      "Options: --refresh, --ai-platform, --ai-model, --ai-temperature, --ai-max-tokens." +
+      "Options: --refresh, --ai-platform, --ai-model, --ai-temperature, --ai-max-tokens, --batch-size." +
         "\nExamples: text_summarize report.md | text_summarize docs/**/*.md",
     ).argv;
 
@@ -84,6 +95,16 @@ const {
 
   const resolved_input_files = expand_patterns(argv._, { cwd: process.cwd() });
 
+  const requested_batch_size = Number(argv["batch-size"]);
+  let batch_size = 3;
+  if (Number.isFinite(requested_batch_size) && requested_batch_size >= 1) {
+    batch_size = Math.floor(requested_batch_size);
+  } else {
+    logger.warn(
+      `Invalid --batch-size value (${argv["batch-size"]}); defaulting to 3.`,
+    );
+  }
+
   if (resolved_input_files.length === 0) {
     logger.warn("No files matched the provided patterns.");
     return;
@@ -92,14 +113,14 @@ const {
   logger.info(
     `Preparing summaries for ${resolved_input_files.length} file${
       resolved_input_files.length === 1 ? "" : "s"
-    }...`,
+    } using batch size ${batch_size}...`,
   );
 
   let processed_count = 0;
   let skipped_count = 0;
   let failed_count = 0;
 
-  for (const absolute_input_path of resolved_input_files) {
+  const summarize_file = async (absolute_input_path) => {
     const relative_input_path =
       path.relative(process.cwd(), absolute_input_path) ||
       path.basename(absolute_input_path);
@@ -112,12 +133,12 @@ const {
     if (!argv.refresh && (await file_has_content(output_file_path))) {
       skipped_count += 1;
       console.log(
-        chalk.gray(`Skipping existing summary: ${relative_input_path}`),
+        chalk.gray(`- Skipping existing summary: ${relative_input_path}`),
       );
-      continue;
+      return;
     }
 
-    console.log(chalk.cyan(`Summarizing: ${relative_input_path}`));
+    console.log(chalk.cyan(`- Summarizing: ${relative_input_path}`));
 
     try {
       await run_ai_command({
@@ -146,6 +167,15 @@ const {
       console.error(chalk.red(`Failed: ${relative_input_path}`));
       console.error(chalk.red(error.message || error));
     }
+  };
+
+  for (
+    let index = 0;
+    index < resolved_input_files.length;
+    index += batch_size
+  ) {
+    const batch = resolved_input_files.slice(index, index + batch_size);
+    await Promise.all(batch.map(summarize_file));
   }
 
   const summary_parts = [];
