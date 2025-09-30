@@ -96,7 +96,7 @@ const {
   const resolved_input_files = expand_patterns(argv._, { cwd: process.cwd() });
 
   const requested_batch_size = Number(argv["batch-size"]);
-  let batch_size = 3;
+  let batch_size = 5;
   if (Number.isFinite(requested_batch_size) && requested_batch_size >= 1) {
     batch_size = Math.floor(requested_batch_size);
   } else {
