@@ -58,7 +58,7 @@ const {
     .option("batch-size", {
       alias: "b",
       type: "number",
-      default: 3,
+      default: 5,
       describe:
         "Maximum number of files to summarize in parallel (must be a positive integer).",
     })
@@ -101,7 +101,7 @@ const {
     batch_size = Math.floor(requested_batch_size);
   } else {
     logger.warn(
-      `Invalid --batch-size value (${argv["batch-size"]}); defaulting to 3.`,
+      `Invalid --batch-size value (${argv["batch-size"]}); defaulting to ${batch_size}.`,
     );
   }
 
