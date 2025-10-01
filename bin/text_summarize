@@ -62,6 +62,13 @@ const {
       describe:
         "Maximum number of files to summarize in parallel (must be a positive integer).",
     })
+    .option("retries", {
+      alias: "R",
+      type: "number",
+      default: 3,
+      describe:
+        "Maximum number of attempts per job when the AI call fails (must be at least 1).",
+    })
     .example(
       "$0 notes/**/*.md",
       "Summarize every Markdown file inside the notes directory tree.",
@@ -77,7 +84,7 @@ const {
     .alias("h", "help")
     .demandCommand(1, "Provide at least one file path or glob pattern.")
     .epilog(
-      "Options: --refresh, --ai-platform, --ai-model, --ai-temperature, --ai-max-tokens, --batch-size." +
+      "Options: --refresh, --ai-platform, --ai-model, --ai-temperature, --ai-max-tokens, --batch-size, --retries." +
         "\nExamples: text_summarize report.md | text_summarize docs/**/*.md",
     ).argv;
 
@@ -163,21 +170,51 @@ const {
 
   if (pending_jobs.length === 0) {
     logger.info("No files require summarization; outputs are up to date.");
-    const summary_tail = skipped_jobs.length
-      ? chalk.gray(`${skipped_jobs.length} skipped`)
-      : "no actions";
-    console.log(chalk.blue(`Done (${summary_tail}).`));
-    return;
+  } else {
+    logger.info(
+      `Preparing summaries for ${pending_jobs.length} file${
+        pending_jobs.length === 1 ? "" : "s"
+      } using batch size ${batch_size}...`,
+    );
   }
 
-  logger.info(
-    `Preparing summaries for ${pending_jobs.length} file${
-      pending_jobs.length === 1 ? "" : "s"
-    } using batch size ${batch_size}...`,
-  );
+  const requested_retry_count = Number(argv.retries);
+  let max_retry_count = 3;
+  if (Number.isFinite(requested_retry_count) && requested_retry_count >= 1) {
+    max_retry_count = Math.floor(requested_retry_count);
+  } else {
+    logger.warn(
+      `Invalid --retries value (${argv.retries}); defaulting to ${max_retry_count}.`,
+    );
+  }
 
   let processed_count = 0;
   let failed_count = 0;
+  let total_attempt_count = 0;
+  let retry_attempt_count = 0;
+
+  const run_with_retries = async (operation, context_message) => {
+    let attempt = 0;
+    let last_error = null;
+    while (attempt < max_retry_count) {
+      attempt += 1;
+      total_attempt_count += 1;
+      try {
+        return await operation();
+      } catch (error) {
+        last_error = error;
+        if (attempt < max_retry_count) {
+          retry_attempt_count += 1;
+          logger.warn(
+            `${context_message} attempt ${attempt} failed: ${
+              error.message || String(error)
+            }. Retrying...`,
+          );
+        }
+      }
+    }
+    throw last_error;
+  };
 
   const summarize_job = async (job) => {
     const { absolute_input_path, relative_input_path, output_file_path } = job;
@@ -185,17 +222,21 @@ const {
     console.log(chalk.cyan(`- Summarizing: ${relative_input_path}`));
 
     try {
-      await run_ai_command({
-        prompt_file: prompt_file_path,
-        input_file: absolute_input_path,
-        output_file: output_file_path,
-        repo_root: repo_root_path,
-        platform: argv["ai-platform"],
-        model: argv["ai-model"],
-        temperature: argv["ai-temperature"],
-        max_tokens: argv["ai-max-tokens"],
-        logger,
-      });
+      await run_with_retries(
+        () =>
+          run_ai_command({
+            prompt_file: prompt_file_path,
+            input_file: absolute_input_path,
+            output_file: output_file_path,
+            repo_root: repo_root_path,
+            platform: argv["ai-platform"],
+            model: argv["ai-model"],
+            temperature: argv["ai-temperature"],
+            max_tokens: argv["ai-max-tokens"],
+            logger,
+          }),
+        `Summarization for ${relative_input_path}`,
+      );
 
       const relative_output_path =
         path.relative(process.cwd(), output_file_path) ||
@@ -205,7 +246,7 @@ const {
     } catch (error) {
       failed_count += 1;
       console.error(chalk.red(`Failed: ${relative_input_path}`));
-      console.error(chalk.red(error.message || error));
+      console.error(chalk.red(error.message || String(error)));
     }
   };
 
@@ -223,6 +264,25 @@ const {
     .join(", ");
 
   console.log(chalk.blue(`Done (${summary_fragments || "no actions"}).`));
+
+  const stats_summary_text = `total_jobs=${job_entries.length}, pending=${pending_jobs.length}, skipped=${skipped_jobs.length}, attempts=${total_attempt_count}, retries=${retry_attempt_count}, succeeded=${processed_count}, failed=${failed_count}`;
+
+  logger.info(`Statistics => ${stats_summary_text}`);
+
+  const stats_color_segments = [
+    chalk.blueBright(`total: ${job_entries.length}`),
+    chalk.cyanBright(`pending: ${pending_jobs.length}`),
+    chalk.gray(`skipped: ${skipped_jobs.length}`),
+    chalk.yellowBright(`attempts: ${total_attempt_count}`),
+    chalk.magentaBright(`retries: ${retry_attempt_count}`),
+    chalk.greenBright(`succeeded: ${processed_count}`),
+    chalk.redBright(`failed: ${failed_count}`),
+  ];
+
+  console.log(
+    chalk.magenta("Statistics"),
+    stats_color_segments.join(chalk.white(" | ")),
+  );
 })().catch((error) => {
   console.error(error);
   process.exitCode = 1;
