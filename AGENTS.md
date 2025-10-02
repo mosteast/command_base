@@ -53,3 +53,16 @@
     - All boolean should be false by default.
   - Examples
   - ...
+
+## General CLI Options
+
+Must Support
+
+- `-h, --help`
+- `-v, --version`
+- `--debug`
+
+Support following options if possible:
+
+- `--quiet`
+- `--dry-run`
