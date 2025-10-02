@@ -9,6 +9,9 @@ const os = require("os");
 const fs_sync = require("fs");
 const yargs_factory = require("yargs/yargs");
 const { expand_patterns } = require("../utility/_ai_cli_utils");
+const {
+  convert_markdown_to_plain_text,
+} = require("../lib/text_processing/markdown_to_plain_text");
 
 const index_tts_default_voice_path = path.resolve(
   __dirname,
@@ -488,6 +491,7 @@ function create_logger(chalk, command_name) {
   const label_info = chalk.bold.blue("INFO");
   const label_warn = chalk.bold.yellow("WARN");
   const label_error = chalk.bold.red("ERROR");
+  const label_verbose = chalk.bold.gray("DETAIL");
 
   return {
     info(message) {
@@ -498,6 +502,9 @@ function create_logger(chalk, command_name) {
     },
     error(message) {
       console.error(`${label_error} ${chalk.cyan(command_name)} ${message}`);
+    },
+    verbose(message) {
+      console.log(`${label_verbose} ${chalk.cyan(command_name)} ${message}`);
     },
   };
 }
@@ -655,8 +662,8 @@ async function finalize_jobs(jobs, argv, logger, chalk) {
         const relative_output =
           path.relative(process.cwd(), job.output_path) || job.output_path;
 
-        logger.warn(
-          `${chalk.yellow("Skipping existing output")} ${chalk.green(relative_output)} (use --refresh to overwrite).`,
+        logger.verbose(
+          `${chalk.gray("Skipping existing output")} ${chalk.green(relative_output)} ${chalk.gray("(use --refresh to overwrite).")}`,
         );
 
         skipped_count += 1;
@@ -667,6 +674,16 @@ async function finalize_jobs(jobs, argv, logger, chalk) {
         }
       }
     }
+
+    const plain_text_content = convert_markdown_to_plain_text(job.text_content);
+    if (!plain_text_content) {
+      const text_label = job.display_name || job.source_file || "input";
+      throw new Error(
+        `Input '${text_label}' has no readable text after Markdown conversion.`,
+      );
+    }
+
+    job.text_content = plain_text_content;
 
     viable_jobs.push(job);
   }
