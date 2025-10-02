@@ -8,6 +8,7 @@ VIDEO_URLS=()
 ONLY_AUDIO=false
 ONLY_SUBTITLE=false
 OVERWRITE=false
+REFRESH=false
 
 # Retry configuration
 retry_attempt_limit=3
@@ -52,6 +53,7 @@ show_usage() {
     printf "      --only-audio        Download only audio files\n"
     printf "      --only-subtitle     Download only subtitle files\n"
     printf "      --overwrite         Force overwrite existing files\n"
+    printf "      --refresh           Clear cached archive for the provided URLs before downloading\n"
     printf "      --                   Pass additional options to yt-dlp\n"
     printf "\n"
     printf "%bExamples:%b\n" "$color_blue" "$color_reset"
@@ -165,6 +167,10 @@ while [[ $# -gt 0 ]]; do
             OVERWRITE=true
             shift
             ;;
+        --refresh)
+            REFRESH=true
+            shift
+            ;;
         --)
             shift
             break
@@ -261,6 +267,15 @@ if [ -n "$CHANNEL_URL" ]; then
     # Generate a unique archive file name based on the channel URL
     ARCHIVE_FILE="${ARCHIVE_DIR}/$(echo "$CHANNEL_URL" | md5sum | cut -d' ' -f1).txt"
 
+    if [ "$REFRESH" = true ]; then
+        if [ -f "$ARCHIVE_FILE" ]; then
+            log_info "Refresh requested; clearing archive cache at '$ARCHIVE_FILE'."
+            rm -f "$ARCHIVE_FILE"
+        else
+            log_warn "Refresh requested but no archive cache found for '$CHANNEL_URL'."
+        fi
+    fi
+
     retry_command "Channel download: ${CHANNEL_URL}" yt-dlp \
         --playlist-reverse \
         $EMBED_SUBS_OPTS \
@@ -282,6 +297,7 @@ if [ -n "$CHANNEL_URL" ]; then
         --retries 10 \
         --file-access-retries 5 \
         --fragment-retries 5 \
+        --exec after_move:"rm -f -- \"%(filepath)s.ytdl\"" \
         --add-header "Accept:text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" \
         --add-header "Accept-Language:en-us,en;q=0.5" \
         --add-header "Accept-Encoding:gzip, deflate" \
@@ -297,6 +313,15 @@ if [ -n "$CHANNEL_URL" ]; then
 elif [ -n "$PLAYLIST_URL" ]; then
     # Generate a unique archive file name based on the playlist URL
     ARCHIVE_FILE="${ARCHIVE_DIR}/$(echo "$PLAYLIST_URL" | md5sum | cut -d' ' -f1).txt"
+
+    if [ "$REFRESH" = true ]; then
+        if [ -f "$ARCHIVE_FILE" ]; then
+            log_info "Refresh requested; clearing archive cache at '$ARCHIVE_FILE'."
+            rm -f "$ARCHIVE_FILE"
+        else
+            log_warn "Refresh requested but no archive cache found for '$PLAYLIST_URL'."
+        fi
+    fi
 
     retry_command "Playlist download: ${PLAYLIST_URL}" yt-dlp \
         --playlist-reverse \
@@ -318,6 +343,7 @@ elif [ -n "$PLAYLIST_URL" ]; then
         --retries 10 \
         --file-access-retries 5 \
         --fragment-retries 5 \
+        --exec after_move:"rm -f -- \"%(filepath)s.ytdl\"" \
         --add-header "Accept:text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" \
         --add-header "Accept-Language:en-us,en;q=0.5" \
         --add-header "Accept-Encoding:gzip, deflate" \
@@ -332,13 +358,24 @@ elif [ -n "$PLAYLIST_URL" ]; then
 # Handle individual video URLs mode
 else
     overall_exit_code=0
+    failed_video_urls=()
 
     for url in "${VIDEO_URLS[@]}"; do
         # Generate a unique archive file name based on the video URL
         ARCHIVE_FILE="${ARCHIVE_DIR}/$(echo "$url" | md5sum | cut -d' ' -f1).txt"
+
+        if [ "$REFRESH" = true ]; then
+            if [ -f "$ARCHIVE_FILE" ]; then
+                log_info "Refresh requested; clearing archive cache at '$ARCHIVE_FILE'."
+                rm -f "$ARCHIVE_FILE"
+            else
+                log_warn "Refresh requested but no archive cache found for '$url'."
+            fi
+        fi
+
         [ "$OVERWRITE" != true ] && touch "$ARCHIVE_FILE"
 
-        retry_command "Video download: ${url}" yt-dlp \
+        if retry_command "Video download: ${url}" yt-dlp \
             $EMBED_SUBS_OPTS \
             -o "$OUTPUT_DIR/%(uploader)s - Videos/%(title)s.%(ext)s" \
             --cookies-from-browser chrome \
@@ -356,6 +393,7 @@ else
             --retries 10 \
             --file-access-retries 5 \
             --fragment-retries 5 \
+            --exec after_move:"rm -f -- \"%(filepath)s.ytdl\"" \
             --add-header "Accept:text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" \
             --add-header "Accept-Language:en-us,en;q=0.5" \
             --add-header "Accept-Encoding:gzip, deflate" \
@@ -363,14 +401,23 @@ else
             --add-header "User-Agent:Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36" \
             $EXTRA_OPTS \
             "$url"
-
-        download_status=$?
-        if [ $download_status -ne 0 ]; then
+        then
+            :
+        else
+            download_status=$?
             log_error "Skipping ${url} after ${retry_attempt_limit} failed attempts."
             overall_exit_code=$download_status
+            failed_video_urls+=("$url")
+            continue
         fi
     done
 
+    if [ ${#failed_video_urls[@]} -gt 0 ]; then
+        log_warn "Failed videos after ${retry_attempt_limit} attempts:"
+        for failed_url in "${failed_video_urls[@]}"; do
+            log_warn "  - ${failed_url}"
+        done
+    fi
+
     exit "$overall_exit_code"
 fi
-

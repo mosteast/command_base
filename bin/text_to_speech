@@ -1,0 +1,306 @@
+#!/usr/bin/env node
+
+"use strict";
+
+const fs = require("fs/promises");
+const path = require("path");
+const os = require("os");
+const yargs_factory = require("yargs/yargs");
+
+const {
+  default_tts_model_id,
+  list_tts_models,
+  get_tts_model,
+  resolve_audio_format,
+  DEFAULT_AUDIO_FORMAT,
+} = require("../lib/tts_model");
+const { SUPPORTED_AUDIO_FORMATS } = require("../lib/tts_model/shared");
+const { expand_patterns } = require("../utility/_ai_cli_utils");
+
+const {
+  normalize_concurrency,
+  build_synthesis_jobs,
+  parse_additional_options,
+} = require("../lib/tts_cli_helper");
+
+(async () => {
+  const { default: chalk } = await import("chalk");
+
+  const command_name = path.basename(process.argv[1] || "text_to_speech");
+  const terminal_width = Math.min(120, process.stdout.columns || 120);
+
+  const available_models = list_tts_models();
+  const supported_audio_formats = Array.from(SUPPORTED_AUDIO_FORMATS).sort();
+
+  const argv = yargs_factory(process.argv.slice(2))
+    .scriptName(command_name)
+    .usage(
+      `Usage: $0 [options] <file|glob ...>` +
+        "\n\nDescription:" +
+        "\n  Convert text sources into speech audio using pluggable TTS models.",
+    )
+    .wrap(terminal_width)
+    .option("ai-model", {
+      type: "string",
+      default: default_tts_model_id,
+      choices: available_models,
+      describe: "TTS model plugin to use (defaults to Coqui XTTS v2).",
+    })
+    .option("voice", {
+      type: "string",
+      describe:
+        "Voice identifier or speaker handle understood by the selected model.",
+    })
+    .option("language", {
+      type: "string",
+      describe: "Language code hint for the model (for example: en, zh, es).",
+    })
+    .option("style", {
+      type: "string",
+      describe: "Style or preset name supported by the provider (optional).",
+    })
+    .option("emotion", {
+      type: "string",
+      describe: "Emotion or vibe descriptor if the provider supports it.",
+    })
+    .option("format", {
+      type: "string",
+      default: DEFAULT_AUDIO_FORMAT,
+      choices: supported_audio_formats,
+      describe: "Audio file format for outputs.",
+    })
+    .option("output-dir", {
+      type: "string",
+      describe:
+        "Directory for generated audio files (defaults to each input file directory).",
+    })
+    .option("concurrency", {
+      type: "number",
+      default: Math.min(os.cpus()?.length || 2, 4),
+      describe: "Number of files to synthesize in parallel (1-8).",
+    })
+    .option("request-timeout", {
+      type: "number",
+      default: 120_000,
+      describe: "HTTP request timeout in milliseconds for provider calls.",
+    })
+    .option("additional-options", {
+      type: "string",
+      describe:
+        "JSON payload merged into provider request (overrides environment defaults).",
+    })
+    .option("force", {
+      alias: "f",
+      type: "boolean",
+      default: false,
+      describe: "Regenerate audio even when the output file already exists.",
+    })
+    .option("dry-run", {
+      type: "boolean",
+      default: false,
+      describe: "Print intended actions without running any synthesis.",
+    })
+    .alias("h", "help")
+    .demandCommand(1, "Provide one or more text files or glob patterns.")
+    .example(
+      "$0 a.txt b.txt",
+      "Synthesize a.txt and b.txt with the default xtts-v2 model.",
+    )
+    .example(
+      "$0 --ai-model index-tts a/b/**/*.txt",
+      "Use the index-tts plugin for every text file under a/b.",
+    )
+    .example(
+      "$0 --ai-model vibe-voice a/b/**/*.txt",
+      "Leverage the vibe-voice plugin on matching inputs.",
+    )
+    .epilog(
+      `Options: --ai-model, --voice, --language, --style, --emotion, --format, --output-dir, --concurrency, --request-timeout, --additional-options, --force, --dry-run.` +
+        `\nExamples: ${command_name} notes/**/*.txt | ${command_name} --ai-model index-tts scripts/*.md`,
+    )
+    .strict()
+    .parse();
+
+  const logger = create_logger(chalk, command_name);
+  const label_skip = chalk.bold.yellow("SKIP");
+  const label_fail = chalk.bold.red("FAIL");
+  const label_success = chalk.bold.green("DONE");
+
+  const input_patterns = argv._;
+  const resolved_input_files = expand_patterns(input_patterns, {
+    cwd: process.cwd(),
+  });
+
+  if (resolved_input_files.length === 0) {
+    logger.warn("No files matched the provided patterns.");
+    return;
+  }
+
+  const audio_format = resolve_audio_format(argv.format, DEFAULT_AUDIO_FORMAT);
+  const normalized_concurrency = normalize_concurrency(argv.concurrency);
+  const requested_output_dir = argv["output-dir"]
+    ? path.resolve(process.cwd(), argv["output-dir"])
+    : null;
+
+  let additional_options = undefined;
+  try {
+    additional_options = parse_additional_options(argv["additional-options"]);
+  } catch (error) {
+    logger.warn(`${error.message} -- ignoring provided additional options.`);
+  }
+
+  const target_model = get_tts_model(argv["ai-model"]);
+
+  const jobs = await build_synthesis_jobs({
+    input_files: resolved_input_files,
+    output_dir: requested_output_dir,
+    audio_format,
+    force: argv.force,
+    model_id: target_model.tts_model_id,
+  });
+
+  const pending_jobs = jobs.filter((job) => !job.skip_reason);
+  const skipped_jobs = jobs.filter((job) => job.skip_reason);
+
+  skipped_jobs.forEach((job) => {
+    logger.info(
+      `${label_skip} ${chalk.cyan(job.relative_input_path)} (${job.skip_reason})`,
+    );
+  });
+
+  if (pending_jobs.length === 0) {
+    logger.warn("Nothing to synthesize after filtering.");
+    return;
+  }
+
+  logger.info(
+    `Using ${chalk.magenta(target_model.tts_model_id)} with audio format ${chalk.magenta(audio_format)} on ${pending_jobs.length} file(s).`,
+  );
+
+  const synthesis_context = {
+    audio_format,
+    voice_id: argv.voice,
+    language: argv.language,
+    style: argv.style,
+    emotion: argv.emotion,
+    speaking_rate: undefined,
+    additional_options,
+    request_timeout_ms: argv["request-timeout"],
+    dry_run: argv["dry-run"],
+    logger,
+  };
+
+  const { results } = await run_with_concurrency(
+    pending_jobs,
+    normalized_concurrency,
+    async (job_entry) => {
+      try {
+        const text_content = await fs.readFile(
+          job_entry.absolute_input_path,
+          "utf8",
+        );
+        const trimmed_text = text_content.trim();
+        if (!trimmed_text) {
+          logger.warn(
+            `${label_skip} ${chalk.cyan(job_entry.relative_input_path)} (empty file)`,
+          );
+          return {
+            status: "skipped",
+            job_entry,
+            reason: "empty file",
+          };
+        }
+
+        const result = await target_model.synthesize_text({
+          ...synthesis_context,
+          text_content,
+          input_file_path: job_entry.absolute_input_path,
+          output_file_path: job_entry.output_file_path,
+        });
+
+        logger.info(
+          `${label_success} ${chalk.cyan(job_entry.relative_input_path)} -> ${chalk.green(path.relative(process.cwd(), job_entry.output_file_path))}`,
+        );
+
+        return {
+          status: "completed",
+          job_entry,
+          result,
+        };
+      } catch (error) {
+        logger.error(
+          `${label_fail} ${chalk.cyan(job_entry.relative_input_path)}: ${error.message}`,
+        );
+        return {
+          status: "failed",
+          job_entry,
+          error,
+        };
+      }
+    },
+  );
+
+  const completed = results.filter((entry) => entry?.status === "completed");
+  const failed = results.filter((entry) => entry?.status === "failed");
+
+  const failed_count = failed.length;
+  logger.info(
+    chalk.bold(
+      `Summary | completed: ${chalk.green(completed.length)} | skipped: ${chalk.yellow(skipped_jobs.length)} | failed: ${chalk.red(failed_count)}`,
+    ),
+  );
+
+  if (failed_count > 0) {
+    process.exitCode = 1;
+  }
+})();
+
+async function run_with_concurrency(items, limit, runner) {
+  const capped_limit = Math.max(1, Math.min(limit, items.length || 1));
+  const results = new Array(items.length);
+  const errors = [];
+  let index_pointer = 0;
+
+  async function worker() {
+    while (true) {
+      const current_index = index_pointer;
+      if (current_index >= items.length) {
+        return;
+      }
+      index_pointer += 1;
+      const item = items[current_index];
+      try {
+        results[current_index] = await runner(item, current_index);
+        if (results[current_index]?.status === "failed") {
+          errors.push(results[current_index]);
+        }
+      } catch (error) {
+        const failure_entry = { status: "failed", item, error };
+        results[current_index] = failure_entry;
+        errors.push(failure_entry);
+      }
+    }
+  }
+
+  await Promise.all(new Array(capped_limit).fill(null).map(() => worker()));
+
+  return { results, errors };
+}
+
+function create_logger(chalk, command_name) {
+  const label_info = chalk.bold.blue("INFO");
+  const label_warn = chalk.bold.yellow("WARN");
+  const label_error = chalk.bold.red("ERROR");
+
+  return {
+    info(message) {
+      console.log(`${label_info} ${chalk.cyan(command_name)} ${message}`);
+    },
+    warn(message) {
+      console.warn(`${label_warn} ${chalk.cyan(command_name)} ${message}`);
+    },
+    error(message) {
+      console.error(`${label_error} ${chalk.cyan(command_name)} ${message}`);
+    },
+  };
+}
