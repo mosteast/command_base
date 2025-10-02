@@ -15,6 +15,15 @@ bitrate="128k"
 force_overwrite=false
 parallel_jobs=5
 
+# ANSI color codes for readable output (disable when not on a TTY)
+if [ -t 1 ] || [ "${FORCE_COLOR:-}" = "1" ]; then
+    color_reset="\033[0m"
+    color_yellow="\033[0;33m"
+else
+    color_reset=""
+    color_yellow=""
+fi
+
 # State file for tracking conversion progress
 state_file="$HOME/.cache/convert_to_audio_state"
 
@@ -542,13 +551,21 @@ while IFS= read -r video_file; do
         output_file="$input_dir/${name_without_ext}.aac"
     fi
     
-    # Check if conversion is already completed using state file
-    if [ "x$force_overwrite" = "xfalse" ] && is_conversion_completed "$video_file" "$output_file"; then
-        echo "Already converted: $(basename "$video_file")"
-        ((skipped_count++))
-    else
-        echo "$video_file" >> "$temp_unconverted"
+    if [ "x$force_overwrite" = "xfalse" ]; then
+        if is_conversion_completed "$video_file" "$output_file"; then
+            echo "Already converted: $(basename "$video_file")"
+            ((skipped_count++))
+            continue
+        fi
+
+        if [ -f "$output_file" ]; then
+            printf "%b⚠ Audio already exists, skipping:%b %s\n" "$color_yellow" "$color_reset" "$(basename "$output_file")"
+            ((skipped_count++))
+            continue
+        fi
     fi
+
+    echo "$video_file" >> "$temp_unconverted"
 done < "$list_file"
 
 unconverted_count=$(wc -l < "$temp_unconverted" 2>/dev/null || echo 0)

@@ -4,24 +4,15 @@
 
 const fs = require("fs/promises");
 const path = require("path");
+const { spawn, spawnSync } = require("child_process");
 const os = require("os");
+const fs_sync = require("fs");
 const yargs_factory = require("yargs/yargs");
-
-const {
-  default_tts_model_id,
-  list_tts_models,
-  get_tts_model,
-  resolve_audio_format,
-  DEFAULT_AUDIO_FORMAT,
-} = require("../lib/tts_model");
-const { SUPPORTED_AUDIO_FORMATS } = require("../lib/tts_model/shared");
 const { expand_patterns } = require("../utility/_ai_cli_utils");
 
-const {
-  normalize_concurrency,
-  build_synthesis_jobs,
-  parse_additional_options,
-} = require("../lib/tts_cli_helper");
+function hide_process_argv(argv) {
+  return Array.isArray(argv) ? argv.slice(2) : [];
+}
 
 (async () => {
   const { default: chalk } = await import("chalk");
@@ -29,263 +20,464 @@ const {
   const command_name = path.basename(process.argv[1] || "text_to_speech");
   const terminal_width = Math.min(120, process.stdout.columns || 120);
 
-  const available_models = list_tts_models();
-  const supported_audio_formats = Array.from(SUPPORTED_AUDIO_FORMATS).sort();
-
-  const argv = yargs_factory(process.argv.slice(2))
+  const argv = yargs_factory(hide_process_argv(process.argv))
     .scriptName(command_name)
     .usage(
-      `Usage: $0 [options] <file|glob ...>` +
+      "Usage: $0 [options] [file|glob ...]" +
         "\n\nDescription:" +
-        "\n  Convert text sources into speech audio using pluggable TTS models.",
+        "\n  Convert text into speech offline using IndexTTS (default), XTTS v2, Piper, or VibeVoice.",
     )
-    .wrap(terminal_width)
-    .option("ai-model", {
+    .option("engine", {
       type: "string",
-      default: default_tts_model_id,
-      choices: available_models,
-      describe: "TTS model plugin to use (defaults to Coqui XTTS v2).",
+      choices: ["xtts", "piper", "vibe_voice", "index_tts"],
+      default: "index_tts",
+      describe: "Synthesis engine to use (local only).",
+    })
+    .option("text", {
+      type: "string",
+      describe: "Inline text to synthesize.",
+    })
+    .option("text-file", {
+      type: "string",
+      describe: "Path to a file containing the text to synthesize.",
+    })
+    .option("lang", {
+      type: "string",
+      choices: ["en", "zh-cn", "auto"],
+      default: "en",
+      describe:
+        "Language code for the engine (auto defers to model heuristics).",
     })
     .option("voice", {
       type: "string",
+      default: "lib/index_tts/speaker/francis_underwood.m4a",
       describe:
-        "Voice identifier or speaker handle understood by the selected model.",
+        "Reference speaker WAV path used by engines that support voice cloning (XTTS, VibeVoice, IndexTTS).",
     })
-    .option("language", {
-      type: "string",
-      describe: "Language code hint for the model (for example: en, zh, es).",
-    })
-    .option("style", {
-      type: "string",
-      describe: "Style or preset name supported by the provider (optional).",
-    })
-    .option("emotion", {
-      type: "string",
-      describe: "Emotion or vibe descriptor if the provider supports it.",
-    })
-    .option("format", {
-      type: "string",
-      default: DEFAULT_AUDIO_FORMAT,
-      choices: supported_audio_formats,
-      describe: "Audio file format for outputs.",
-    })
-    .option("output-dir", {
+    .option("speaker", {
       type: "string",
       describe:
-        "Directory for generated audio files (defaults to each input file directory).",
+        "Named speaker preset for XTTS multi-speaker models (defaults to engine-provided voice when omitted).",
     })
-    .option("concurrency", {
+    .option("output", {
+      type: "string",
+      describe:
+        "Destination WAV file or directory (directory required for multiple inputs).",
+    })
+    .option("speed", {
       type: "number",
-      default: Math.min(os.cpus()?.length || 2, 4),
-      describe: "Number of files to synthesize in parallel (1-8).",
+      default: 1.0,
+      describe: "Playback speed multiplier (must be positive).",
     })
-    .option("request-timeout", {
+    .option("temperature", {
       type: "number",
-      default: 120_000,
-      describe: "HTTP request timeout in milliseconds for provider calls.",
+      default: 0.7,
+      describe: "XTTS sampling temperature (higher is more diverse).",
     })
-    .option("additional-options", {
+    .option("device", {
+      type: "string",
+      choices: ["auto", "cpu", "cuda:0"],
+      default: "auto",
+      describe: "Execution device for XTTS (auto detects CUDA).",
+    })
+    .option("piper-model", {
+      type: "string",
+      describe: "Path to a Piper .onnx model (required for --engine piper).",
+    })
+    .option("python-bin", {
       type: "string",
       describe:
-        "JSON payload merged into provider request (overrides environment defaults).",
+        "Explicit Python interpreter for Python-backed engines (defaults to auto-detect).",
     })
-    .option("force", {
-      alias: "f",
+    .option("refresh", {
       type: "boolean",
       default: false,
-      describe: "Regenerate audio even when the output file already exists.",
+      describe:
+        "Allow overwriting existing output files (disabled by default).",
     })
-    .option("dry-run", {
+    .option("index-tts-home", {
+      type: "string",
+      describe:
+        "Path to a local index-tts checkout (auto-detects common locations when unset).",
+    })
+    .option("index-tts-checkpoints", {
+      type: "string",
+      describe:
+        "Relative or absolute path to the IndexTTS checkpoints directory (defaults to <home>/checkpoints).",
+    })
+    .option("index-tts-config", {
+      type: "string",
+      describe:
+        "Relative or absolute path to the IndexTTS config.yaml (defaults to <checkpoints>/config.yaml).",
+    })
+    .option("emo-audio", {
+      type: "string",
+      describe:
+        "Optional emotional reference WAV used by IndexTTS for style conditioning.",
+    })
+    .option("emo-text", {
+      type: "string",
+      describe: "Optional emotion description text used by IndexTTS guidance.",
+    })
+    .option("emo-vector", {
+      type: "string",
+      describe:
+        "Comma-separated or JSON array of 8 floats for explicit IndexTTS emotion control.",
+    })
+    .option("emo-alpha", {
+      type: "number",
+      default: 1.0,
+      describe: "Blend strength for IndexTTS emotion conditioning (0.0-1.0).",
+    })
+    .option("index-tts-fp16", {
       type: "boolean",
       default: false,
-      describe: "Print intended actions without running any synthesis.",
+      describe:
+        "Enable FP16 inference for IndexTTS when the hardware supports it.",
+    })
+    .option("index-tts-deepspeed", {
+      type: "boolean",
+      default: false,
+      describe:
+        "Enable DeepSpeed acceleration for IndexTTS (requires extra dependencies).",
+    })
+    .option("index-tts-cuda-kernel", {
+      type: "boolean",
+      default: false,
+      describe: "Allow IndexTTS to use optimized CUDA kernels when available.",
+    })
+    .option("index-tts-random", {
+      type: "boolean",
+      default: false,
+      describe:
+        "Enable stochastic IndexTTS sampling (may reduce cloning fidelity).",
+    })
+    .option("index-tts-max-segment", {
+      type: "number",
+      default: 120,
+      describe: "Maximum text tokens per IndexTTS segment (controls chunking).",
+    })
+    .option("vibe_voice-model-dir", {
+      type: "string",
+      describe:
+        "Path to a local VibeVoice model directory (defaults to VIBE_VOICE_MODEL_DIR).",
+    })
+    .option("vibe_voice-processor-dir", {
+      type: "string",
+      describe:
+        "Optional override for the VibeVoice processor directory (defaults to the model dir).",
+    })
+    .option("vibe_voice-device", {
+      type: "string",
+      default: "auto",
+      describe: "Execution device hint for VibeVoice (auto, cpu, cuda, mps).",
+    })
+    .option("vibe_voice-cfg-scale", {
+      type: "number",
+      default: 3.0,
+      describe: "Classifier-free guidance scale for VibeVoice generation.",
+    })
+    .option("vibe_voice-max-new", {
+      type: "number",
+      describe: "Optional maximum number of tokens for VibeVoice generation.",
+    })
+    .option("vibe_voice-ddpm-steps", {
+      type: "number",
+      describe: "Optional override for VibeVoice diffusion inference steps.",
+    })
+    .option("vibe_voice-half", {
+      type: "boolean",
+      default: false,
+      describe: "Run VibeVoice in half precision when supported.",
+    })
+    .option("vibe_voice-quiet", {
+      type: "boolean",
+      default: false,
+      describe: "Silence VibeVoice progress output.",
     })
     .alias("h", "help")
-    .demandCommand(1, "Provide one or more text files or glob patterns.")
     .example(
-      "$0 a.txt b.txt",
-      "Synthesize a.txt and b.txt with the default xtts-v2 model.",
-    )
-    .example(
-      "$0 --ai-model index-tts a/b/**/*.txt",
-      "Use the index-tts plugin for every text file under a/b.",
+      '$0 --text "今天的风很舒服。This runs offline." --lang zh-cn --output out.wav',
+      "Generate speech with XTTS v2 using multilingual input.",
     )
     .example(
-      "$0 --ai-model vibe-voice a/b/**/*.txt",
-      "Leverage the vibe-voice plugin on matching inputs.",
+      "$0 --speaker female-en-5 notes/*.txt",
+      "Select a predefined XTTS speaker preset for batch synthesis.",
     )
-    .epilog(
-      `Options: --ai-model, --voice, --language, --style, --emotion, --format, --output-dir, --concurrency, --request-timeout, --additional-options, --force, --dry-run.` +
-        `\nExamples: ${command_name} notes/**/*.txt | ${command_name} --ai-model index-tts scripts/*.md`,
+    .example(
+      '$0 --engine piper --text "Hello" --output en.wav --piper-model ./en_US-amy-medium.onnx',
+      "Synthesize using Piper with a local English model file.",
     )
+    .example(
+      '$0 --engine vibe_voice --text "Team sync at 10am." --voice ./reference.wav --vibe_voice-model-dir ~/models/VibeVoice --output vibe_voice.wav',
+      "Generate audio with VibeVoice using a locally downloaded model directory.",
+    )
+    .example(
+      "$0 --engine index_tts --text-file script.txt --voice ./speaker.wav --index-tts-home ~/git/index-tts --output out.wav",
+      "Clone a speaker with IndexTTS2 from a local repository checkout.",
+    )
+    .example(
+      "$0 a/b/*.md c/d/*.txt",
+      "Expand glob patterns, synthesize each file, and write companion WAV files.",
+    )
+    .wrap(terminal_width)
     .strict()
+    .check((parsed) => {
+      const has_inline_text = Boolean(parsed.text);
+      const has_text_file = Boolean(parsed["text-file"]);
+      const has_patterns = Array.isArray(parsed._) && parsed._.length > 0;
+
+      const active_inputs = [
+        has_inline_text,
+        has_text_file,
+        has_patterns,
+      ].filter(Boolean).length;
+
+      if (active_inputs === 0) {
+        throw new Error(
+          "Provide --text, --text-file, or one or more file/glob arguments to synthesize.",
+        );
+      }
+
+      if (has_inline_text && has_text_file) {
+        throw new Error(
+          "Use either --text or --text-file; these options are mutually exclusive.",
+        );
+      }
+
+      if (has_patterns && (has_inline_text || has_text_file)) {
+        throw new Error(
+          "Positional file/glob inputs cannot be combined with --text or --text-file.",
+        );
+      }
+
+      if (typeof parsed.speed === "number" && parsed.speed <= 0) {
+        throw new Error("--speed must be a positive number.");
+      }
+
+      if (typeof parsed.temperature === "number" && parsed.temperature <= 0) {
+        throw new Error("--temperature must be greater than zero.");
+      }
+
+      return true;
+    })
+    .epilog(
+      "Options: --engine, --text, --text-file, --lang, --voice, --speaker, --output, --speed, --temperature, --device, --piper-model, --python-bin, --index-tts-home, --index-tts-checkpoints, --index-tts-config, --emo-audio, --emo-text, --emo-vector, --emo-alpha, --index-tts-fp16, --index-tts-deepspeed, --index-tts-cuda-kernel, --index-tts-random, --index-tts-max-segment, --vibe_voice-model-dir, --vibe_voice-processor-dir, --vibe_voice-device, --vibe_voice-cfg-scale, --vibe_voice-max-new, --vibe_voice-ddpm-steps, --vibe_voice-half, --vibe_voice-quiet." +
+        `\nExamples: ${command_name} --text 'Hello' --output hello.wav | ${command_name} --engine index_tts notes/*.txt --voice speaker.wav --index-tts-home ~/git/index-tts`,
+    )
     .parse();
 
   const logger = create_logger(chalk, command_name);
-  const label_skip = chalk.bold.yellow("SKIP");
-  const label_fail = chalk.bold.red("FAIL");
-  const label_success = chalk.bold.green("DONE");
 
-  const input_patterns = argv._;
-  const resolved_input_files = expand_patterns(input_patterns, {
-    cwd: process.cwd(),
-  });
-
-  if (resolved_input_files.length === 0) {
-    logger.warn("No files matched the provided patterns.");
-    return;
-  }
-
-  const audio_format = resolve_audio_format(argv.format, DEFAULT_AUDIO_FORMAT);
-  const normalized_concurrency = normalize_concurrency(argv.concurrency);
-  const requested_output_dir = argv["output-dir"]
-    ? path.resolve(process.cwd(), argv["output-dir"])
-    : null;
-
-  let additional_options = undefined;
+  let synthesis_jobs;
   try {
-    additional_options = parse_additional_options(argv["additional-options"]);
+    synthesis_jobs = await build_synthesis_jobs(argv, logger, chalk);
   } catch (error) {
-    logger.warn(`${error.message} -- ignoring provided additional options.`);
-  }
-
-  const target_model = get_tts_model(argv["ai-model"]);
-
-  const jobs = await build_synthesis_jobs({
-    input_files: resolved_input_files,
-    output_dir: requested_output_dir,
-    audio_format,
-    force: argv.force,
-    model_id: target_model.tts_model_id,
-  });
-
-  const pending_jobs = jobs.filter((job) => !job.skip_reason);
-  const skipped_jobs = jobs.filter((job) => job.skip_reason);
-
-  skipped_jobs.forEach((job) => {
-    logger.info(
-      `${label_skip} ${chalk.cyan(job.relative_input_path)} (${job.skip_reason})`,
-    );
-  });
-
-  if (pending_jobs.length === 0) {
-    logger.warn("Nothing to synthesize after filtering.");
+    logger.error(error?.message || String(error));
+    process.exitCode = 1;
     return;
   }
 
-  logger.info(
-    `Using ${chalk.magenta(target_model.tts_model_id)} with audio format ${chalk.magenta(audio_format)} on ${pending_jobs.length} file(s).`,
-  );
+  const engine_choice = argv.engine;
+  const target_lang = resolve_language(engine_choice, argv.lang);
+  const device_choice = argv.device || "auto";
 
-  const synthesis_context = {
-    audio_format,
-    voice_id: argv.voice,
-    language: argv.language,
-    style: argv.style,
-    emotion: argv.emotion,
-    speaking_rate: undefined,
-    additional_options,
-    request_timeout_ms: argv["request-timeout"],
-    dry_run: argv["dry-run"],
-    logger,
-  };
-
-  const { results } = await run_with_concurrency(
-    pending_jobs,
-    normalized_concurrency,
-    async (job_entry) => {
-      try {
-        const text_content = await fs.readFile(
-          job_entry.absolute_input_path,
-          "utf8",
-        );
-        const trimmed_text = text_content.trim();
-        if (!trimmed_text) {
-          logger.warn(
-            `${label_skip} ${chalk.cyan(job_entry.relative_input_path)} (empty file)`,
-          );
-          return {
-            status: "skipped",
-            job_entry,
-            reason: "empty file",
-          };
-        }
-
-        const result = await target_model.synthesize_text({
-          ...synthesis_context,
-          text_content,
-          input_file_path: job_entry.absolute_input_path,
-          output_file_path: job_entry.output_file_path,
-        });
-
-        logger.info(
-          `${label_success} ${chalk.cyan(job_entry.relative_input_path)} -> ${chalk.green(path.relative(process.cwd(), job_entry.output_file_path))}`,
-        );
-
-        return {
-          status: "completed",
-          job_entry,
-          result,
-        };
-      } catch (error) {
-        logger.error(
-          `${label_fail} ${chalk.cyan(job_entry.relative_input_path)}: ${error.message}`,
-        );
-        return {
-          status: "failed",
-          job_entry,
-          error,
-        };
-      }
-    },
-  );
-
-  const completed = results.filter((entry) => entry?.status === "completed");
-  const failed = results.filter((entry) => entry?.status === "failed");
-
-  const failed_count = failed.length;
-  logger.info(
-    chalk.bold(
-      `Summary | completed: ${chalk.green(completed.length)} | skipped: ${chalk.yellow(skipped_jobs.length)} | failed: ${chalk.red(failed_count)}`,
-    ),
-  );
-
-  if (failed_count > 0) {
-    process.exitCode = 1;
+  const voice_supported_engines = new Set(["xtts", "vibe_voice", "index_tts"]);
+  if (!voice_supported_engines.has(engine_choice) && argv.voice) {
+    logger.warn(
+      `Ignoring --voice because it is not supported by the ${chalk.magenta(engine_choice)} engine.`,
+    );
   }
-})();
+  if (engine_choice !== "xtts" && argv.speaker) {
+    logger.warn("Ignoring --speaker because only XTTS supports named presets.");
+  }
 
-async function run_with_concurrency(items, limit, runner) {
-  const capped_limit = Math.max(1, Math.min(limit, items.length || 1));
-  const results = new Array(items.length);
-  const errors = [];
-  let index_pointer = 0;
-
-  async function worker() {
-    while (true) {
-      const current_index = index_pointer;
-      if (current_index >= items.length) {
-        return;
-      }
-      index_pointer += 1;
-      const item = items[current_index];
+  let xtts_voice_path = null;
+  if (engine_choice === "xtts") {
+    if (argv.voice) {
+      xtts_voice_path = path.resolve(process.cwd(), argv.voice);
       try {
-        results[current_index] = await runner(item, current_index);
-        if (results[current_index]?.status === "failed") {
-          errors.push(results[current_index]);
-        }
+        await fs.access(xtts_voice_path);
       } catch (error) {
-        const failure_entry = { status: "failed", item, error };
-        results[current_index] = failure_entry;
-        errors.push(failure_entry);
+        throw new Error(
+          `Unable to access --voice file '${xtts_voice_path}': ${error.message}`,
+        );
       }
+    } else if (argv.speaker) {
+      logger.info(
+        `Using XTTS named speaker preset ${chalk.magenta(argv.speaker)} without cloning reference voice.`,
+      );
+    } else {
+      logger.info(
+        "No --voice or --speaker supplied; using XTTS default speaker profile.",
+      );
     }
   }
 
-  await Promise.all(new Array(capped_limit).fill(null).map(() => worker()));
+  let index_tts_home_info = null;
+  if (engine_choice === "index_tts") {
+    try {
+      index_tts_home_info = locate_index_tts_home(argv);
+    } catch (error) {
+      logger.error(error?.message || String(error));
+      process.exitCode = 1;
+      return;
+    }
+  }
 
-  return { results, errors };
-}
+  let python_runtime = null;
+  if (["xtts", "vibe_voice", "index_tts"].includes(engine_choice)) {
+    try {
+      const preferred_python_bins = [];
+      if (index_tts_home_info?.resolved_home) {
+        const index_tts_home = index_tts_home_info.resolved_home;
+        const candidate_bins = [
+          path.join(index_tts_home, ".venv", "bin", "python"),
+          path.join(index_tts_home, ".venv", "bin", "python3"),
+          path.join(index_tts_home, ".venv", "Scripts", "python.exe"),
+          path.join(index_tts_home, "venv", "bin", "python"),
+          path.join(index_tts_home, "venv", "bin", "python3"),
+          path.join(index_tts_home, "venv", "Scripts", "python.exe"),
+        ];
+        candidate_bins.forEach((candidate) => {
+          if (candidate && fs_sync.existsSync(candidate)) {
+            preferred_python_bins.push(candidate);
+          }
+        });
+      }
+
+      python_runtime = resolve_python_runtime({
+        requested_bin: argv["python-bin"],
+        logger,
+        chalk,
+        preferred_paths: preferred_python_bins,
+      });
+    } catch (error) {
+      logger.error(error?.message || String(error));
+      process.exitCode = 1;
+      return;
+    }
+  } else if (argv["python-bin"]) {
+    logger.warn(
+      "Ignoring --python-bin because the Piper engine does not use a Python runtime.",
+    );
+  }
+
+  let index_tts_env = null;
+  if (engine_choice === "index_tts") {
+    try {
+      index_tts_env = resolve_index_tts_environment({
+        argv,
+        logger,
+        chalk,
+        cached_home_info: index_tts_home_info,
+      });
+    } catch (error) {
+      logger.error(error?.message || String(error));
+      process.exitCode = 1;
+      return;
+    }
+  }
+
+  let vibe_voice_env = null;
+  if (engine_choice === "vibe_voice") {
+    try {
+      vibe_voice_env = resolve_vibe_voice_environment({ argv, logger, chalk });
+    } catch (error) {
+      logger.error(error?.message || String(error));
+      process.exitCode = 1;
+      return;
+    }
+  }
+
+  let success_count = 0;
+  let failure_count = 0;
+
+  for (let index = 0; index < synthesis_jobs.length; index += 1) {
+    const job = synthesis_jobs[index];
+    const job_number = index + 1;
+    const job_label = `${job.display_name}`;
+    const relative_output = path.relative(process.cwd(), job.output_path);
+
+    try {
+      await fs.mkdir(path.dirname(job.output_path), { recursive: true });
+
+      logger.info(
+        `Job ${chalk.yellow(`${job_number}/${synthesis_jobs.length}`)} ${chalk.cyan(job_label)} -> ${chalk.green(relative_output)}`,
+      );
+
+      if (engine_choice === "xtts") {
+        await run_xtts_engine({
+          text: job.text_content,
+          lang: target_lang,
+          voice_path: xtts_voice_path,
+          speaker: argv.speaker,
+          output_path: job.output_path,
+          speed: argv.speed,
+          temperature: argv.temperature,
+          device: device_choice,
+          chalk,
+          logger,
+          python_bin: python_runtime.command,
+        });
+      } else if (engine_choice === "piper") {
+        await run_piper_engine({
+          text: job.text_content,
+          model_path: argv["piper-model"],
+          output_path: job.output_path,
+          speed: argv.speed,
+          temperature: argv.temperature,
+          lang: target_lang,
+          device: device_choice,
+          chalk,
+          logger,
+        });
+      } else if (engine_choice === "index_tts") {
+        await run_index_tts_engine({
+          text: job.text_content,
+          output_path: job.output_path,
+          env: index_tts_env,
+          chalk,
+          logger,
+          python_bin: python_runtime.command,
+        });
+      } else if (engine_choice === "vibe_voice") {
+        await run_vibe_voice_engine({
+          text: job.text_content,
+          output_path: job.output_path,
+          env: vibe_voice_env,
+          chalk,
+          logger,
+          python_bin: python_runtime.command,
+        });
+      } else {
+        throw new Error(`Unsupported engine '${engine_choice}'.`);
+      }
+
+      success_count += 1;
+    } catch (error) {
+      failure_count += 1;
+      logger.error(
+        `Synthesis failed for ${chalk.cyan(job_label)}: ${error?.message || String(error)}`,
+      );
+    }
+  }
+
+  if (failure_count > 0) {
+    logger.warn(
+      chalk.bold.yellow(
+        `Completed with ${failure_count} failure${failure_count === 1 ? "" : "s"} (${success_count} succeeded).`,
+      ),
+    );
+    process.exitCode = 1;
+  } else {
+    logger.info(
+      chalk.bold.green(
+        `Synthesis complete (${success_count} job${success_count === 1 ? "" : "s"}).`,
+      ),
+    );
+  }
+})();
 
 function create_logger(chalk, command_name) {
   const label_info = chalk.bold.blue("INFO");
@@ -303,4 +495,1159 @@ function create_logger(chalk, command_name) {
       console.error(`${label_error} ${chalk.cyan(command_name)} ${message}`);
     },
   };
+}
+
+async function build_synthesis_jobs(argv, logger, chalk) {
+  if (argv.text) {
+    const trimmed_inline = String(argv.text).trim();
+    if (!trimmed_inline) {
+      throw new Error("Inline --text is empty after trimming.");
+    }
+    return finalize_jobs(
+      [
+        {
+          text_content: trimmed_inline,
+          source_file: null,
+          display_name: "inline-text",
+        },
+      ],
+      argv,
+      logger,
+      chalk,
+    );
+  }
+
+  if (argv["text-file"]) {
+    const absolute_path = path.resolve(process.cwd(), argv["text-file"]);
+    const file_job = await create_job_from_file(absolute_path);
+    return finalize_jobs([file_job], argv, logger, chalk);
+  }
+
+  const patterns = Array.isArray(argv._) ? argv._ : [];
+  const expanded_files = expand_patterns(patterns, { cwd: process.cwd() });
+
+  if (expanded_files.length === 0) {
+    throw new Error("No files matched the provided patterns.");
+  }
+
+  const file_jobs = [];
+  for (const absolute_file_path of expanded_files) {
+    const job = await create_job_from_file(absolute_file_path);
+    file_jobs.push(job);
+  }
+
+  return finalize_jobs(file_jobs, argv, logger, chalk);
+}
+
+async function create_job_from_file(absolute_file_path) {
+  let file_content;
+  try {
+    file_content = await fs.readFile(absolute_file_path, "utf8");
+  } catch (error) {
+    throw new Error(
+      `Unable to read text file '${absolute_file_path}': ${error.message}`,
+    );
+  }
+
+  const trimmed_content = file_content.trim();
+  if (!trimmed_content) {
+    throw new Error(
+      `Text file '${absolute_file_path}' has no readable content.`,
+    );
+  }
+
+  const relative_path =
+    path.relative(process.cwd(), absolute_file_path) ||
+    path.basename(absolute_file_path);
+
+  return {
+    text_content: trimmed_content,
+    source_file: absolute_file_path,
+    display_name: relative_path,
+  };
+}
+
+async function finalize_jobs(jobs, argv, logger, chalk) {
+  if (!Array.isArray(jobs) || jobs.length === 0) {
+    throw new Error("No synthesis jobs were produced.");
+  }
+
+  const output_override = argv.output
+    ? path.resolve(process.cwd(), argv.output)
+    : null;
+
+  let output_directory = null;
+  let explicit_output_file = null;
+
+  if (output_override) {
+    let output_stats = null;
+    try {
+      output_stats = await fs.stat(output_override);
+    } catch (error) {
+      if (error && error.code === "ENOENT") {
+        if (jobs.length > 1) {
+          output_directory = output_override;
+        } else {
+          explicit_output_file = output_override;
+        }
+      } else {
+        throw new Error(
+          `Unable to access output path '${output_override}': ${error.message}`,
+        );
+      }
+    }
+
+    if (output_stats) {
+      if (output_stats.isDirectory()) {
+        output_directory = output_override;
+      } else {
+        if (jobs.length > 1) {
+          throw new Error(
+            "--output must point to a directory when synthesizing multiple inputs.",
+          );
+        }
+        explicit_output_file = output_override;
+      }
+    }
+  }
+
+  if (output_directory) {
+    await fs.mkdir(output_directory, { recursive: true });
+  }
+
+  const viable_jobs = [];
+  let skipped_count = 0;
+
+  for (let index = 0; index < jobs.length; index += 1) {
+    const job = jobs[index];
+
+    if (explicit_output_file) {
+      job.output_path = explicit_output_file;
+    } else if (output_directory) {
+      const base_name = job.source_file
+        ? path.parse(job.source_file).name
+        : `inline_${String(index + 1)
+            .toString()
+            .padStart(2, "0")}`;
+      job.output_path = path.join(output_directory, `${base_name}.wav`);
+    } else if (job.source_file) {
+      const parsed_source = path.parse(job.source_file);
+      job.output_path = path.join(
+        parsed_source.dir,
+        `${parsed_source.name}.wav`,
+      );
+    } else {
+      job.output_path = path.resolve(
+        process.cwd(),
+        argv.output || "text_to_speech_output.wav",
+      );
+    }
+
+    if (!argv.refresh) {
+      try {
+        await fs.access(job.output_path);
+
+        const relative_output =
+          path.relative(process.cwd(), job.output_path) || job.output_path;
+
+        logger.warn(
+          `${chalk.yellow("Skipping existing output")} ${chalk.green(relative_output)} (use --refresh to overwrite).`,
+        );
+
+        skipped_count += 1;
+        continue;
+      } catch (error) {
+        if (!error || error.code !== "ENOENT") {
+          throw error;
+        }
+      }
+    }
+
+    viable_jobs.push(job);
+  }
+
+  if (skipped_count > 0 && viable_jobs.length === 0) {
+    logger.info(
+      chalk.yellow(
+        "All requested outputs already exist; nothing to synthesize. Run with --refresh to regenerate audio.",
+      ),
+    );
+  } else if (skipped_count > 0) {
+    logger.info(
+      chalk.yellow(
+        `${skipped_count} existing output${skipped_count === 1 ? " was" : "s were"} skipped (use --refresh to overwrite).`,
+      ),
+    );
+  }
+
+  return viable_jobs;
+}
+
+function locate_index_tts_home(argv) {
+  const cwd = process.cwd();
+  const explicit_hint = argv["index-tts-home"] || process.env.INDEX_TTS_HOME;
+
+  if (explicit_hint) {
+    const resolved_explicit = path.resolve(cwd, explicit_hint);
+    let explicit_stats;
+    try {
+      explicit_stats = fs_sync.statSync(resolved_explicit);
+    } catch (error) {
+      throw new Error(
+        `IndexTTS home '${resolved_explicit}' is not accessible: ${error.message}`,
+      );
+    }
+
+    if (!explicit_stats.isDirectory()) {
+      throw new Error(
+        `IndexTTS home '${resolved_explicit}' is not a directory.`,
+      );
+    }
+
+    return {
+      resolved_home: resolved_explicit,
+      auto_detected: false,
+      fallback_paths: [],
+    };
+  }
+
+  const fallback_paths = [
+    path.join(os.homedir(), "code_base", "index_tts"),
+    path.join(os.homedir(), "code_base", "index-tts"),
+    path.join(os.homedir(), "index_tts"),
+    path.join(os.homedir(), "index-tts"),
+    path.join(cwd, "index_tts"),
+    path.join(cwd, "index-tts"),
+  ];
+
+  for (const candidate_path of fallback_paths) {
+    try {
+      const candidate_stats = fs_sync.statSync(candidate_path);
+      if (candidate_stats.isDirectory()) {
+        return {
+          resolved_home: candidate_path,
+          auto_detected: true,
+          fallback_paths,
+        };
+      }
+    } catch (error) {
+      // Ignore missing paths and continue searching.
+      continue;
+    }
+  }
+
+  return {
+    resolved_home: null,
+    auto_detected: false,
+    fallback_paths,
+  };
+}
+
+function resolve_index_tts_environment({
+  argv,
+  logger,
+  chalk,
+  cached_home_info = null,
+}) {
+  const cwd = process.cwd();
+  const home_info = cached_home_info || locate_index_tts_home(argv);
+  const { resolved_home, auto_detected, fallback_paths } = home_info;
+
+  if (!resolved_home) {
+    const searched_targets = fallback_paths
+      .map((candidate_path) => {
+        const relative_path = path.relative(cwd, candidate_path);
+        return relative_path.startsWith(".") ? candidate_path : relative_path;
+      })
+      .join(", ");
+
+    throw new Error(
+      `IndexTTS requires --index-tts-home or INDEX_TTS_HOME to point to a local checkout. Checked: ${searched_targets}.`,
+    );
+  }
+
+  const checkpoints_hint = argv["index-tts-checkpoints"] || "checkpoints";
+  const resolved_checkpoints = path.isAbsolute(checkpoints_hint)
+    ? checkpoints_hint
+    : path.resolve(resolved_home, checkpoints_hint);
+  if (!fs_sync.existsSync(resolved_checkpoints)) {
+    throw new Error(
+      `IndexTTS checkpoints not found at '${resolved_checkpoints}'. Use --index-tts-checkpoints to override.`,
+    );
+  }
+
+  const config_hint = argv["index-tts-config"];
+  const resolved_config = config_hint
+    ? path.resolve(
+        path.isAbsolute(config_hint)
+          ? config_hint
+          : path.join(resolved_home, config_hint),
+      )
+    : path.join(resolved_checkpoints, "config.yaml");
+
+  if (!fs_sync.existsSync(resolved_config)) {
+    throw new Error(
+      `IndexTTS config not found at '${resolved_config}'. Provide --index-tts-config when using custom layouts.`,
+    );
+  }
+
+  let voice_path = null;
+  if (argv.voice) {
+    voice_path = path.resolve(cwd, argv.voice);
+  }
+  if (!voice_path) {
+    const default_voice = path.join(resolved_home, "examples", "voice_01.wav");
+    if (fs_sync.existsSync(default_voice)) {
+      voice_path = default_voice;
+    }
+  }
+  if (!voice_path || !fs_sync.existsSync(voice_path)) {
+    throw new Error(
+      "IndexTTS requires a speaker reference WAV. Provide --voice or place examples/voice_01.wav in the checkout.",
+    );
+  }
+
+  let emo_audio_path = null;
+  if (argv["emo-audio"]) {
+    emo_audio_path = path.resolve(cwd, argv["emo-audio"]);
+    if (!fs_sync.existsSync(emo_audio_path)) {
+      throw new Error(
+        `Emotion reference audio not found at '${emo_audio_path}'.`,
+      );
+    }
+  }
+
+  let emo_vector = null;
+  if (argv["emo-vector"]) {
+    try {
+      emo_vector = parse_emo_vector_option(argv["emo-vector"]);
+    } catch (error) {
+      throw new Error(error.message);
+    }
+  }
+
+  const emo_text =
+    typeof argv["emo-text"] === "string" && argv["emo-text"].trim()
+      ? argv["emo-text"].trim()
+      : null;
+
+  const emo_alpha =
+    typeof argv["emo-alpha"] === "number" ? argv["emo-alpha"] : 1.0;
+  if (!Number.isFinite(emo_alpha) || emo_alpha < 0 || emo_alpha > 1) {
+    throw new Error("--emo-alpha must be a number between 0.0 and 1.0.");
+  }
+
+  const max_text_segment = Number.isFinite(argv["index-tts-max-segment"])
+    ? argv["index-tts-max-segment"]
+    : 120;
+  if (max_text_segment <= 0) {
+    throw new Error("--index-tts-max-segment must be a positive integer.");
+  }
+
+  const python_path_entries = new Set();
+  python_path_entries.add(resolved_home);
+  const module_dirs = ["indextts", "src"];
+  module_dirs.forEach((dir_name) => {
+    const candidate = path.join(resolved_home, dir_name);
+    if (fs_sync.existsSync(candidate)) {
+      python_path_entries.add(candidate);
+    }
+  });
+
+  const hf_cache = path.join(resolved_checkpoints, "hf_cache");
+
+  if (auto_detected) {
+    const home_label = path.relative(cwd, resolved_home) || resolved_home;
+    logger.info(
+      `Auto-detected IndexTTS home at ${chalk.magenta(home_label)}. Override via --index-tts-home when needed.`,
+    );
+  }
+
+  logger.info(
+    `IndexTTS home ${chalk.magenta(path.relative(cwd, resolved_home) || resolved_home)}; checkpoints ${chalk.magenta(path.relative(cwd, resolved_checkpoints) || resolved_checkpoints)}`,
+  );
+
+  return {
+    home_path: resolved_home,
+    checkpoints_path: resolved_checkpoints,
+    config_path: resolved_config,
+    voice_path,
+    emo_audio_path,
+    emo_vector,
+    emo_text,
+    emo_alpha,
+    use_random: Boolean(argv["index-tts-random"]),
+    use_fp16: Boolean(argv["index-tts-fp16"]),
+    use_deepspeed: Boolean(argv["index-tts-deepspeed"]),
+    use_cuda_kernel: Boolean(argv["index-tts-cuda-kernel"]),
+    max_text_segment,
+    python_path: Array.from(python_path_entries),
+    hf_cache_path: hf_cache,
+  };
+}
+
+function resolve_vibe_voice_environment({ argv, logger, chalk }) {
+  const cwd = process.cwd();
+  const model_hint =
+    argv["vibe_voice-model-dir"] || process.env.VIBE_VOICE_MODEL_DIR;
+  if (!model_hint) {
+    throw new Error(
+      "VibeVoice requires --vibe_voice-model-dir or VIBE_VOICE_MODEL_DIR to point to downloaded weights.",
+    );
+  }
+
+  const model_dir = path.resolve(cwd, model_hint);
+  if (!fs_sync.existsSync(model_dir)) {
+    throw new Error(`VibeVoice model directory '${model_dir}' does not exist.`);
+  }
+
+  const processor_hint = argv["vibe_voice-processor-dir"];
+  const processor_dir = processor_hint
+    ? path.resolve(
+        path.isAbsolute(processor_hint)
+          ? processor_hint
+          : path.join(model_dir, processor_hint),
+      )
+    : model_dir;
+  if (!fs_sync.existsSync(processor_dir)) {
+    throw new Error(
+      `VibeVoice processor directory '${processor_dir}' does not exist.`,
+    );
+  }
+
+  if (!argv.voice) {
+    throw new Error(
+      "VibeVoice requires --voice to supply at least one reference sample.",
+    );
+  }
+  const voice_path = path.resolve(cwd, argv.voice);
+  if (!fs_sync.existsSync(voice_path)) {
+    throw new Error(
+      `Unable to access VibeVoice reference audio '${voice_path}'.`,
+    );
+  }
+
+  const device_hint = argv["vibe_voice-device"] || "auto";
+
+  const cfg_scale =
+    typeof argv["vibe_voice-cfg-scale"] === "number"
+      ? argv["vibe_voice-cfg-scale"]
+      : 3.0;
+  if (!Number.isFinite(cfg_scale) || cfg_scale <= 0) {
+    throw new Error("--vibe_voice-cfg-scale must be a positive number.");
+  }
+
+  const max_new_tokens =
+    typeof argv["vibe_voice-max-new"] === "number"
+      ? argv["vibe_voice-max-new"]
+      : null;
+  if (max_new_tokens !== null && max_new_tokens <= 0) {
+    throw new Error(
+      "--vibe_voice-max-new must be greater than zero when provided.",
+    );
+  }
+
+  const ddpm_steps =
+    typeof argv["vibe_voice-ddpm-steps"] === "number"
+      ? argv["vibe_voice-ddpm-steps"]
+      : null;
+  if (ddpm_steps !== null && ddpm_steps <= 0) {
+    throw new Error(
+      "--vibe_voice-ddpm-steps must be greater than zero when provided.",
+    );
+  }
+
+  logger.info(
+    `VibeVoice model dir ${chalk.magenta(path.relative(cwd, model_dir) || model_dir)}; processor ${chalk.magenta(path.relative(cwd, processor_dir) || processor_dir)}`,
+  );
+
+  return {
+    model_dir,
+    processor_dir,
+    voice_path,
+    device_hint,
+    cfg_scale,
+    max_new_tokens,
+    ddpm_steps,
+    use_half: Boolean(argv["vibe_voice-half"]),
+    quiet: Boolean(argv["vibe_voice-quiet"]),
+  };
+}
+
+function parse_emo_vector_option(raw_value) {
+  const trimmed = String(raw_value || "").trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch (error) {
+    parsed = trimmed
+      .split(/[,\s]+/)
+      .map((token) => token.trim())
+      .filter(Boolean);
+  }
+
+  if (!Array.isArray(parsed)) {
+    throw new Error(
+      "--emo-vector must be a JSON array or comma separated list of numbers.",
+    );
+  }
+
+  const floats = parsed.map((value) => Number(value));
+  if (floats.some((value) => !Number.isFinite(value))) {
+    throw new Error("--emo-vector contains non-numeric entries.");
+  }
+
+  if (floats.length !== 8) {
+    throw new Error("--emo-vector must contain exactly 8 numeric entries.");
+  }
+
+  return floats;
+}
+
+function resolve_language(engine, requested_lang) {
+  if (engine === "piper") {
+    return requested_lang;
+  }
+
+  const normalized = (requested_lang || "en").toLowerCase();
+  const supported_langs = {
+    en: "en",
+    "zh-cn": "zh-cn",
+    auto: "auto",
+  };
+
+  if (!supported_langs[normalized]) {
+    return "en";
+  }
+
+  return supported_langs[normalized];
+}
+
+async function run_xtts_engine({
+  text,
+  lang,
+  voice_path,
+  speaker,
+  output_path,
+  speed,
+  temperature,
+  device,
+  chalk,
+  logger,
+  python_bin,
+}) {
+  const engine_script_path = path.resolve(
+    __dirname,
+    "..",
+    "lib",
+    "index_tts",
+    "engines",
+    "xtts_local.py",
+  );
+
+  const args = [
+    engine_script_path,
+    "--text",
+    text,
+    "--out",
+    output_path,
+    "--lang",
+    lang,
+    "--speed",
+    String(speed),
+    "--temperature",
+    String(temperature),
+    "--device",
+    device,
+  ];
+
+  if (voice_path) {
+    args.push("--voice", voice_path);
+  }
+
+  if (speaker) {
+    args.push("--speaker", speaker);
+  }
+
+  logger.info(`Running XTTS via ${chalk.gray(python_bin)}.`);
+
+  const child_env = { ...process.env, COQUI_TOS_AGREED: "1" };
+
+  await run_child_process(python_bin, args, {
+    cwd: process.cwd(),
+    env: child_env,
+    chalk,
+    label: "XTTS",
+  });
+}
+
+async function run_index_tts_engine({
+  text,
+  output_path,
+  env,
+  chalk,
+  logger,
+  python_bin,
+}) {
+  const script_path = path.resolve(
+    __dirname,
+    "..",
+    "lib",
+    "index_tts",
+    "engines",
+    "index_tts_local.py",
+  );
+
+  const args = [
+    script_path,
+    "--text",
+    text,
+    "--out",
+    output_path,
+    "--home",
+    env.home_path,
+    "--checkpoints",
+    env.checkpoints_path,
+    "--config",
+    env.config_path,
+    "--voice",
+    env.voice_path,
+    "--emo-alpha",
+    String(env.emo_alpha ?? 1),
+    "--max-text-segment",
+    String(env.max_text_segment),
+  ];
+
+  if (env.emo_audio_path) {
+    args.push("--emo-audio", env.emo_audio_path);
+  }
+  if (env.emo_text) {
+    args.push("--emo-text", env.emo_text);
+  }
+  if (Array.isArray(env.emo_vector)) {
+    args.push("--emo-vector", JSON.stringify(env.emo_vector));
+  }
+  if (env.use_random) {
+    args.push("--use-random");
+  }
+  if (env.use_fp16) {
+    args.push("--use-fp16");
+  }
+  if (env.use_deepspeed) {
+    args.push("--use-deepspeed");
+  }
+  if (env.use_cuda_kernel) {
+    args.push("--use-cuda-kernel");
+  }
+
+  const child_env = { ...process.env };
+  child_env.INDEX_TTS_HOME = env.home_path;
+  child_env.INDEX_TTS_CHECKPOINTS = env.checkpoints_path;
+  child_env.INDEX_TTS_CONFIG = env.config_path;
+  child_env.HF_HOME = env.hf_cache_path;
+  child_env.HF_HUB_CACHE = env.hf_cache_path;
+  child_env.HUGGINGFACE_HUB_CACHE = env.hf_cache_path;
+  child_env.TRANSFORMERS_VERBOSITY =
+    child_env.TRANSFORMERS_VERBOSITY || "error";
+  child_env.TRANSFORMERS_NO_ADVISORY_WARNINGS =
+    child_env.TRANSFORMERS_NO_ADVISORY_WARNINGS || "1";
+
+  const future_warning_filter = "ignore::FutureWarning";
+  if (child_env.PYTHONWARNINGS) {
+    if (!child_env.PYTHONWARNINGS.includes(future_warning_filter)) {
+      child_env.PYTHONWARNINGS = `${child_env.PYTHONWARNINGS},${future_warning_filter}`;
+    }
+  } else {
+    child_env.PYTHONWARNINGS = future_warning_filter;
+  }
+
+  const python_path_segments = [];
+  if (Array.isArray(env.python_path)) {
+    env.python_path.forEach((entry) => {
+      if (entry && !python_path_segments.includes(entry)) {
+        python_path_segments.push(entry);
+      }
+    });
+  }
+  if (child_env.PYTHONPATH) {
+    python_path_segments.push(child_env.PYTHONPATH);
+  }
+  if (python_path_segments.length > 0) {
+    child_env.PYTHONPATH = python_path_segments.join(path.delimiter);
+  }
+
+  logger.info(
+    `Launching IndexTTS runtime via ${chalk.gray(python_bin)} for ${chalk.green(path.basename(output_path))}.`,
+  );
+
+  await run_child_process(python_bin, args, {
+    cwd: env.home_path,
+    env: child_env,
+    chalk,
+    label: "INDEX_TTS",
+  });
+}
+
+async function run_vibe_voice_engine({
+  text,
+  output_path,
+  env,
+  chalk,
+  logger,
+  python_bin,
+}) {
+  const script_path = path.resolve(
+    __dirname,
+    "..",
+    "lib",
+    "index_tts",
+    "engines",
+    "vibe_voice_local.py",
+  );
+
+  const args = [
+    script_path,
+    "--text",
+    text,
+    "--out",
+    output_path,
+    "--model-dir",
+    env.model_dir,
+    "--processor-dir",
+    env.processor_dir,
+    "--voice",
+    env.voice_path,
+    "--device",
+    env.device_hint,
+    "--cfg-scale",
+    String(env.cfg_scale),
+  ];
+
+  if (Number.isFinite(env.max_new_tokens)) {
+    args.push("--max-new-tokens", String(env.max_new_tokens));
+  }
+  if (Number.isFinite(env.ddpm_steps)) {
+    args.push("--ddpm-steps", String(env.ddpm_steps));
+  }
+  if (env.use_half) {
+    args.push("--use-half");
+  }
+  if (env.quiet) {
+    args.push("--quiet");
+  }
+
+  const child_env = { ...process.env };
+  child_env.VIBE_VOICE_MODEL_DIR = env.model_dir;
+  child_env.VIBE_VOICE_PROCESSOR_DIR = env.processor_dir;
+
+  logger.info(
+    `Launching VibeVoice runtime via ${chalk.gray(python_bin)} for ${chalk.green(path.basename(output_path))}.`,
+  );
+
+  await run_child_process(python_bin, args, {
+    cwd: env.model_dir,
+    env: child_env,
+    chalk,
+    label: "VIBE_VOICE",
+  });
+}
+
+async function run_piper_engine({
+  text,
+  model_path,
+  output_path,
+  speed,
+  temperature,
+  lang,
+  device,
+  chalk,
+  logger,
+}) {
+  if (!model_path) {
+    const help_link = "https://github.com/rhasspy/piper/blob/master/VOICES.md";
+    throw new Error(
+      `--piper-model is required when using the Piper engine. Download voices from ${help_link}.`,
+    );
+  }
+
+  const absolute_model_path = path.resolve(process.cwd(), model_path);
+  try {
+    await fs.access(absolute_model_path);
+  } catch (error) {
+    throw new Error(
+      `Piper model file not accessible: '${absolute_model_path}'.`,
+    );
+  }
+
+  const piper_bin = process.env.PIPER_BIN || "piper";
+  const args = ["--model", absolute_model_path, "--output_file", output_path];
+
+  if (speed !== 1.0) {
+    const length_scale = 1 / Number(speed);
+    args.push("--length_scale", String(length_scale));
+  }
+
+  if (temperature !== 0.7) {
+    logger.warn("Piper does not support temperature; ignoring provided value.");
+  }
+
+  if (lang && lang !== "auto") {
+    logger.info(
+      `Ensure the selected model matches language '${lang}' (no automatic switching).`,
+    );
+  }
+
+  const child_env = { ...process.env };
+  if (device === "cpu") {
+    child_env.CUDA_VISIBLE_DEVICES = "";
+  } else if (device && device.startsWith("cuda:")) {
+    const [, index] = device.split(":");
+    child_env.CUDA_VISIBLE_DEVICES = index || "0";
+  }
+
+  logger.info(`Running Piper via ${chalk.gray(piper_bin)}.`);
+
+  await run_child_process(piper_bin, args, {
+    cwd: process.cwd(),
+    env: child_env,
+    chalk,
+    label: "PIPER",
+    stdin: text,
+  });
+}
+
+function run_child_process(command, args, options) {
+  const { chalk, label, stdin, cwd, env } = options;
+
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd,
+      env,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    child.stdout.on("data", (chunk) => {
+      process.stdout.write(chalk.gray(`[${label}] ${chunk.toString()}`));
+    });
+
+    child.stderr.on("data", (chunk) => {
+      const text = chunk.toString();
+      const colorize = pick_child_stderr_color({ label, text, chalk });
+      process.stderr.write(colorize(`[${label}] ${text}`));
+    });
+
+    child.on("error", (error) => {
+      reject(error);
+    });
+
+    child.on("close", (code) => {
+      if (code === 0) {
+        resolve();
+      } else {
+        reject(new Error(`${label} exited with code ${code}.`));
+      }
+    });
+
+    if (typeof stdin === "string") {
+      child.stdin.setDefaultEncoding("utf8");
+      child.stdin.write(stdin);
+      child.stdin.end();
+    } else {
+      child.stdin.end();
+    }
+  }).catch((error) => {
+    if (error.code === "ENOENT") {
+      const suggestion =
+        command === "piper"
+          ? "Install Piper locally or set PIPER_BIN to the binary path."
+          : "Install Python 3.9-3.11 or set --python-bin to a compatible interpreter.";
+      throw new Error(`${command} not found. ${suggestion}`);
+    }
+    throw error;
+  });
+}
+
+function pick_child_stderr_color({ label, text, chalk }) {
+  const normalized = text.trim().toLowerCase();
+
+  if (!normalized) {
+    return chalk.gray;
+  }
+
+  const is_error =
+    normalized.includes("error") ||
+    normalized.includes("exception") ||
+    normalized.includes("traceback") ||
+    normalized.includes("fatal") ||
+    normalized.includes("crash") ||
+    normalized.includes("cannot") ||
+    normalized.includes("failed");
+  if (is_error) {
+    return chalk.red;
+  }
+
+  const is_warning =
+    normalized.includes("warning") ||
+    normalized.includes("deprecated") ||
+    normalized.includes("caution") ||
+    normalized.includes("futurewarning") ||
+    normalized.includes("deprecation");
+  if (is_warning) {
+    return chalk.yellow;
+  }
+
+  if (label === "INDEX_TTS" || label === "XTTS" || label === "VIBE_VOICE") {
+    return chalk.cyan;
+  }
+
+  return chalk.gray;
+}
+
+function collect_additional_python_candidates() {
+  const candidates = [];
+  const direct_paths = [];
+
+  if (process.platform === "darwin") {
+    const brew_prefixes = [
+      process.env.HOMEBREW_PREFIX,
+      "/opt/homebrew",
+      "/usr/local",
+    ].filter(Boolean);
+
+    for (const prefix of brew_prefixes) {
+      direct_paths.push(
+        path.join(prefix, "opt", "python@3.11", "bin", "python3.11"),
+        path.join(prefix, "opt", "python@3.10", "bin", "python3.10"),
+        path.join(prefix, "bin", "python3.11"),
+        path.join(prefix, "bin", "python3.10"),
+        path.join(prefix, "bin", "python3.9"),
+      );
+    }
+  }
+
+  if (process.platform === "linux") {
+    direct_paths.push(
+      "/usr/bin/python3.11",
+      "/usr/bin/python3.10",
+      "/usr/bin/python3.9",
+      "/usr/local/bin/python3.11",
+      "/usr/local/bin/python3.10",
+      "/usr/local/bin/python3.9",
+    );
+  }
+
+  direct_paths.forEach((candidate) => {
+    if (candidate && fs_sync.existsSync(candidate)) {
+      candidates.push(candidate);
+    }
+  });
+
+  const pyenv_root =
+    process.env.PYENV_ROOT || path.join(os.homedir(), ".pyenv");
+  const pyenv_versions_dir = path.join(pyenv_root, "versions");
+  if (fs_sync.existsSync(pyenv_versions_dir)) {
+    try {
+      const entries = fs_sync.readdirSync(pyenv_versions_dir, {
+        withFileTypes: true,
+      });
+      for (const entry of entries) {
+        if (!entry.isDirectory()) {
+          continue;
+        }
+        const version_name = entry.name;
+        if (!/^3\.(9|10|11)(\.|$)/.test(version_name)) {
+          continue;
+        }
+        const version_dir = path.join(pyenv_versions_dir, version_name, "bin");
+        const python_candidates = [
+          path.join(version_dir, "python3"),
+          path.join(version_dir, "python"),
+          path.join(version_dir, "python3.11"),
+          path.join(version_dir, "python3.10"),
+          path.join(version_dir, "python3.9"),
+        ];
+        python_candidates.forEach((candidate) => {
+          if (fs_sync.existsSync(candidate)) {
+            candidates.push(candidate);
+          }
+        });
+      }
+    } catch (error) {
+      // ignore pyenv discovery issues
+    }
+  }
+
+  const asdf_root =
+    process.env.ASDF_DATA_DIR || path.join(os.homedir(), ".asdf");
+  const asdf_python_dir = path.join(asdf_root, "installs", "python");
+  if (fs_sync.existsSync(asdf_python_dir)) {
+    try {
+      const entries = fs_sync.readdirSync(asdf_python_dir, {
+        withFileTypes: true,
+      });
+      for (const entry of entries) {
+        if (!entry.isDirectory()) {
+          continue;
+        }
+        const version_name = entry.name;
+        if (!/^3\.(9|10|11)(\.|$)/.test(version_name)) {
+          continue;
+        }
+        const python_candidates = [
+          path.join(asdf_python_dir, version_name, "bin", "python3"),
+          path.join(asdf_python_dir, version_name, "bin", "python"),
+        ];
+        python_candidates.forEach((candidate) => {
+          if (fs_sync.existsSync(candidate)) {
+            candidates.push(candidate);
+          }
+        });
+      }
+    } catch (error) {
+      // ignore asdf discovery issues
+    }
+  }
+
+  return candidates;
+}
+
+function resolve_python_runtime({
+  requested_bin,
+  logger,
+  chalk,
+  preferred_paths = [],
+}) {
+  const search_order = [];
+  const additional_candidates = collect_additional_python_candidates();
+  const normalized_preferred = Array.isArray(preferred_paths)
+    ? preferred_paths.filter(Boolean)
+    : [];
+
+  if (requested_bin) {
+    search_order.push(requested_bin);
+  }
+  if (process.env.PYTHON_BIN) {
+    search_order.push(process.env.PYTHON_BIN);
+  }
+  normalized_preferred.forEach((candidate) => {
+    search_order.push(candidate);
+  });
+  search_order.push(
+    "python3.11",
+    "python3.10",
+    "python3.9",
+    "python3",
+    "python",
+  );
+
+  const unique_candidates = [];
+  const seen = new Set();
+  for (const extra of additional_candidates) {
+    search_order.push(extra);
+  }
+
+  for (const candidate of search_order) {
+    if (!candidate || seen.has(candidate)) {
+      continue;
+    }
+    seen.add(candidate);
+    unique_candidates.push(candidate);
+  }
+
+  for (const candidate of unique_candidates) {
+    const version_info = inspect_python_version(candidate);
+
+    if (version_info?.not_found) {
+      if (requested_bin && candidate === requested_bin) {
+        throw new Error(
+          `Python runtime '${candidate}' not found. Install Python 3.9-3.11 and re-run with --python-bin.`,
+        );
+      }
+      continue;
+    }
+
+    if (version_info?.error) {
+      if (requested_bin && candidate === requested_bin) {
+        throw new Error(
+          `Failed to inspect --python-bin '${candidate}': ${version_info.error.message}`,
+        );
+      }
+      continue;
+    }
+
+    if (!version_info) {
+      continue;
+    }
+
+    if (python_version_supported(version_info.version)) {
+      logger.info(
+        `Python interpreter: ${chalk.magenta(candidate)} (${chalk.green(version_info.version_text)})`,
+      );
+      return {
+        command: candidate,
+        version: version_info.version,
+        version_text: version_info.version_text,
+      };
+    }
+
+    if (requested_bin && candidate === requested_bin) {
+      throw new Error(
+        `Python runtime '${candidate}' reports ${version_info.version_text}. Install Python 3.9-3.11 and re-run with --python-bin.`,
+      );
+    }
+
+    if (process.env.PYTHON_BIN && candidate === process.env.PYTHON_BIN) {
+      logger.warn(
+        `PYTHON_BIN points to ${version_info.version_text}, which falls outside the supported 3.9-3.11 range. Ignoring.`,
+      );
+    }
+  }
+
+  throw new Error(
+    "Unable to locate a Python 3.9-3.11 interpreter for XTTS. Install Python 3.10/3.11 and re-run with --python-bin, or switch to --engine piper.",
+  );
+}
+
+function inspect_python_version(command) {
+  try {
+    const result = spawnSync(command, ["--version"], { encoding: "utf8" });
+    if (result.error) {
+      if (result.error.code === "ENOENT") {
+        return { not_found: true, error: result.error };
+      }
+      return { error: result.error };
+    }
+    const combined_output =
+      `${result.stdout || ""}${result.stderr || ""}`.trim();
+    if (!combined_output) {
+      return { error: new Error("Empty version output") };
+    }
+    const match = combined_output.match(/Python\s+(\d+)\.(\d+)\.(\d+)/i);
+    if (!match) {
+      return {
+        error: new Error(`Unexpected version string: ${combined_output}`),
+      };
+    }
+    return {
+      version: {
+        major: Number(match[1]),
+        minor: Number(match[2]),
+        patch: Number(match[3]),
+      },
+      version_text: combined_output,
+    };
+  } catch (error) {
+    return { error };
+  }
+}
+
+function python_version_supported(version) {
+  if (!version || version.major !== 3) {
+    return false;
+  }
+  return version.minor >= 9 && version.minor <= 11;
 }
