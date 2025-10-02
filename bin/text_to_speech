@@ -10,6 +10,11 @@ const fs_sync = require("fs");
 const yargs_factory = require("yargs/yargs");
 const { expand_patterns } = require("../utility/_ai_cli_utils");
 
+const index_tts_default_voice_path = path.resolve(
+  __dirname,
+  "../lib/index_tts/speaker/francis_underwood.m4a",
+);
+
 function hide_process_argv(argv) {
   return Array.isArray(argv) ? argv.slice(2) : [];
 }
@@ -50,7 +55,7 @@ function hide_process_argv(argv) {
     })
     .option("voice", {
       type: "string",
-      default: "lib/index_tts/speaker/francis_underwood.m4a",
+      default: index_tts_default_voice_path,
       describe:
         "Reference speaker WAV path used by engines that support voice cloning (XTTS, VibeVoice, IndexTTS).",
     })

@@ -17,10 +17,10 @@ function create_silent_logger() {
 }
 
 describe("tts model registry", () => {
-  it("includes the default xtts-v2 model", () => {
+  it("selects index-tts as the default model", () => {
     const models = list_tts_models();
-    expect(models).toContain("xtts-v2");
-    expect(default_tts_model_id).toBe("xtts-v2");
+    expect(models).toContain("index-tts");
+    expect(default_tts_model_id).toBe("index-tts");
   });
 
   it("returns fully-formed model entries", () => {
