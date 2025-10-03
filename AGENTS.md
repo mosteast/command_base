@@ -52,6 +52,20 @@
     - List and explain all options if an option is enum-like.
     - All boolean should be false by default.
   - Examples
+    - Should have some examples to show how to use the command.
+    - Each example should have a comment to explain what the example does.
+    - Format of Examples:
+
+      ```
+      # Description
+      $0 a/b/*.txt c/*.md
+
+      # Description
+      $0 --option a/*.md
+
+      ...
+      ```
+
   - ...
 
 ## General CLI Options
@@ -65,4 +79,4 @@ Must Support
 Support following options if possible:
 
 - `--quiet`
-- `--dry-run`
+- `-d, --dry-run`

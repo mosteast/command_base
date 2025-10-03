@@ -9,6 +9,7 @@ const { expand_patterns } = require("../utility/_ai_cli_utils");
 
 let chalk = null;
 let conversion_runtime = null;
+let cached_package_version = null;
 
 function hide_process_argv(argv) {
   return Array.isArray(argv) ? argv.slice(2) : [];
@@ -23,7 +24,9 @@ function ensure_chalk() {
     // eslint-disable-next-line global-require
     chalk = require("chalk");
   } catch (error) {
-    throw new Error(`Failed to load chalk for colored output: ${error.message}`);
+    throw new Error(
+      `Failed to load chalk for colored output: ${error.message}`,
+    );
   }
   return chalk;
 }
@@ -34,7 +37,11 @@ async function ensure_conversion_runtime() {
   }
   try {
     const module = await import("chinese-conv/dist");
-    if (!module || typeof module.sify !== "function" || typeof module.tify !== "function") {
+    if (
+      !module ||
+      typeof module.sify !== "function" ||
+      typeof module.tify !== "function"
+    ) {
       throw new Error("Unexpected chinese-conv export shape");
     }
     conversion_runtime = {
@@ -45,6 +52,23 @@ async function ensure_conversion_runtime() {
   } catch (error) {
     throw new Error(`Failed to initialize chinese-conv: ${error.message}`);
   }
+}
+
+function get_package_version() {
+  if (cached_package_version) {
+    return cached_package_version;
+  }
+  try {
+    // eslint-disable-next-line global-require
+    const package_json = require("../package.json");
+    if (!package_json || typeof package_json.version !== "string") {
+      throw new Error("Missing version field");
+    }
+    cached_package_version = package_json.version;
+  } catch (error) {
+    cached_package_version = "0.0.0";
+  }
+  return cached_package_version;
 }
 
 async function convert_text_to_hans(input_text) {
@@ -67,22 +91,41 @@ async function write_file_text(file_path, content, encoding) {
 
 function build_cli(command_name) {
   const chalk_instance = ensure_chalk();
+  const usage_sections = [
+    "Usage:",
+    `  $0 [options] <file|glob ...>`,
+    "",
+    "Description:",
+    "  Convert text files between zh-Hant (Traditional Chinese) and zh-Hans (Simplified Chinese).",
+    "  Default behavior writes converted content into sibling files with zh-Hans/zh-Hant suffixes.",
+    "",
+    "Examples:",
+    "  # Convert matched files to Simplified Chinese and write zh-Hans copies",
+    "  $0 a/b/*.txt c/*.md",
+    "",
+    "  # Convert matched files to Traditional Chinese without writing changes",
+    "  $0 --to-hant --dry-run input/*.md",
+    "",
+    "  # Preview Simplified output directly in STDOUT for files containing spaces",
+    '  $0 --stdout "notes with spaces/*.txt"',
+    "",
+    "  # Overwrite each input file with Traditional Chinese conversion",
+    "  $0 --to-hant --replace notes/**/*.md",
+  ];
   return yargs_factory(hide_process_argv(process.argv))
     .scriptName(command_name)
-    .usage(
-      "Usage: $0 [options] <file|glob ...>" +
-        "\n\nDescription:" +
-        "\n  Convert text files between zh-Hant (Traditional Chinese) and zh-Hans (Simplified Chinese)." +
-        "\n  Default behavior writes converted content into sibling files with zh-Hans/zh-Hant suffixes.",
-    )
+    .usage(usage_sections.join("\n"))
+    .version(get_package_version())
     .option("to-hant", {
       type: "boolean",
       default: false,
-      describe: "Convert to zh-Hant (Traditional). Default converts to zh-Hans (Simplified).",
+      describe:
+        "Convert to zh-Hant (Traditional). Default converts to zh-Hans (Simplified).",
     })
     .option("dry-run", {
       type: "boolean",
       default: false,
+      alias: "d",
       describe: "Preview changes without writing files.",
     })
     .option("stdout", {
@@ -106,29 +149,27 @@ function build_cli(command_name) {
       default: false,
       describe: "Suppress per-file logs (summary still shown).",
     })
-    .example(
-      `$0 a/b/*.txt c/*.md`,
-      "Create zh-Hans copies (default) for all matched files.",
-    )
-    .example(
-      `$0 --to-hant input/*.md`,
-      "Convert text to zh-Hant (Traditional).",
-    )
-    .example(
-      `$0 --stdout \"notes with spaces/*.txt\"`,
-      "Preview Simplified conversion for quoted paths containing spaces.",
-    )
-    .example(
-      `$0 --replace notes/**/*.md`,
-      "Convert in place and overwrite originals.",
-    )
+    .option("debug", {
+      type: "boolean",
+      default: false,
+      describe: "Enable verbose logging for troubleshooting information.",
+    })
     .help("help")
     .alias("h", "help")
     .alias("v", "version")
     .wrap(Math.min(120, process.stdout.columns || 120))
     .epilog(
-      chalk_instance.dim("Examples support shell globs; remember to quote paths with spaces."),
+      chalk_instance.dim(
+        "Examples support shell globs; remember to quote paths with spaces.",
+      ),
     )
+    .fail((message, error) => {
+      const failure = error || new Error(message);
+      const failure_text =
+        failure && failure.message ? failure.message : message;
+      console.error(chalk_instance.red(`Invalid usage: ${failure_text}`));
+      process.exit(1);
+    })
     .strict();
 }
 
@@ -155,14 +196,24 @@ async function ensure_output_is_safe(target_path) {
 }
 
 async function convert_file(file_path, options) {
-  const { to_hant, dry_run, encoding, stdout, quiet, replace } = options;
+  const { to_hant, dry_run, encoding, stdout, quiet, replace, debug } = options;
   const chalk_instance = ensure_chalk();
+  const debug_enabled = Boolean(debug);
+  const debug_log = (message) => {
+    if (debug_enabled) {
+      console.error(chalk_instance.magenta(`[debug] ${message}`));
+    }
+  };
 
   try {
+    debug_log(`Reading file: ${path.relative(process.cwd(), file_path)}`);
     const original_text = await read_file_text(file_path, encoding);
     const converted_text = to_hant
       ? await convert_text_to_hant(original_text)
       : await convert_text_to_hans(original_text);
+    debug_log(
+      `Conversion complete (${to_hant ? "zh-Hant" : "zh-Hans"}): ${path.relative(process.cwd(), file_path)}`,
+    );
 
     if (converted_text === original_text) {
       if (!quiet) {
@@ -190,10 +241,14 @@ async function convert_file(file_path, options) {
       : build_output_path(file_path, to_hant);
 
     if (!replace && !dry_run && !stdout) {
+      debug_log(
+        `Ensuring output safe: ${path.relative(process.cwd(), output_path)}`,
+      );
       await ensure_output_is_safe(output_path);
     }
 
     if (!dry_run && !stdout) {
+      debug_log(`Writing file: ${path.relative(process.cwd(), output_path)}`);
       await write_file_text(output_path, converted_text, encoding);
       if (!quiet) {
         console.log(
@@ -217,7 +272,10 @@ async function convert_file(file_path, options) {
       console.log(chalk_instance.blue(preview_message));
     }
 
-    return { status: dry_run || stdout ? "preview" : "converted" };
+    return {
+      status: dry_run || stdout ? "preview" : "converted",
+      converted_text,
+    };
   } catch (error) {
     console.error(
       chalk_instance.red(
@@ -234,6 +292,12 @@ async function main() {
   const argv = parser.parse();
 
   const chalk_instance = ensure_chalk();
+  const debug_enabled = Boolean(argv.debug);
+  const debug_log = (message) => {
+    if (debug_enabled) {
+      console.error(chalk_instance.magenta(`[debug] ${message}`));
+    }
+  };
 
   const input_patterns = argv._ || [];
 
@@ -247,6 +311,9 @@ async function main() {
   const expanded_files = expand_patterns(input_patterns, {
     cwd: process.cwd(),
   });
+  debug_log(
+    `Resolved ${input_patterns.length} pattern(s) to ${expanded_files.length} file(s) from ${process.cwd()}`,
+  );
 
   if (expanded_files.length === 0) {
     console.error(
@@ -266,7 +333,11 @@ async function main() {
     encoding: argv.encoding,
     quiet: Boolean(argv.quiet),
     replace: Boolean(argv.replace),
+    debug: Boolean(argv.debug),
   };
+  debug_log(
+    `CLI options: ${JSON.stringify({ ...options, encoding: options.encoding })}`,
+  );
 
   const summary = {
     total: expanded_files.length,
@@ -275,6 +346,9 @@ async function main() {
     unchanged: 0,
     failed: 0,
   };
+  const preview_content_limit = 3;
+  let preview_contents_printed = 0;
+  let preview_overflow = false;
 
   for (const file_path of expanded_files) {
     const result = await convert_file(file_path, options);
@@ -282,11 +356,39 @@ async function main() {
       summary.converted += 1;
     } else if (result.status === "preview") {
       summary.previewed += 1;
+      if (
+        options.dry_run &&
+        !options.stdout &&
+        typeof result.converted_text === "string" &&
+        preview_contents_printed < preview_content_limit
+      ) {
+        preview_contents_printed += 1;
+        const relative_path = path.relative(process.cwd(), file_path);
+        console.log(
+          `\n${chalk_instance.cyan.bold("==== ")}${chalk_instance.cyan(
+            `${relative_path} (preview)`,
+          )}${chalk_instance.cyan.bold(" ====")}`,
+        );
+        process.stdout.write(result.converted_text);
+        if (!result.converted_text.endsWith("\n")) {
+          process.stdout.write("\n");
+        }
+      } else if (options.dry_run && !options.stdout) {
+        preview_overflow = true;
+      }
     } else if (result.status === "unchanged") {
       summary.unchanged += 1;
     } else if (result.status === "failed") {
       summary.failed += 1;
     }
+  }
+
+  if (preview_overflow) {
+    console.log(
+      `\n${chalk_instance.dim(
+        `Displayed first ${preview_content_limit} previews. Rerun with --stdout for full output.`,
+      )}`,
+    );
   }
 
   console.log("");

@@ -1,161 +1,355 @@
 #!/usr/bin/env node
 
-const fs = require("fs");
+const { readFile, writeFile, mkdir, stat } = require("fs/promises");
 const path = require("path");
-const glob = require("glob");
-const minimist = require("minimist");
+const { globSync } = require("glob");
+const chalk = require("chalk");
+const yargs = require("yargs");
 const YAML = require("yaml");
 
-function show_usage(exit_code = 0) {
-  const cmd = path.basename(process.argv[1] || "json2yaml");
-  console.log("Usage:");
-  console.log(
-    `  ${cmd} <patterns...> [-o|--out <dir>] [-e|--extension <ext>] [--force]`,
-  );
-  console.log(`  echo '{"a":1}' | ${cmd}`);
-  console.log("");
-  console.log("Options:");
-  console.log(
-    "  -o, --out DIR          Output directory (defaults to source dir)",
-  );
-  console.log("  -e, --extension EXT    Output extension (default: .yaml)");
-  console.log("  --force, -F            Overwrite when output exists");
-  console.log("  -h, --help             Show this help");
-  process.exit(exit_code);
+const package_json = require("../package.json");
+
+const DEFAULT_OUTPUT_EXTENSION = ".yaml";
+const STDIN_SENTINEL = "-";
+
+function normalize_extension(extension_text) {
+  if (!extension_text) return DEFAULT_OUTPUT_EXTENSION;
+  return extension_text.startsWith(".") ? extension_text : `.${extension_text}`;
 }
 
-function normalize_extension(ext, fallback) {
-  if (!ext) return fallback;
-  return ext.startsWith(".") ? ext : `.${ext}`;
+function create_logger({ quiet_mode, debug_mode }) {
+  const prefix = chalk.dim("json2yaml");
+
+  function format_message(message) {
+    return `${prefix} ${message}`;
+  }
+
+  return {
+    info(message) {
+      if (quiet_mode) return;
+      console.log(format_message(chalk.green(message)));
+    },
+    warn(message) {
+      if (quiet_mode) return;
+      console.warn(format_message(chalk.yellow(message)));
+    },
+    error(message, error) {
+      const base_message = format_message(chalk.red(message));
+      console.error(base_message);
+      if (debug_mode && error) {
+        console.error(chalk.red(error.stack || String(error)));
+      }
+    },
+    debug(message) {
+      if (!debug_mode || quiet_mode) return;
+      console.log(format_message(chalk.cyan(`[debug] ${message}`)));
+    },
+  };
 }
 
-function read_stdin() {
-  return new Promise((resolve, reject) => {
-    let data = "";
-    process.stdin.setEncoding("utf8");
-    process.stdin.on("data", (chunk) => (data += chunk));
-    process.stdin.on("end", () => resolve(data));
-    process.stdin.on("error", (err) => reject(err));
-  });
+function build_help_text(script_name) {
+  return [
+    `${chalk.bold("Usage")}`,
+    `  ${script_name} [options] <patterns...>`,
+    `  ${script_name} -                                  # Read JSON from stdin`,
+    `  cat data.json | ${script_name} --indent 4         # Pipe and pretty-print`,
+    "",
+    `${chalk.bold("Description")}`,
+    "  Convert JSON input from files or stdin into YAML with optional globbing",
+    "  support, dry-run safety, and colorful progress reporting.",
+    "",
+    `${chalk.bold("Options")}`,
+    "  -o, --out <dir>         Output directory (defaults to source directory)",
+    "  -e, --extension <ext>   Output extension (default: .yaml)",
+    "  -F, --force             Overwrite existing files (default: false)",
+    "  -i, --indent <n>        Indent size for YAML output (default: 2)",
+    "  -d, --dry-run           Preview actions without writing files",
+    "  --quiet                 Suppress non-error logs",
+    "  --debug                 Show detailed error stacks",
+    "  -v, --version           Show version and exit",
+    "  -h, --help              Show this help message",
+    "",
+    `${chalk.bold("Examples")}`,
+    "  # Convert all JSON files under data/ into YAML next to originals",
+    `  ${script_name} \"data/**/*.json\"`,
+    "",
+    "  # Convert into config/ folder with a custom extension",
+    `  ${script_name} --out config --extension yml config/**/*.json`,
+    "",
+    "  # Perform a dry run to inspect planned output paths",
+    `  ${script_name} --dry-run api/*.json`,
+  ].join("\n");
 }
 
-function convert_json_text_to_yaml(json_text) {
+function parse_cli_arguments() {
+  const parser = yargs(process.argv.slice(2))
+    .scriptName("json2yaml")
+    .help(false)
+    .version(false)
+    .parserConfiguration({
+      "camel-case-expansion": false,
+      "strip-dashed": false,
+    })
+    .option("out", {
+      alias: "o",
+      type: "string",
+      describe: "Output directory (defaults to the source directory)",
+    })
+    .option("extension", {
+      alias: "e",
+      type: "string",
+      describe: "Output extension (default: .yaml)",
+    })
+    .option("force", {
+      alias: "F",
+      type: "boolean",
+      default: false,
+      describe: "Overwrite existing files",
+    })
+    .option("indent", {
+      alias: "i",
+      type: "number",
+      default: 2,
+      describe: "Indent size for YAML output",
+    })
+    .option("dry-run", {
+      alias: "d",
+      type: "boolean",
+      default: false,
+      describe: "Preview changes without writing files",
+    })
+    .option("quiet", {
+      type: "boolean",
+      default: false,
+      describe: "Suppress non-error logs",
+    })
+    .option("debug", {
+      type: "boolean",
+      default: false,
+      describe: "Enable verbose debugging output",
+    })
+    .option("version", {
+      alias: "v",
+      type: "boolean",
+      describe: "Show version number and exit",
+    })
+    .option("help", {
+      alias: "h",
+      type: "boolean",
+      describe: "Show help message",
+    })
+    .strict(false)
+    .usage(build_help_text("json2yaml"))
+    .wrap(Math.min(yargs.terminalWidth(), 100));
+
+  const argv = parser.parse();
+
+  if (argv.help) {
+    console.log(build_help_text(argv.$0 || "json2yaml"));
+    process.exit(0);
+  }
+
+  if (argv.version) {
+    console.log(package_json.version);
+    process.exit(0);
+  }
+
+  const patterns = (argv._ || []).map(String);
+
+  return {
+    patterns,
+    output_directory: argv.out ? path.resolve(argv.out) : "",
+    output_extension: normalize_extension(argv.extension),
+    force_overwrite: Boolean(argv.force),
+    indent: Number.isFinite(argv.indent) && argv.indent >= 0 ? argv.indent : 2,
+    dry_run: Boolean(argv["dry-run"]),
+    quiet_mode: Boolean(argv.quiet),
+    debug_mode: Boolean(argv.debug),
+  };
+}
+
+function is_stdin_mode(patterns) {
+  if (patterns.length === 0) return true;
+  if (patterns.length === 1 && patterns[0] === STDIN_SENTINEL) return true;
+  return false;
+}
+
+function expand_patterns(patterns, logger) {
+  const resolved_paths = new Set();
+
+  for (const pattern of patterns) {
+    if (pattern === STDIN_SENTINEL) continue;
+    const matches = globSync(pattern, {
+      nodir: true,
+      absolute: true,
+      windowsPathsNoEscape: true,
+    });
+
+    if (matches.length === 0) {
+      logger.debug(
+        `Pattern ${pattern} matched no files; treating as literal path.`,
+      );
+      resolved_paths.add(path.resolve(pattern));
+      continue;
+    }
+
+    for (const match of matches) {
+      resolved_paths.add(path.resolve(match));
+    }
+  }
+
+  return Array.from(resolved_paths);
+}
+
+async function file_exists(file_path) {
+  try {
+    await stat(file_path);
+    return true;
+  } catch (error) {
+    if (error && error.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+async function is_regular_file(file_path) {
+  try {
+    const stats = await stat(file_path);
+    return stats.isFile();
+  } catch (error) {
+    if (error && error.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+function convert_json_text_to_yaml(json_text, indent) {
   const text =
     json_text && json_text.charCodeAt(0) === 0xfeff
       ? json_text.slice(1)
       : json_text;
-  const obj = JSON.parse(text);
-  // 2-space indent is a sensible default
-  return YAML.stringify(obj, { indent: 2 });
+  const parsed_content = JSON.parse(text);
+  return YAML.stringify(parsed_content, { indent });
 }
 
-async function main() {
-  const argv = minimist(process.argv.slice(2), {
-    boolean: ["help", "h", "force", "F"],
-    string: ["out", "o", "extension", "e"],
-    alias: { o: "out", e: "extension", h: "help", F: "force" },
-  });
-
-  if (argv.help) show_usage(0);
-
-  const patterns = argv._ || [];
-
-  // STDIN mode: no args or single '-' argument
-  const stdin_mode =
-    patterns.length === 0 || (patterns.length === 1 && patterns[0] === "-");
-  const output_extension = normalize_extension(
-    argv.extension || argv.e,
-    ".yaml",
-  );
-  const output_dir_cli = argv.out || argv.o || "";
-  const force_overwrite = Boolean(argv.force || argv.F);
-
-  if (stdin_mode) {
-    try {
-      const input = await read_stdin();
-      if (!input || input.trim() === "") {
-        // No stdin provided; show help with non-zero exit to indicate misuse
-        show_usage(1);
-      }
-      const yaml_text = convert_json_text_to_yaml(input);
-      process.stdout.write(yaml_text);
-      return;
-    } catch (err) {
-      console.error(`Failed to convert from STDIN: ${err.message}`);
-      process.exit(1);
-    }
+async function convert_stdin(indent, logger) {
+  if (process.stdin.isTTY) {
+    logger.error("No JSON input detected on stdin", null);
+    process.exit(1);
   }
 
-  // File/pattern mode
-  const files = [];
-  for (const pattern of patterns) {
-    // Expand glob patterns; if none found, treat as a literal file path
-    const matches = glob.sync(pattern, { nodir: true, nocase: false });
-    if (matches.length > 0) {
-      for (const m of matches) files.push(m);
-    } else {
-      files.push(pattern);
-    }
+  const input_chunks = [];
+  for await (const chunk of process.stdin) {
+    input_chunks.push(chunk);
   }
 
-  if (files.length === 0) {
-    console.error("Error: No input files found.");
-    show_usage(1);
+  const json_text = input_chunks.join("");
+  if (!json_text.trim()) {
+    logger.error("Received empty stdin input", null);
+    process.exit(1);
+  }
+
+  const yaml_text = convert_json_text_to_yaml(json_text, indent);
+  process.stdout.write(yaml_text);
+}
+
+function build_output_path(input_path, output_directory, output_extension) {
+  const source_directory = path.dirname(input_path);
+  const target_directory = output_directory || source_directory;
+  const base_name = path.basename(input_path, path.extname(input_path));
+  return path.join(target_directory, `${base_name}${output_extension}`);
+}
+
+async function convert_files(options, logger) {
+  const input_files = expand_patterns(options.patterns, logger);
+
+  if (input_files.length === 0) {
+    logger.error("No input files discovered", null);
+    process.exit(1);
   }
 
   let converted_count = 0;
+  let skipped_count = 0;
   let failed_count = 0;
 
-  for (const file_path of files) {
-    let absolute_input_path = path.resolve(file_path);
+  for (const input_path of input_files) {
+    let absolute_input_path = input_path;
 
-    if (
-      !fs.existsSync(absolute_input_path) ||
-      !fs.statSync(absolute_input_path).isFile()
-    ) {
-      console.error(`Skipping (not a file): ${file_path}`);
+    if (!(await is_regular_file(absolute_input_path))) {
+      logger.warn(`Skipping (not a regular file): ${input_path}`);
+      skipped_count += 1;
       continue;
     }
 
-    const source_dir = path.dirname(absolute_input_path);
-    const base_name_without_ext = path.basename(
+    const output_path = build_output_path(
       absolute_input_path,
-      path.extname(absolute_input_path),
-    );
-
-    const output_directory = output_dir_cli
-      ? path.resolve(output_dir_cli)
-      : source_dir;
-    const output_path = path.join(
-      output_directory,
-      `${base_name_without_ext}${output_extension}`,
+      options.output_directory,
+      options.output_extension,
     );
 
     try {
-      if (output_dir_cli) fs.mkdirSync(output_directory, { recursive: true });
+      if (options.output_directory) {
+        await mkdir(path.dirname(output_path), { recursive: true });
+      }
 
-      if (fs.existsSync(output_path) && !force_overwrite) {
-        console.log(
-          `Exists (skip): ${path.relative(process.cwd(), output_path)}`,
+      if (!options.force_overwrite && (await file_exists(output_path))) {
+        logger.warn(
+          `Exists, skipping: ${path.relative(process.cwd(), output_path)}`,
         );
+        skipped_count += 1;
         continue;
       }
 
-      const input_text = fs.readFileSync(absolute_input_path, "utf8");
-      const yaml_text = convert_json_text_to_yaml(input_text);
-      fs.writeFileSync(output_path, yaml_text, "utf8");
+      const input_text = await readFile(absolute_input_path, "utf8");
+      const yaml_text = convert_json_text_to_yaml(input_text, options.indent);
 
-      console.log(
-        `Converted: ${path.relative(process.cwd(), absolute_input_path)} -> ${path.relative(process.cwd(), output_path)}`,
+      if (options.dry_run) {
+        logger.info(
+          `Dry run -> ${path.relative(process.cwd(), absolute_input_path)} => ${path.relative(process.cwd(), output_path)}`,
+        );
+      } else {
+        await writeFile(output_path, yaml_text, "utf8");
+        logger.info(
+          `Converted ${path.relative(process.cwd(), absolute_input_path)} -> ${path.relative(process.cwd(), output_path)}`,
+        );
+      }
+
+      converted_count += 1;
+    } catch (error) {
+      failed_count += 1;
+      logger.error(
+        `Failed to convert ${path.relative(process.cwd(), absolute_input_path)}: ${error.message}`,
+        error,
       );
-      converted_count++;
-    } catch (err) {
-      console.error(`Error processing ${file_path}: ${err.message}`);
-      failed_count++;
     }
   }
 
-  console.log(`Done. Converted: ${converted_count}. Failed: ${failed_count}.`);
+  const summary_message = `Completed with ${chalk.green(`${converted_count} converted`)}, ${chalk.yellow(`${skipped_count} skipped`)}, ${chalk.red(`${failed_count} failed`)}`;
+
+  if (failed_count > 0) {
+    logger.error(summary_message, null);
+    process.exitCode = 1;
+  } else if (!options.quiet_mode) {
+    console.log(chalk.bold(summary_message));
+  }
+}
+
+async function main() {
+  const cli_options = parse_cli_arguments();
+  const logger = create_logger({
+    quiet_mode: cli_options.quiet_mode,
+    debug_mode: cli_options.debug_mode,
+  });
+
+  try {
+    if (is_stdin_mode(cli_options.patterns)) {
+      await convert_stdin(cli_options.indent, logger);
+      return;
+    }
+
+    await convert_files(cli_options, logger);
+  } catch (error) {
+    logger.error(error.message || "Unexpected failure", error);
+    process.exit(1);
+  }
 }
 
 main();
