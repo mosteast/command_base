@@ -15,8 +15,547 @@ const {
 
 const index_tts_default_voice_path = path.resolve(
   __dirname,
-  "../lib/index_tts/speaker/francis_underwood.m4a",
+  "../lib/tts/index_tts/speaker/francis_underwood.m4a",
 );
+
+const XTTS_SUPPORTED_VOICE_EXTENSIONS = new Set([
+  ".wav",
+  ".flac",
+  ".ogg",
+  ".mp3",
+]);
+
+const shared_cli_option_docs = {
+  engine_help: {
+    flag: "--engine-help <engine>",
+    description:
+      "Show extended documentation for an engine (index_tts|xtts|piper|vibe_voice|all) and exit.",
+  },
+  text: {
+    flag: "--text <string>",
+    description:
+      "Inline text to synthesize (mutually exclusive with --text-file and positional file/glob inputs).",
+  },
+  text_file: {
+    flag: "--text-file <path>",
+    description:
+      "Read input text from a file (mutually exclusive with --text and positional inputs).",
+  },
+  output: {
+    flag: "--output <path>",
+    description:
+      "Destination wav file or directory (directory required when processing multiple inputs).",
+  },
+  voice: {
+    flag: "--voice <path>",
+    description:
+      "Reference speaker audio file for cloning engines (IndexTTS, XTTS, VibeVoice).",
+  },
+  speaker: {
+    flag: "--speaker <name>",
+    description:
+      "Named XTTS speaker preset (ignored when --voice provides custom cloning audio).",
+  },
+  lang: {
+    flag: "--lang <code>",
+    description: "Language code hint forwarded to the engine (en|zh-cn|auto).",
+  },
+  speed: {
+    flag: "--speed <number>",
+    description:
+      "Playback speed multiplier applied after synthesis (must be positive).",
+  },
+  temperature: {
+    flag: "--temperature <number>",
+    description:
+      "XTTS sampling temperature controlling output diversity (higher adds variety).",
+  },
+  device: {
+    flag: "--device <target>",
+    description:
+      "Execution device for XTTS (auto|cpu|cuda:0) and VibeVoice (auto|cpu|cuda|mps).",
+  },
+  python_bin: {
+    flag: "--python-bin <path>",
+    description:
+      "Explicit Python interpreter for engines backed by Python (IndexTTS, XTTS, VibeVoice).",
+  },
+  refresh: {
+    flag: "--refresh",
+    description: "Overwrite existing output files (disabled by default).",
+  },
+  index_tts_home: {
+    flag: "--index-tts-home <path>",
+    description:
+      "Local index-tts checkout directory for resolving scripts and checkpoints.",
+  },
+  index_tts_checkpoints: {
+    flag: "--index-tts-checkpoints <path>",
+    description:
+      "Directory containing index-tts checkpoints (overrides defaults).",
+  },
+  index_tts_config: {
+    flag: "--index-tts-config <path>",
+    description:
+      "Custom index-tts config.yaml path (defaults to <checkpoints>/config.yaml).",
+  },
+  emo_audio: {
+    flag: "--emo-audio <path>",
+    description: "IndexTTS emotion conditioning audio reference clip.",
+  },
+  emo_text: {
+    flag: "--emo-text <string>",
+    description: "Text prompt describing the desired emotion for IndexTTS.",
+  },
+  emo_vector: {
+    flag: "--emo-vector <values>",
+    description:
+      "Comma separated or JSON array of eight floats for IndexTTS emotion control.",
+  },
+  emo_alpha: {
+    flag: "--emo-alpha <number>",
+    description: "Blend strength for IndexTTS emotion conditioning (0.0-1.0).",
+  },
+  index_tts_fp16: {
+    flag: "--index-tts-fp16",
+    description: "Enable half precision inference for IndexTTS when supported.",
+  },
+  index_tts_deepspeed: {
+    flag: "--index-tts-deepspeed",
+    description:
+      "Enable DeepSpeed acceleration for IndexTTS (requires additional dependencies).",
+  },
+  index_tts_cuda_kernel: {
+    flag: "--index-tts-cuda-kernel",
+    description: "Allow IndexTTS to use optimized CUDA kernels when available.",
+  },
+  index_tts_random: {
+    flag: "--index-tts-random",
+    description:
+      "Enable stochastic IndexTTS sampling at the cost of cloning fidelity.",
+  },
+  index_tts_max_segment: {
+    flag: "--index-tts-max-segment <number>",
+    description:
+      "Maximum characters per IndexTTS segment before automatic chunking.",
+  },
+  piper_model: {
+    flag: "--piper-model <path>",
+    description: "Absolute path to the Piper ONNX model file.",
+  },
+  vibe_voice_model_dir: {
+    flag: "--vibe_voice-model-dir <path>",
+    description: "Directory containing local VibeVoice model weights.",
+  },
+  vibe_voice_processor_dir: {
+    flag: "--vibe_voice-processor-dir <path>",
+    description:
+      "Optional directory for VibeVoice processor assets when stored separately.",
+  },
+  vibe_voice_cfg_scale: {
+    flag: "--vibe_voice-cfg-scale <number>",
+    description: "Classifier-free guidance scale for VibeVoice generation.",
+  },
+  vibe_voice_max_new: {
+    flag: "--vibe_voice-max-new <number>",
+    description:
+      "Maximum number of tokens to generate for VibeVoice (optional).",
+  },
+  vibe_voice_ddpm_steps: {
+    flag: "--vibe_voice-ddpm-steps <number>",
+    description: "Diffusion step override for VibeVoice inference.",
+  },
+  vibe_voice_half: {
+    flag: "--vibe_voice-half",
+    description: "Run VibeVoice in half precision when hardware allows.",
+  },
+  vibe_voice_device: {
+    flag: "--vibe_voice-device <target>",
+    description: "Execution device hint for VibeVoice (auto|cpu|cuda|mps).",
+  },
+  vibe_voice_quiet: {
+    flag: "--vibe_voice-quiet",
+    description: "Silence VibeVoice progress output.",
+  },
+};
+
+function engine_option_doc(engine_key, label) {
+  return {
+    flag: `--engine ${engine_key}`,
+    description: `Select ${label} as the active engine (default is index_tts).`,
+  };
+}
+
+const engine_help_reference = {
+  index_tts: {
+    display_name: "IndexTTS 2 (default)",
+    summary_text:
+      "High fidelity offline voice cloning with segmented inference tuned for longer scripts.",
+    strengths: [
+      "Great timbre matching when paired with --voice reference audio and emotion guidance.",
+      "Python stack runs locally; no network or cloud calls.",
+      "Supports emotion conditioning through --emo-* options for fine grained control.",
+    ],
+    supported_languages: [
+      "English (training defaults ship with the repo)",
+      "Mandarin Chinese when checkpoints include zh phoneme support",
+      "Custom datasets via finetuned checkpoints for other locales",
+    ],
+    setup_steps: [
+      "Clone the index-tts repository and run pip install -e .[inference] to provision dependencies.",
+      "Place checkpoints under <repo>/checkpoints or point --index-tts-checkpoints at the location.",
+      "Verify python -m index_tts.server --help runs with the selected --python-bin interpreter.",
+    ],
+    requirements: [
+      "Requires a local index-tts checkout plus checkpoints; set --index-tts-home to help auto-detection.",
+      "Demands a Python environment with torch; customize with --python-bin if auto-detect fails.",
+    ],
+    options: [
+      engine_option_doc("index_tts", "IndexTTS"),
+      shared_cli_option_docs.engine_help,
+      shared_cli_option_docs.text,
+      shared_cli_option_docs.text_file,
+      shared_cli_option_docs.voice,
+      shared_cli_option_docs.lang,
+      shared_cli_option_docs.speed,
+      shared_cli_option_docs.python_bin,
+      shared_cli_option_docs.output,
+      shared_cli_option_docs.refresh,
+      shared_cli_option_docs.index_tts_home,
+      shared_cli_option_docs.index_tts_checkpoints,
+      shared_cli_option_docs.index_tts_config,
+      shared_cli_option_docs.emo_audio,
+      shared_cli_option_docs.emo_text,
+      shared_cli_option_docs.emo_vector,
+      shared_cli_option_docs.emo_alpha,
+      shared_cli_option_docs.index_tts_fp16,
+      shared_cli_option_docs.index_tts_deepspeed,
+      shared_cli_option_docs.index_tts_cuda_kernel,
+      shared_cli_option_docs.index_tts_random,
+      shared_cli_option_docs.index_tts_max_segment,
+    ],
+    performance_tips: [
+      "Pair --index-tts-fp16 with a GPU runtime to cut inference latency substantially.",
+      "Tune --index-tts-max-segment to match GPU memory limits; smaller chunks prevent OOM events.",
+      "Enable --index-tts-deepspeed for long scripts when DeepSpeed is available in the environment.",
+    ],
+    troubleshooting: [
+      "If torch fails to import, double-check the Python environment provided via --python-bin.",
+      "Gradient checkpoint errors typically mean checkpoints are mismatched—re-run git lfs pull or reseed files.",
+      "Stalled generation can be resolved by deleting temporary __pycache__ directories inside the repo.",
+    ],
+    env_variables: [
+      {
+        name: "INDEX_TTS_HOME",
+        description: "Override discovery of the local index-tts repository.",
+      },
+      {
+        name: "INDEX_TTS_CHECKPOINTS",
+        description:
+          "Default checkpoints directory when --index-tts-checkpoints is omitted.",
+      },
+      {
+        name: "INDEX_TTS_PYTHON",
+        description:
+          "Preferred Python interpreter path for shell subprocesses.",
+      },
+    ],
+    sample_usage:
+      "$0 --engine index_tts --text-file script.txt --voice speaker.wav --index-tts-home ~/git/index-tts --output out.wav",
+    speaker_resolver: () => ({
+      note: "IndexTTS clones any supplied reference voice; there are no preset speakers bundled with the engine.",
+    }),
+  },
+  xtts: {
+    display_name: "XTTS v2",
+    summary_text:
+      "Multilingual voice cloning that balances speed and quality with minimal setup compared to IndexTTS.",
+    strengths: [
+      "Fast startup with a Python wheel; excels for English and Chinese mixes.",
+      "Supports named speaker presets via --speaker without requiring reference audio.",
+      "Handles inline text or batch files with automatic language hints.",
+    ],
+    supported_languages: [
+      "English",
+      "Mandarin Chinese",
+      "Japanese",
+      "Korean",
+      "Spanish",
+      "French",
+      "German",
+      "Portuguese",
+      "20+ additional languages via multilingual checkpoints",
+    ],
+    setup_steps: [
+      "Install the coqui-tts xtts-v2 wheel into your Python environment.",
+      "Download optional speaker preset metadata JSON if you want richer speaker discovery.",
+      "Confirm xtts models load by running python -m TTS.bin.compute_embeddings --help.",
+    ],
+    requirements: [
+      "Needs a Python environment with xtts-v2; supply --python-bin to force the interpreter.",
+      "Reference voices must be short clean clips in wav/flac/ogg/mp3 when cloning.",
+    ],
+    options: [
+      engine_option_doc("xtts", "XTTS v2"),
+      shared_cli_option_docs.engine_help,
+      shared_cli_option_docs.text,
+      shared_cli_option_docs.text_file,
+      shared_cli_option_docs.voice,
+      shared_cli_option_docs.speaker,
+      shared_cli_option_docs.lang,
+      shared_cli_option_docs.speed,
+      shared_cli_option_docs.temperature,
+      shared_cli_option_docs.device,
+      shared_cli_option_docs.python_bin,
+      shared_cli_option_docs.output,
+      shared_cli_option_docs.refresh,
+    ],
+    performance_tips: [
+      "Set --device cuda:0 to force GPU execution when torch detects multiple adapters.",
+      "Lower --temperature to 0.5 for narration that needs consistent pronunciation.",
+      "Batch process files with consistent language hints to reuse cached model weights.",
+    ],
+    troubleshooting: [
+      "Invalid voice formats usually mean the reference file is not mono PCM; re-export as 16-bit PCM WAV.",
+      "If the command hangs, ensure XTTS model weights are present in the TTS cache directory.",
+      "Set --debug to inspect spawned Python arguments when diagnosing interpreter paths.",
+    ],
+    env_variables: [
+      {
+        name: "XTTS_SPEAKERS_JSON",
+        description: "Path to a speakers.json file used for preset discovery.",
+      },
+      {
+        name: "XTTS_CACHE_DIR",
+        description: "Custom cache directory for model downloads and metadata.",
+      },
+      {
+        name: "XTTS_DEVICE",
+        description:
+          "Force a specific device override for environments without CUDA auto-detection.",
+      },
+    ],
+    sample_usage:
+      '$0 --engine xtts --text "Schedule standup for 10am" --voice ./voice.wav --output xtts.wav',
+    speaker_resolver: collect_xtts_preset_speakers,
+  },
+  piper: {
+    display_name: "Piper",
+    summary_text:
+      "Lightweight text-to-speech optimized for CPU usage with small ONNX models.",
+    strengths: [
+      "Pure Node+ONNX runtime; no Python dependency.",
+      "Deterministic output ideal for scripts where voice cloning is unnecessary.",
+      "Comfortable running on resource constrained machines.",
+    ],
+    supported_languages: [
+      "Language coverage depends on the selected .onnx model",
+      "Official releases include English, German, French, Spanish, Italian, and many more",
+      "Mix voice models across directories to cover multiple locales in one workflow",
+    ],
+    setup_steps: [
+      "Download a Piper .onnx voice model and matching .json config from rhasspy/piper releases.",
+      "Store models together in a directory and point --piper-model at the .onnx file.",
+      "Install sox or ffmpeg if you intend to post-process audio automatically.",
+    ],
+    requirements: [
+      "Requires a compatible Piper .onnx model via --piper-model (no download is performed).",
+      "Does not support cloning; choose the desired speaker baked into the model file.",
+    ],
+    options: [
+      engine_option_doc("piper", "Piper"),
+      shared_cli_option_docs.engine_help,
+      shared_cli_option_docs.text,
+      shared_cli_option_docs.text_file,
+      shared_cli_option_docs.lang,
+      shared_cli_option_docs.speed,
+      shared_cli_option_docs.output,
+      shared_cli_option_docs.refresh,
+      shared_cli_option_docs.piper_model,
+    ],
+    performance_tips: [
+      "Use smaller models (e.g., medium) for faster CPU inference when quality trade-offs are acceptable.",
+      "Chain the output through sox tempo processing if you need more aggressive pacing adjustments.",
+      "Run multiple Piper invocations in parallel when CPU cores are plentiful; models are lightweight.",
+    ],
+    troubleshooting: [
+      "Sampling rate mismatch warnings indicate the ONNX model's sample_rate differs; convert after generation.",
+      "Missing voice config files result in flat delivery—ensure the .json alongside the .onnx is accessible.",
+      "If you see onnxruntime failures, reinstall onnxruntime-node with the correct CPU or GPU build.",
+    ],
+    env_variables: [
+      {
+        name: "PIPER_MODEL_DIR",
+        description:
+          "Directory searched when --piper-model is a bare file name.",
+      },
+      {
+        name: "PIPER_USE_GPU",
+        description:
+          "Hint to prefer GPU execution when a CUDA build of onnxruntime is installed.",
+      },
+    ],
+    sample_usage:
+      '$0 --engine piper --text "All-hands starts in five." --piper-model ./en_US-amy-medium.onnx --output piper.wav',
+    speaker_resolver: () => ({
+      note: "Piper voices are baked into each ONNX model; swap models to change speaker characteristics.",
+    }),
+  },
+  vibe_voice: {
+    display_name: "VibeVoice",
+    summary_text:
+      "Diffusion-based voice generation with expressive delivery and controllable CFG guidance.",
+    strengths: [
+      "Expressive voices that lean toward energetic narration.",
+      "Supports voice cloning with --voice similar to XTTS.",
+      "CUDA and MPS acceleration available when drivers allow.",
+    ],
+    supported_languages: [
+      "English (primary training language)",
+      "Experimental support for other Latin-script languages with reference voices",
+      "Requires language-conditioned finetunes for non-English best results",
+    ],
+    setup_steps: [
+      "Download VibeVoice model weights and processor assets into a local directory tree.",
+      "Install torch, torchvision, and diffusers inside the interpreter referenced by --python-bin.",
+      "Verify vibe_voice.launch.py loads without errors before large batch syntheses.",
+    ],
+    requirements: [
+      "Requires a local VibeVoice model directory; set --vibe_voice-model-dir to select it.",
+      "Needs Python runtime with diffusers/torch; provide --python-bin if detection fails.",
+    ],
+    options: [
+      engine_option_doc("vibe_voice", "VibeVoice"),
+      shared_cli_option_docs.engine_help,
+      shared_cli_option_docs.text,
+      shared_cli_option_docs.text_file,
+      shared_cli_option_docs.voice,
+      shared_cli_option_docs.lang,
+      shared_cli_option_docs.speed,
+      shared_cli_option_docs.python_bin,
+      shared_cli_option_docs.output,
+      shared_cli_option_docs.refresh,
+      shared_cli_option_docs.vibe_voice_model_dir,
+      shared_cli_option_docs.vibe_voice_processor_dir,
+      shared_cli_option_docs.vibe_voice_device,
+      shared_cli_option_docs.vibe_voice_cfg_scale,
+      shared_cli_option_docs.vibe_voice_max_new,
+      shared_cli_option_docs.vibe_voice_ddpm_steps,
+      shared_cli_option_docs.vibe_voice_half,
+      shared_cli_option_docs.vibe_voice_quiet,
+    ],
+    performance_tips: [
+      "Enable --vibe_voice-half to cut VRAM usage when running on Ampere or newer GPUs.",
+      "Reduce --vibe_voice-ddpm-steps for faster drafts; increase for polished narration.",
+      "Set --vibe_voice-device mps on Apple Silicon for a 2-3x speedup over CPU mode.",
+    ],
+    troubleshooting: [
+      "Model directory layout mismatches cause missing scheduler errors—mirror the official repo structure.",
+      "If CUDA kernels fail to compile, install torch==2.1.x with matching CUDA toolkit.",
+      "Excessively long prompts may hit token limits; split text with --vibe_voice-max-new to constrain output size.",
+    ],
+    env_variables: [
+      {
+        name: "VIBE_VOICE_MODEL_DIR",
+        description:
+          "Default root searched when --vibe_voice-model-dir is omitted.",
+      },
+      {
+        name: "VIBE_VOICE_PROCESSOR_DIR",
+        description: "Override processor asset discovery without CLI flags.",
+      },
+      {
+        name: "VIBE_VOICE_DEVICE",
+        description: "System-wide hint for the preferred execution device.",
+      },
+    ],
+    sample_usage:
+      '$0 --engine vibe_voice --text "Launch the new campaign assets." --voice ./ref.wav --vibe_voice-model-dir ~/models/vibe --output vibe.wav',
+    speaker_resolver: () => ({
+      note: "VibeVoice requires a reference audio clip via --voice; preset catalogs are not bundled.",
+    }),
+  },
+};
+
+const engine_help_targets = new Set([
+  ...Object.keys(engine_help_reference),
+  "all",
+]);
+
+const MAX_ENGINE_HELP_SPEAKERS = Number.POSITIVE_INFINITY;
+
+const xtts_speaker_cache = {
+  scanned: false,
+  labels: [],
+  sources: [],
+  note: null,
+  language_map: {},
+};
+
+function normalize_engine_option_value(value) {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  return String(value)
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_");
+}
+
+function prepare_cli_args_for_engine_help(raw_args) {
+  const default_result = {
+    cli_args: Array.isArray(raw_args) ? [...raw_args] : [],
+    intercepted_help: false,
+    engine_help_target: undefined,
+  };
+
+  if (!Array.isArray(raw_args) || raw_args.length === 0) {
+    return default_result;
+  }
+
+  let requested_engine = null;
+  let help_requested = false;
+
+  for (let index = 0; index < raw_args.length; index += 1) {
+    const token = raw_args[index];
+
+    if (token === "--help" || token === "-h") {
+      help_requested = true;
+      continue;
+    }
+
+    if (token.startsWith("--engine=")) {
+      requested_engine = token.slice("--engine=".length);
+      continue;
+    }
+
+    if (token === "--engine" && index + 1 < raw_args.length) {
+      requested_engine = raw_args[index + 1];
+      index += 1;
+      continue;
+    }
+  }
+
+  if (!help_requested || !requested_engine) {
+    return default_result;
+  }
+
+  const normalized_engine = normalize_engine_option_value(requested_engine);
+
+  if (!normalized_engine || !engine_help_reference[normalized_engine]) {
+    return default_result;
+  }
+
+  const filtered_args = raw_args.filter(
+    (token) => token !== "--help" && token !== "-h",
+  );
+
+  return {
+    cli_args: filtered_args,
+    intercepted_help: true,
+    engine_help_target: normalized_engine,
+  };
+}
 
 function hide_process_argv(argv) {
   return Array.isArray(argv) ? argv.slice(2) : [];
@@ -28,18 +567,30 @@ function hide_process_argv(argv) {
   const command_name = path.basename(process.argv[1] || "text_to_speech");
   const terminal_width = Math.min(120, process.stdout.columns || 120);
 
-  const argv = yargs_factory(hide_process_argv(process.argv))
+  const raw_cli_args = hide_process_argv(process.argv);
+  const cli_preparation = prepare_cli_args_for_engine_help(raw_cli_args);
+
+  const parser = yargs_factory(cli_preparation.cli_args);
+
+  parser
     .scriptName(command_name)
     .usage(
       "Usage: $0 [options] [file|glob ...]" +
         "\n\nDescription:" +
-        "\n  Convert text into speech offline using IndexTTS (default), XTTS v2, Piper, or VibeVoice.",
+        "\n  Convert text into speech offline using IndexTTS (default), XTTS v2, Piper, or VibeVoice." +
+        "\n\nTips:" +
+        "\n  Use --engine <name> --help for engine-specific guidance, or --engine-help <name> directly.",
     )
     .option("engine", {
       type: "string",
       choices: ["xtts", "piper", "vibe_voice", "index_tts"],
       default: "index_tts",
       describe: "Synthesis engine to use (local only).",
+    })
+    .option("engine-help", {
+      type: "string",
+      describe:
+        "Show extended documentation for an engine (index_tts|xtts|piper|vibe_voice|all) and exit.",
     })
     .option("text", {
       type: "string",
@@ -225,12 +776,40 @@ function hide_process_argv(argv) {
       "Clone a speaker with IndexTTS2 from a local repository checkout.",
     )
     .example(
+      "$0 --engine xtts --help",
+      "Display XTTS-specific help (also available via --engine-help xtts).",
+    )
+    .example(
       "$0 a/b/*.md c/d/*.txt",
       "Expand glob patterns, synthesize each file, and write companion WAV files.",
-    )
+    );
+
+  parser
     .wrap(terminal_width)
     .strict()
     .check((parsed) => {
+      if (cli_preparation.intercepted_help) {
+        parsed["engine-help"] = cli_preparation.engine_help_target;
+        return true;
+      }
+
+      const engine_help_request = normalize_engine_help_input(
+        parsed["engine-help"],
+      );
+      if (engine_help_request) {
+        if (!engine_help_targets.has(engine_help_request)) {
+          const supported_list = Array.from(engine_help_targets)
+            .filter((item) => item !== "all")
+            .sort()
+            .join(", ");
+          throw new Error(
+            `--engine-help accepts: ${supported_list}, or 'all'.`,
+          );
+        }
+        parsed["engine-help"] = engine_help_request;
+        return true;
+      }
+
       const has_inline_text = Boolean(parsed.text);
       const has_text_file = Boolean(parsed["text-file"]);
       const has_patterns = Array.isArray(parsed._) && parsed._.length > 0;
@@ -270,12 +849,36 @@ function hide_process_argv(argv) {
       return true;
     })
     .epilog(
-      "Options: --engine, --text, --text-file, --lang, --voice, --speaker, --output, --speed, --temperature, --device, --piper-model, --python-bin, --index-tts-home, --index-tts-checkpoints, --index-tts-config, --emo-audio, --emo-text, --emo-vector, --emo-alpha, --index-tts-fp16, --index-tts-deepspeed, --index-tts-cuda-kernel, --index-tts-random, --index-tts-max-segment, --vibe_voice-model-dir, --vibe_voice-processor-dir, --vibe_voice-device, --vibe_voice-cfg-scale, --vibe_voice-max-new, --vibe_voice-ddpm-steps, --vibe_voice-half, --vibe_voice-quiet." +
-        `\nExamples: ${command_name} --text 'Hello' --output hello.wav | ${command_name} --engine index_tts notes/*.txt --voice speaker.wav --index-tts-home ~/git/index-tts`,
-    )
-    .parse();
+      "Options: --engine, --engine-help, --text, --text-file, --lang, --voice, --speaker, --output, --speed, --temperature, --device, --piper-model, --python-bin, --index-tts-home, --index-tts-checkpoints, --index-tts-config, --emo-audio, --emo-text, --emo-vector, --emo-alpha, --index-tts-fp16, --index-tts-deepspeed, --index-tts-cuda-kernel, --index-tts-random, --index-tts-max-segment, --vibe_voice-model-dir, --vibe_voice-processor-dir, --vibe_voice-device, --vibe_voice-cfg-scale, --vibe_voice-max-new, --vibe_voice-ddpm-steps, --vibe_voice-half, --vibe_voice-quiet." +
+        `\nExamples: ${command_name} --text 'Hello' --output hello.wav | ${command_name} --engine index_tts notes/*.txt --voice speaker.wav --index-tts-home ~/git/index-tts | ${command_name} --engine xtts --help`,
+    );
+
+  const cli_option_docs = collect_cli_option_docs(parser);
+
+  const argv = parser.parse();
 
   const logger = create_logger(chalk, command_name);
+
+  if (cli_preparation.intercepted_help) {
+    render_engine_help({
+      chalk,
+      target: cli_preparation.engine_help_target,
+      command_name,
+      include_cli_tip: true,
+      cli_option_docs,
+    });
+    return;
+  }
+
+  if (argv["engine-help"]) {
+    render_engine_help({
+      chalk,
+      target: argv["engine-help"],
+      command_name,
+      cli_option_docs,
+    });
+    return;
+  }
 
   let synthesis_jobs;
   try {
@@ -310,6 +913,22 @@ function hide_process_argv(argv) {
         throw new Error(
           `Unable to access --voice file '${xtts_voice_path}': ${error.message}`,
         );
+      }
+
+      const voice_extension = path.extname(xtts_voice_path).toLowerCase();
+      if (
+        voice_extension &&
+        !XTTS_SUPPORTED_VOICE_EXTENSIONS.has(voice_extension)
+      ) {
+        const relative_voice =
+          path.relative(process.cwd(), xtts_voice_path) || xtts_voice_path;
+        const supported_extensions = Array.from(XTTS_SUPPORTED_VOICE_EXTENSIONS)
+          .sort()
+          .join(", ");
+        logger.warn(
+          `Ignoring --voice ${chalk.magenta(relative_voice)} because XTTS requires a reference audio file with one of the supported extensions: ${supported_extensions}. Falling back to the default speaker.`,
+        );
+        xtts_voice_path = null;
       }
     } else if (argv.speaker) {
       logger.info(
@@ -486,6 +1105,866 @@ function hide_process_argv(argv) {
     );
   }
 })();
+
+function normalize_engine_help_input(raw_value) {
+  if (raw_value === undefined || raw_value === null) {
+    return undefined;
+  }
+
+  if (raw_value === false) {
+    return undefined;
+  }
+
+  if (raw_value === true) {
+    return "all";
+  }
+
+  const normalized_text = String(raw_value).trim();
+  if (normalized_text.length === 0) {
+    return "all";
+  }
+
+  return normalized_text.toLowerCase().replace(/[^a-z0-9]+/g, "_");
+}
+
+function collect_xtts_preset_speakers(request = {}) {
+  if (xtts_speaker_cache.scanned) {
+    return {
+      labels: xtts_speaker_cache.labels,
+      sources: xtts_speaker_cache.sources,
+      note: xtts_speaker_cache.note,
+      language_map: xtts_speaker_cache.language_map,
+    };
+  }
+
+  const candidate_paths = build_xtts_speaker_candidate_paths();
+  const discovered = new Set();
+  const sources = [];
+  const languages_by_label = new Map();
+
+  for (const candidate of candidate_paths) {
+    if (!candidate) {
+      continue;
+    }
+    let file_content;
+    try {
+      if (!fs_sync.existsSync(candidate)) {
+        continue;
+      }
+      file_content = fs_sync.readFileSync(candidate, "utf8");
+    } catch (error) {
+      continue;
+    }
+
+    let parsed;
+    try {
+      parsed = JSON.parse(file_content);
+    } catch (error) {
+      continue;
+    }
+
+    const metadata = extract_xtts_speaker_metadata(parsed);
+    if (metadata.labels.length > 0) {
+      metadata.labels.forEach((label) => discovered.add(label));
+      sources.push(candidate);
+    }
+    if (metadata.languages) {
+      for (const [label, languages] of Object.entries(metadata.languages)) {
+        if (!Array.isArray(languages) || languages.length === 0) {
+          continue;
+        }
+        const normalized_label = label.trim();
+        if (!normalized_label) {
+          continue;
+        }
+        if (!languages_by_label.has(normalized_label)) {
+          languages_by_label.set(normalized_label, new Map());
+        }
+        const store = languages_by_label.get(normalized_label);
+        languages.forEach((language) => {
+          const normalized_language =
+            typeof language === "string" ? language.trim() : "";
+          if (!normalized_language) {
+            return;
+          }
+          const language_key = normalized_language.toLowerCase();
+          if (!store.has(language_key)) {
+            store.set(language_key, normalized_language);
+          }
+        });
+      }
+    }
+  }
+
+  const sorted_labels = Array.from(discovered).sort((left, right) =>
+    left.localeCompare(right, undefined, { sensitivity: "base" }),
+  );
+
+  let note = null;
+  if (sorted_labels.length === 0) {
+    note =
+      "No XTTS preset catalog was found. Download the model locally or set XTTS_SPEAKERS_JSON to point at speakers.json.";
+  }
+
+  const language_map = {};
+  sorted_labels.forEach((label) => {
+    const store = languages_by_label.get(label);
+    if (!store || store.size === 0) {
+      return;
+    }
+    const entries = Array.from(store.values()).sort((left, right) =>
+      left.localeCompare(right, undefined, { sensitivity: "base" }),
+    );
+    if (entries.length > 0) {
+      language_map[label] = entries;
+    }
+  });
+
+  xtts_speaker_cache.scanned = true;
+  xtts_speaker_cache.labels = sorted_labels;
+  xtts_speaker_cache.sources = sources;
+  xtts_speaker_cache.note = note;
+  xtts_speaker_cache.language_map = language_map;
+
+  return {
+    labels: sorted_labels,
+    sources,
+    note,
+    language_map,
+  };
+}
+
+function build_xtts_speaker_candidate_paths() {
+  const candidates = new Set();
+
+  const direct_path = process.env.XTTS_SPEAKERS_JSON;
+  if (direct_path) {
+    candidates.add(path.resolve(process.cwd(), direct_path));
+  }
+
+  const indexed_home = process.env.INDEX_TTS_HOME;
+  if (indexed_home) {
+    const home_candidate = path.resolve(
+      indexed_home,
+      "checkpoints",
+      "speakers.json",
+    );
+    candidates.add(home_candidate);
+  }
+
+  if (process.env.INDEX_TTS_CHECKPOINTS) {
+    candidates.add(
+      path.resolve(process.env.INDEX_TTS_CHECKPOINTS, "speakers.json"),
+    );
+  }
+
+  const local_repo_candidate = path.resolve(
+    __dirname,
+    "../lib/tts/index_tts/checkpoints/speakers.json",
+  );
+  candidates.add(local_repo_candidate);
+
+  const bundled_xtts_catalog = path.resolve(
+    __dirname,
+    "../lib/tts/xtts_v2/xtts_speakers.json",
+  );
+  candidates.add(bundled_xtts_catalog);
+
+  const home_directory = typeof os.homedir === "function" ? os.homedir() : null;
+  if (home_directory) {
+    const home_candidates = [
+      [
+        ".local",
+        "share",
+        "tts",
+        "tts_models",
+        "multilingual",
+        "multi-dataset",
+        "xtts_v2",
+        "speakers.json",
+      ],
+      [
+        ".cache",
+        "tts",
+        "tts_models",
+        "multilingual",
+        "multi-dataset",
+        "xtts_v2",
+        "speakers.json",
+      ],
+      [".config", "tts", "xtts_v2", "speakers.json"],
+      [
+        "Library",
+        "Application Support",
+        "tts",
+        "tts_models",
+        "multilingual",
+        "multi-dataset",
+        "xtts_v2",
+        "speakers.json",
+      ],
+      [
+        "AppData",
+        "Local",
+        "tts",
+        "tts_models",
+        "multilingual",
+        "multi-dataset",
+        "xtts_v2",
+        "speakers.json",
+      ],
+    ];
+
+    home_candidates.forEach((segments) => {
+      const absolute_path = path.join(home_directory, ...segments);
+      candidates.add(absolute_path);
+    });
+  }
+
+  const workspace_candidate = path.resolve(
+    process.cwd(),
+    "checkpoints",
+    "speakers.json",
+  );
+  candidates.add(workspace_candidate);
+
+  return Array.from(candidates);
+}
+
+function extract_xtts_speaker_metadata(value) {
+  const collected_labels = new Set();
+  const languages_by_label = new Map();
+
+  function normalize_label_text(raw_label) {
+    if (typeof raw_label !== "string") {
+      return null;
+    }
+    const trimmed = raw_label.trim();
+    if (!trimmed) {
+      return null;
+    }
+    if (!is_probable_xtts_speaker_label(trimmed)) {
+      return null;
+    }
+    return trimmed;
+  }
+
+  function ensure_language_store(label) {
+    if (!languages_by_label.has(label)) {
+      languages_by_label.set(label, new Map());
+    }
+    return languages_by_label.get(label);
+  }
+
+  function register_language(label, candidate) {
+    const normalized_label = normalize_label_text(label);
+    if (!normalized_label) {
+      return;
+    }
+    const normalized_language = normalize_language_token(candidate);
+    if (!normalized_language) {
+      return;
+    }
+    const language_key = normalized_language.toLowerCase();
+    const store = ensure_language_store(normalized_label);
+    if (!store.has(language_key)) {
+      store.set(language_key, normalized_language);
+    }
+  }
+
+  function collect_language_candidates_from_object(
+    node,
+    existing_languages = [],
+  ) {
+    if (!node || typeof node !== "object") {
+      return existing_languages;
+    }
+
+    const accumulator = new Map();
+    existing_languages.forEach((entry) => {
+      if (typeof entry === "string" && entry) {
+        accumulator.set(entry.toLowerCase(), entry);
+      }
+    });
+
+    for (const [key, entry] of Object.entries(node)) {
+      if (!key) {
+        continue;
+      }
+      const lower_key = key.toLowerCase();
+      if (lower_key.includes("lang")) {
+        gather_language_values(entry, accumulator);
+        continue;
+      }
+      if (is_probable_language_code(key)) {
+        gather_language_values(key, accumulator);
+        gather_language_values(entry, accumulator);
+      }
+    }
+
+    return Array.from(accumulator.values());
+  }
+
+  function gather_language_values(value, accumulator) {
+    if (!accumulator || value === undefined || value === null) {
+      return;
+    }
+    if (typeof value === "string" || typeof value === "number") {
+      const normalized = normalize_language_token(value);
+      if (!normalized) {
+        return;
+      }
+      const key = normalized.toLowerCase();
+      if (!accumulator.has(key)) {
+        accumulator.set(key, normalized);
+      }
+      return;
+    }
+    if (Array.isArray(value)) {
+      value.forEach((entry) => gather_language_values(entry, accumulator));
+      return;
+    }
+    if (typeof value === "object") {
+      for (const [key, entry] of Object.entries(value)) {
+        if (is_probable_language_code(key)) {
+          gather_language_values(key, accumulator);
+        }
+        gather_language_values(entry, accumulator);
+      }
+    }
+  }
+
+  function add_label(label, default_languages = []) {
+    const normalized_label = normalize_label_text(label);
+    if (!normalized_label) {
+      return;
+    }
+    collected_labels.add(normalized_label);
+    if (Array.isArray(default_languages) && default_languages.length > 0) {
+      default_languages.forEach((lang) =>
+        register_language(normalized_label, lang),
+      );
+    }
+  }
+
+  function extract_label_from_object(node) {
+    if (!node || typeof node !== "object") {
+      return null;
+    }
+    const candidate_fields = [
+      "name",
+      "speaker",
+      "voice",
+      "label",
+      "title",
+      "id",
+    ];
+    for (const field of candidate_fields) {
+      const candidate = node[field];
+      if (typeof candidate === "string") {
+        const normalized = normalize_label_text(candidate);
+        if (normalized) {
+          return normalized;
+        }
+      }
+    }
+    return null;
+  }
+
+  function process_node(node, inherited_languages = []) {
+    if (!node) {
+      return;
+    }
+
+    if (typeof node === "string" || typeof node === "number") {
+      add_label(String(node), inherited_languages);
+      return;
+    }
+
+    if (Array.isArray(node)) {
+      node.forEach((entry) => process_node(entry, inherited_languages));
+      return;
+    }
+
+    if (typeof node === "object") {
+      const entries = Object.entries(node);
+      let handled_language_groups = false;
+
+      for (const [key, entry] of entries) {
+        if (is_probable_language_code(key)) {
+          handled_language_groups = true;
+          const normalized_language = normalize_language_token(key);
+          const language_list = normalized_language
+            ? [normalized_language]
+            : [];
+          process_node(entry, language_list);
+        }
+      }
+
+      if (handled_language_groups) {
+        return;
+      }
+
+      const accumulator = new Map();
+      const inherited_array = Array.isArray(inherited_languages)
+        ? inherited_languages.filter(
+            (value) => typeof value === "string" && value.trim(),
+          )
+        : [];
+
+      inherited_array.forEach((value) => {
+        const normalized_language =
+          normalize_language_token(value) || String(value).trim();
+        if (normalized_language) {
+          accumulator.set(
+            normalized_language.toLowerCase(),
+            normalized_language,
+          );
+        }
+      });
+
+      entries.forEach(([key, entry]) => {
+        if (typeof key === "string" && key.toLowerCase().includes("lang")) {
+          gather_language_values(entry, accumulator);
+        }
+      });
+
+      const merged_languages = Array.from(accumulator.values());
+
+      for (const [key, entry] of entries) {
+        const lower_key = typeof key === "string" ? key.toLowerCase() : "";
+
+        if (lower_key.includes("lang")) {
+          process_node(entry, merged_languages);
+          continue;
+        }
+
+        const normalized_key_label = normalize_label_text(key);
+        if (normalized_key_label) {
+          const explicit_languages = collect_language_candidates_from_object(
+            entry,
+            merged_languages,
+          );
+          const language_list =
+            explicit_languages.length > 0
+              ? explicit_languages
+              : merged_languages;
+          add_label(normalized_key_label, language_list);
+          process_node(entry, language_list);
+          continue;
+        }
+
+        if (typeof entry === "string" || typeof entry === "number") {
+          add_label(entry, merged_languages);
+          continue;
+        }
+
+        if (Array.isArray(entry)) {
+          process_node(entry, merged_languages);
+          continue;
+        }
+
+        if (typeof entry === "object") {
+          const label_from_fields = extract_label_from_object(entry);
+          const explicit_languages = collect_language_candidates_from_object(
+            entry,
+            merged_languages,
+          );
+          const language_list =
+            explicit_languages.length > 0
+              ? explicit_languages
+              : merged_languages;
+
+          if (label_from_fields) {
+            add_label(label_from_fields, language_list);
+          }
+
+          process_node(entry, language_list);
+        }
+      }
+    }
+  }
+
+  process_node(value, []);
+
+  const serialized_languages = {};
+  for (const [label, store] of languages_by_label.entries()) {
+    if (!store || store.size === 0) {
+      continue;
+    }
+    serialized_languages[label] = Array.from(store.values()).sort(
+      (left, right) =>
+        left.localeCompare(right, undefined, { sensitivity: "base" }),
+    );
+  }
+
+  return {
+    labels: Array.from(collected_labels),
+    languages: serialized_languages,
+  };
+}
+
+const LANGUAGE_CODE_REGEX = /^[a-z]{2,3}(?:[-_][a-z0-9]{2,8})*$/i;
+
+function is_probable_language_code(value) {
+  if (typeof value !== "string") {
+    return false;
+  }
+  return LANGUAGE_CODE_REGEX.test(value.trim());
+}
+
+function normalize_language_token(value) {
+  if (value === undefined || value === null) {
+    return null;
+  }
+  const text = String(value).trim();
+  if (!text) {
+    return null;
+  }
+  if (!LANGUAGE_CODE_REGEX.test(text)) {
+    return null;
+  }
+  return text.toLowerCase().replace(/_/g, "-");
+}
+
+function is_probable_xtts_speaker_label(value) {
+  if (typeof value !== "string") {
+    return false;
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return false;
+  }
+  if (trimmed.length > 64) {
+    return false;
+  }
+  if (/[\\/]/.test(trimmed)) {
+    return false;
+  }
+  if (/\.(wav|mp3|flac|ogg|pt|pth|json|yaml|yml)$/i.test(trimmed)) {
+    return false;
+  }
+  if (is_probable_language_code(trimmed)) {
+    return false;
+  }
+  if (!/[a-z]/i.test(trimmed)) {
+    return false;
+  }
+  return true;
+}
+
+function render_engine_help({
+  chalk,
+  target,
+  command_name,
+  include_cli_tip = false,
+  cli_option_docs = [],
+}) {
+  const resolved_target =
+    target === "all" ? Object.keys(engine_help_reference) : [target];
+
+  const separator_line = chalk.gray("-".repeat(terminal_width_for_help()));
+
+  resolved_target.forEach((engine_key, index) => {
+    const spec = engine_help_reference[engine_key];
+    if (!spec) {
+      return;
+    }
+
+    if (index > 0) {
+      console.log("\n" + separator_line);
+    }
+
+    const heading = `${chalk.bold.magenta(spec.display_name)} ${chalk.gray(`(${engine_key})`)}`;
+    console.log(heading);
+    console.log(chalk.white(spec.summary_text));
+
+    const speaker_info =
+      typeof spec.speaker_resolver === "function"
+        ? spec.speaker_resolver({ resolve_full_list: true })
+        : null;
+
+    if (spec.strengths && spec.strengths.length > 0) {
+      console.log(`\n${chalk.cyan("Highlights:")}`);
+      spec.strengths.forEach((line) => {
+        console.log(`  - ${line}`);
+      });
+    }
+
+    if (spec.supported_languages && spec.supported_languages.length > 0) {
+      const languages_text = spec.supported_languages
+        .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
+        .filter((entry) => entry.length > 0)
+        .join(", ");
+      if (languages_text) {
+        console.log(
+          `\n${chalk.cyanBright("Supported languages:")} ${languages_text}`,
+        );
+      }
+    }
+
+    if (spec.setup_steps && spec.setup_steps.length > 0) {
+      console.log(`\n${chalk.magenta("Setup checklist:")}`);
+      spec.setup_steps.forEach((line) => {
+        console.log(`  - ${line}`);
+      });
+    }
+
+    if (spec.requirements && spec.requirements.length > 0) {
+      console.log(`\n${chalk.yellow("Requirements:")}`);
+      spec.requirements.forEach((line) => {
+        console.log(`  - ${line}`);
+      });
+    }
+
+    const option_entries = spec.options || spec.notable_flags;
+    if (option_entries && option_entries.length > 0) {
+      console.log(`\n${chalk.green("Options:")}`);
+      option_entries.forEach((entry) => {
+        console.log(`  - ${chalk.bold(entry.flag)}: ${entry.description}`);
+      });
+    }
+
+    if (spec.performance_tips && spec.performance_tips.length > 0) {
+      console.log(`\n${chalk.blueBright("Performance notes:")}`);
+      spec.performance_tips.forEach((line) => {
+        console.log(`  - ${line}`);
+      });
+    }
+
+    if (spec.env_variables && spec.env_variables.length > 0) {
+      console.log(`\n${chalk.yellowBright("Environment variables:")}`);
+      spec.env_variables.forEach((entry) => {
+        if (entry && entry.name && entry.description) {
+          console.log(`  - ${chalk.bold(entry.name)}: ${entry.description}`);
+        } else if (typeof entry === "string") {
+          console.log(`  - ${entry}`);
+        }
+      });
+    }
+
+    if (spec.troubleshooting && spec.troubleshooting.length > 0) {
+      console.log(`\n${chalk.red("Troubleshooting:")}`);
+      spec.troubleshooting.forEach((line) => {
+        console.log(`  - ${line}`);
+      });
+    }
+
+    if (spec.sample_usage) {
+      console.log(`\n${chalk.blue("Example:")}`);
+      console.log(`  ${chalk.gray("# Suggested invocation")}`);
+      const rendered_sample = spec.sample_usage.split("$0").join(command_name);
+      console.log(`  ${rendered_sample}`);
+    }
+
+    if (speaker_info) {
+      if (
+        Array.isArray(speaker_info.labels) &&
+        speaker_info.labels.length > 0
+      ) {
+        console.log(`\n${chalk.magentaBright("Speakers:")}`);
+        const displayed = speaker_info.labels.slice(
+          0,
+          MAX_ENGINE_HELP_SPEAKERS,
+        );
+        const languages_for_speakers =
+          speaker_info.language_map &&
+          typeof speaker_info.language_map === "object"
+            ? speaker_info.language_map
+            : {};
+        const speaker_lines = displayed.map((label) => {
+          const languages = Array.isArray(languages_for_speakers[label])
+            ? languages_for_speakers[label].filter(
+                (entry) => typeof entry === "string" && entry.trim(),
+              )
+            : [];
+          if (languages.length > 0) {
+            return `${label} (${languages.join(", ")})`;
+          }
+          return label;
+        });
+        if (speaker_lines.length > 0) {
+          console.log(`  ${speaker_lines.join(", ")}`);
+        }
+        if (speaker_info.labels.length > MAX_ENGINE_HELP_SPEAKERS) {
+          const remaining =
+            speaker_info.labels.length - MAX_ENGINE_HELP_SPEAKERS;
+          console.log(
+            `  ${chalk.gray(`Additional speakers available (${remaining} more). Set XTTS_SPEAKERS_JSON to inspect full list.`)}`,
+          );
+        }
+        if (
+          Array.isArray(speaker_info.sources) &&
+          speaker_info.sources.length > 0
+        ) {
+          const primary_source = speaker_info.sources[0];
+          const extra_sources = speaker_info.sources.length - 1;
+          const source_suffix =
+            extra_sources > 0 ? ` (+${extra_sources} alt)` : "";
+          console.log(
+            `  ${chalk.gray(`Source: ${path.relative(process.cwd(), primary_source) || primary_source}${source_suffix}`)}`,
+          );
+        }
+      } else if (speaker_info.note) {
+        console.log(
+          `\n${chalk.magentaBright("Speakers:")} ${chalk.gray(speaker_info.note)}`,
+        );
+      }
+    }
+  });
+
+  console.log(
+    "\n" + chalk.gray("Use --engine to select the engine for synthesis."),
+  );
+  if (include_cli_tip) {
+    console.log(
+      chalk.gray(
+        `Run ${command_name} --help to view global CLI options and examples.`,
+      ),
+    );
+  }
+
+  if (Array.isArray(cli_option_docs) && cli_option_docs.length > 0) {
+    console.log(`\n${chalk.gray("Complete CLI options:")}`);
+    cli_option_docs.forEach((entry) => {
+      const segments = [chalk.bold(entry.flag)];
+      if (entry.aliases && entry.aliases.length > 0) {
+        segments.push(chalk.gray(`[aliases: ${entry.aliases.join(", ")}]`));
+      }
+      if (entry.type) {
+        segments.push(chalk.gray(`[type: ${entry.type}]`));
+      }
+      if (entry.choices && entry.choices.length > 0) {
+        segments.push(chalk.gray(`[choices: ${entry.choices.join(", ")}]`));
+      }
+      if (entry.default_value !== undefined) {
+        segments.push(chalk.gray(`[default: ${entry.default_value}]`));
+      }
+      const description_suffix = entry.description
+        ? ` — ${entry.description}`
+        : "";
+      console.log(`  - ${segments.join(" ")}${description_suffix}`);
+    });
+  }
+}
+
+function collect_cli_option_docs(parser) {
+  if (!parser || typeof parser.getOptions !== "function") {
+    return [];
+  }
+
+  const options = parser.getOptions();
+  const keys = Object.keys(options?.key || {});
+  const seen_flags = new Set();
+  const docs = [];
+
+  keys.forEach((name) => {
+    if (should_skip_option_doc(name, options)) {
+      return;
+    }
+    const type = detect_option_type(name, options);
+    const flag = format_option_flag(name, type);
+    if (seen_flags.has(flag)) {
+      return;
+    }
+    const aliases = normalize_option_aliases(name, options?.alias);
+    const choices = Array.isArray(options?.choices?.[name])
+      ? options.choices[name].map((choice) => `${choice}`)
+      : [];
+    const default_value = options?.default?.[name];
+    const description = options?.describe?.[name] || "";
+
+    docs.push({
+      flag,
+      type,
+      aliases,
+      choices,
+      default_value,
+      description,
+      original_name: name,
+    });
+    seen_flags.add(flag);
+  });
+
+  return docs.sort((left, right) =>
+    left.flag.localeCompare(right.flag, undefined, { sensitivity: "base" }),
+  );
+}
+
+function detect_option_type(name, options) {
+  const candidate_lists = [
+    { label: "boolean", items: options?.boolean },
+    { label: "number", items: options?.number },
+    { label: "string", items: options?.string },
+    { label: "array", items: options?.array },
+  ];
+
+  for (const candidate of candidate_lists) {
+    if (Array.isArray(candidate.items) && candidate.items.includes(name)) {
+      return candidate.label;
+    }
+  }
+
+  return null;
+}
+
+function format_option_flag(name, type) {
+  const prefix = name.length === 1 ? "-" : "--";
+  if (type && type !== "boolean") {
+    return `${prefix}${name} <${type}>`;
+  }
+  return `${prefix}${name}`;
+}
+
+function normalize_option_aliases(name, alias_map) {
+  if (!alias_map) {
+    return [];
+  }
+  const raw_aliases = alias_map[name];
+  if (!raw_aliases) {
+    return [];
+  }
+  const entries = Array.isArray(raw_aliases) ? raw_aliases : [raw_aliases];
+  const normalized = new Set();
+  entries.forEach((entry) => {
+    if (typeof entry !== "string") {
+      return;
+    }
+    const trimmed = entry.trim();
+    if (!trimmed || trimmed === name) {
+      return;
+    }
+    const prefix = trimmed.length === 1 ? "-" : "--";
+    normalized.add(`${prefix}${trimmed}`);
+  });
+  return Array.from(normalized).sort((left, right) =>
+    left.localeCompare(right, undefined, { sensitivity: "base" }),
+  );
+}
+
+function should_skip_option_doc(name, options) {
+  const alias_entries = options?.alias?.[name];
+  if (
+    typeof name === "string" &&
+    name.length === 1 &&
+    Array.isArray(alias_entries) &&
+    alias_entries.some((alias) => typeof alias === "string" && alias.length > 1)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function terminal_width_for_help() {
+  const default_width = 80;
+  if (
+    typeof process.stdout.columns === "number" &&
+    process.stdout.columns > 0
+  ) {
+    return Math.min(120, process.stdout.columns);
+  }
+  return default_width;
+}
 
 function create_logger(chalk, command_name) {
   const label_info = chalk.bold.blue("INFO");

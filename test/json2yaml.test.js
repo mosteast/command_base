@@ -119,4 +119,3 @@ describe("json2yaml CLI", () => {
     }
   });
 });
-

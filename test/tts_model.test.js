@@ -2,8 +2,8 @@ import path from "path";
 import os from "os";
 import { describe, it, expect } from "vitest";
 
-import ttsModelModule from "../lib/tts_model";
-import xttsModule from "../lib/tts_model/xtts_v2";
+import ttsModelModule from "../lib/tts/tts_model";
+import xttsModule from "../lib/tts/tts_model/xtts_v2";
 
 const { list_tts_models, get_tts_model, default_tts_model_id } = ttsModelModule;
 const { xtts_v2_model } = xttsModule;

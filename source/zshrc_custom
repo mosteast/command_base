@@ -66,3 +66,5 @@ unset https_proxy
 '
 
 alias typora="/Applications/Typora.app/Contents/MacOS/Typora"
+
+export XTTS_SPEAKERS_JSON="$PWD/lib/tts/xtts_v2/xtts_speakers.json"

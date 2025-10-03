@@ -80,3 +80,7 @@ Support following options if possible:
 
 - `--quiet`
 - `-d, --dry-run`
+
+## Global/System Variables
+
+- Variables that's only used in tools should be set in source/zshrc_custom

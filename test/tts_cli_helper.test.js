@@ -3,7 +3,7 @@ import os from "os";
 import path from "path";
 import { describe, it, expect } from "vitest";
 
-import cliHelperModule from "../lib/tts_cli_helper";
+import cliHelperModule from "../lib/tts/tts_cli_helper";
 
 const {
   normalize_concurrency,
