@@ -73,13 +73,13 @@
 Must Support
 
 - `-h, --help`
-- `-v, --version`
-- `--debug`
+- `-v, --version`: should only show version number and nothing else
+- `--debug`: print verbose output and debug logs
 
 Support following options if possible:
 
-- `--quiet`
-- `-d, --dry-run`
+- `--quiet`: print only warnings and errors
+- `-d, --dry-run`: print what will be done without actually doing it
 
 ## Global/System Variables
 
