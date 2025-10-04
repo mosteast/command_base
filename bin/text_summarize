@@ -3,296 +3,55 @@
 "use strict";
 
 const path = require("path");
-const yargs_factory = require("yargs/yargs");
 
 const {
-  default_ai_platform,
-  supported_ai_platforms,
-  ensure_prompt_source,
-  expand_patterns,
-  file_has_content,
-  run_ai_command,
-} = require("../utility/_ai_cli_utils");
+  run_text_prompt_batch_cli,
+} = require("../utility/text_prompt_batch_runner");
+
+const command_name = path.basename(process.argv[1] || "text_summarize");
+const repo_root_path = path.resolve(__dirname, "..");
+const prompt_external_path =
+  "/Users/hailang/Library/Mobile Documents/com~apple~CloudDocs/main/download/tool/prompt/summarize_text.build.md";
 
 (async () => {
-  const { default: chalk } = await import("chalk");
-
-  const command_name = path.basename(process.argv[1] || "text_summarize");
-  const terminal_width = Math.min(120, process.stdout.columns || 120);
-
-  const argv = yargs_factory(process.argv.slice(2))
-    .scriptName(command_name)
-    .usage(
-      "Usage: $0 [options] <file|glob ...>" +
-        "\n\nDescription:" +
-        "\n  Summarize one or more files with the summarize_text prompt and write `[filename.ext].summarized.md` next to each input file.",
-    )
-    .wrap(terminal_width)
-    .option("refresh", {
-      alias: "r",
-      type: "boolean",
-      default: false,
-      describe:
-        "Regenerate summaries even when the output file already exists.",
-    })
-    .option("ai-platform", {
-      type: "string",
-      default: default_ai_platform,
-      choices: supported_ai_platforms,
-      describe: "AI platform adapter to use (defaults to project preference).",
-    })
-    .option("ai-model", {
-      type: "string",
-      describe: "Override the default model for the chosen AI platform.",
-    })
-    .option("ai-temperature", {
-      type: "number",
-      describe:
-        "Sampling temperature for the AI request (falls back to prompt defaults).",
-    })
-    .option("ai-max-tokens", {
-      type: "number",
-      describe:
-        "Maximum tokens for the AI response (falls back to prompt defaults).",
-    })
-    .option("batch-size", {
-      alias: "b",
-      type: "number",
-      default: 5,
-      describe:
-        "Maximum number of files to summarize in parallel (must be a positive integer).",
-    })
-    .option("retries", {
-      alias: "R",
-      type: "number",
-      default: 3,
-      describe:
-        "Maximum number of attempts per job when the AI call fails (must be at least 1).",
-    })
-    .example(
-      "$0 notes/**/*.md",
-      "Summarize every Markdown file inside the notes directory tree.",
-    )
-    .example(
-      "$0 report.md --refresh --ai-platform openai",
-      "Regenerate the summary for report.md with the OpenAI adapter even if it already exists.",
-    )
-    .example(
-      "$0 drafts/*.md --batch-size 5",
-      "Process multiple files concurrently with a custom batch size.",
-    )
-    .alias("h", "help")
-    .demandCommand(1, "Provide at least one file path or glob pattern.")
-    .epilog(
-      "Options: --refresh, --ai-platform, --ai-model, --ai-temperature, --ai-max-tokens, --batch-size, --retries." +
-        "\nExamples: text_summarize report.md | text_summarize docs/**/*.md",
-    ).argv;
-
-  const repo_root_path = path.resolve(__dirname, "..");
-  const prompt_source_path =
-    "/Users/hailang/Library/Mobile Documents/com~apple~CloudDocs/main/download/tool/prompt/summarize_text.build.md";
-
-  const logger = create_logger(chalk, command_name);
-
-  const prompt_file_path = await ensure_prompt_source("summarize_text", {
-    repo_root: repo_root_path,
-    external_path: prompt_source_path,
-    logger,
+  await run_text_prompt_batch_cli({
+    command_name,
+    description_lines: [
+      "Summarize one or more files with the summarize_text prompt.",
+      "Writes `[filename.ext].summarized.md` alongside each input file.",
+    ],
+    job_title: "Summarization",
+    job_noun: "summarization",
+    present_progress_label: "Summarizing",
+    past_tense_summary_label: "summarized",
+    output_suffix: ".summarized.md",
+    generated_suffixes: [".summarized.md"],
+    generated_file_skip_reason: "already summarized",
+    existing_output_skip_reason: "existing output",
+    prompt_name: "summarize_text",
+    prompt_external_path,
+    repo_root_path,
+    default_batch_size: 5,
+    default_retry_count: 3,
+    examples: [
+      {
+        description:
+          "Summarize every Markdown file inside the notes directory tree",
+        command: "$0 notes/**/*.md",
+      },
+      {
+        description:
+          "Regenerate the summary for report.md even if it already exists",
+        command: "$0 report.md --refresh",
+      },
+      {
+        description:
+          "Process multiple files concurrently with a custom batch size",
+        command: "$0 drafts/*.md --batch-size 5",
+      },
+    ],
   });
-
-  const resolved_input_files = expand_patterns(argv._, { cwd: process.cwd() });
-
-  const requested_batch_size = Number(argv["batch-size"]);
-  let batch_size = 5;
-  if (Number.isFinite(requested_batch_size) && requested_batch_size >= 1) {
-    batch_size = Math.floor(requested_batch_size);
-  } else {
-    logger.warn(
-      `Invalid --batch-size value (${argv["batch-size"]}); defaulting to ${batch_size}.`,
-    );
-  }
-
-  if (resolved_input_files.length === 0) {
-    logger.warn("No files matched the provided patterns.");
-    return;
-  }
-
-  const job_entries = [];
-
-  for (const absolute_input_path of resolved_input_files) {
-    const relative_input_path =
-      path.relative(process.cwd(), absolute_input_path) ||
-      path.basename(absolute_input_path);
-    const parsed_path = path.parse(absolute_input_path);
-    const output_file_path = path.join(
-      parsed_path.dir,
-      `${parsed_path.base}.summarized.md`,
-    );
-
-    const normalized_input_path = absolute_input_path.toLowerCase();
-    const is_generated_summary =
-      normalized_input_path.endsWith(".summarized.md");
-
-    let should_skip = false;
-    let skip_reason = null;
-
-    if (is_generated_summary) {
-      should_skip = true;
-      skip_reason = "already summarized";
-    } else if (!argv.refresh && (await file_has_content(output_file_path))) {
-      should_skip = true;
-      skip_reason = "existing output";
-    }
-
-    job_entries.push({
-      absolute_input_path,
-      relative_input_path,
-      output_file_path,
-      should_skip,
-      skip_reason,
-    });
-  }
-
-  const pending_jobs = job_entries.filter((entry) => !entry.should_skip);
-  const skipped_jobs = job_entries.filter((entry) => entry.should_skip);
-
-  if (skipped_jobs.length > 0) {
-    logger.info(
-      `Skipping ${skipped_jobs.length} file${
-        skipped_jobs.length === 1 ? "" : "s"
-      } before summarizing:`,
-    );
-    for (const job of skipped_jobs) {
-      const reason_suffix = job.skip_reason ? ` (${job.skip_reason})` : "";
-      console.log(chalk.gray(`  - ${job.relative_input_path}${reason_suffix}`));
-    }
-  }
-
-  if (pending_jobs.length === 0) {
-    logger.info("No files require summarization; outputs are up to date.");
-  } else {
-    logger.info(
-      `Preparing summaries for ${pending_jobs.length} file${
-        pending_jobs.length === 1 ? "" : "s"
-      } using batch size ${batch_size}...`,
-    );
-  }
-
-  const requested_retry_count = Number(argv.retries);
-  let max_retry_count = 3;
-  if (Number.isFinite(requested_retry_count) && requested_retry_count >= 1) {
-    max_retry_count = Math.floor(requested_retry_count);
-  } else {
-    logger.warn(
-      `Invalid --retries value (${argv.retries}); defaulting to ${max_retry_count}.`,
-    );
-  }
-
-  let processed_count = 0;
-  let failed_count = 0;
-  let total_attempt_count = 0;
-  let retry_attempt_count = 0;
-
-  const run_with_retries = async (operation, context_message) => {
-    let attempt = 0;
-    let last_error = null;
-    while (attempt < max_retry_count) {
-      attempt += 1;
-      total_attempt_count += 1;
-      try {
-        return await operation();
-      } catch (error) {
-        last_error = error;
-        if (attempt < max_retry_count) {
-          retry_attempt_count += 1;
-          logger.warn(
-            `${context_message} attempt ${attempt} failed: ${
-              error.message || String(error)
-            }. Retrying...`,
-          );
-        }
-      }
-    }
-    throw last_error;
-  };
-
-  const summarize_job = async (job) => {
-    const { absolute_input_path, relative_input_path, output_file_path } = job;
-
-    console.log(chalk.cyan(`- Summarizing: ${relative_input_path}`));
-
-    try {
-      await run_with_retries(
-        () =>
-          run_ai_command({
-            prompt_file: prompt_file_path,
-            input_file: absolute_input_path,
-            output_file: output_file_path,
-            repo_root: repo_root_path,
-            platform: argv["ai-platform"],
-            model: argv["ai-model"],
-            temperature: argv["ai-temperature"],
-            max_tokens: argv["ai-max-tokens"],
-            logger,
-          }),
-        `Summarization for ${relative_input_path}`,
-      );
-
-      const relative_output_path =
-        path.relative(process.cwd(), output_file_path) ||
-        path.basename(output_file_path);
-      console.log(chalk.green(`Saved: ${relative_output_path}`));
-      processed_count += 1;
-    } catch (error) {
-      failed_count += 1;
-      console.error(chalk.red(`Failed: ${relative_input_path}`));
-      console.error(chalk.red(error.message || String(error)));
-    }
-  };
-
-  for (let index = 0; index < pending_jobs.length; index += batch_size) {
-    const batch = pending_jobs.slice(index, index + batch_size);
-    await Promise.all(batch.map(summarize_job));
-  }
-
-  const summary_fragments = [
-    processed_count ? chalk.green(`${processed_count} summarized`) : null,
-    skipped_jobs.length ? chalk.gray(`${skipped_jobs.length} skipped`) : null,
-    failed_count ? chalk.red(`${failed_count} failed`) : null,
-  ]
-    .filter(Boolean)
-    .join(", ");
-
-  console.log(chalk.blue(`Done (${summary_fragments || "no actions"}).`));
-
-  const stats_summary_text = `total_jobs=${job_entries.length}, pending=${pending_jobs.length}, skipped=${skipped_jobs.length}, attempts=${total_attempt_count}, retries=${retry_attempt_count}, succeeded=${processed_count}, failed=${failed_count}`;
-
-  logger.info(`Statistics => ${stats_summary_text}`);
-
-  const stats_color_segments = [
-    chalk.blueBright(`total: ${job_entries.length}`),
-    chalk.cyanBright(`pending: ${pending_jobs.length}`),
-    chalk.gray(`skipped: ${skipped_jobs.length}`),
-    chalk.yellowBright(`attempts: ${total_attempt_count}`),
-    chalk.magentaBright(`retries: ${retry_attempt_count}`),
-    chalk.greenBright(`succeeded: ${processed_count}`),
-    chalk.redBright(`failed: ${failed_count}`),
-  ];
-
-  console.log(
-    chalk.magenta("Statistics"),
-    stats_color_segments.join(chalk.white(" | ")),
-  );
 })().catch((error) => {
   console.error(error);
   process.exitCode = 1;
 });
-
-function create_logger(chalk, command_name) {
-  const prefix = chalk.magenta(`[${command_name}]`);
-  return {
-    info: (message) => console.log(prefix, chalk.cyan(message)),
-    warn: (message) => console.warn(prefix, chalk.yellow(message)),
-    error: (message) => console.error(prefix, chalk.red(message)),
-  };
-}
