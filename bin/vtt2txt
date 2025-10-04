@@ -3,82 +3,358 @@
 const fs = require("fs");
 const path = require("path");
 const glob = require("glob");
-const { vttToPlainText } = require("vtt-to-text");
+const chalk = require("chalk");
 
-function showUsage(exitCode = 0) {
-  const cmd = path.basename(process.argv[1] || "vtt2txt");
-  console.log("Usage:");
-  console.log(`  ${cmd} <patterns...>`);
-  console.log("Example:");
-  console.log("  vtt2txt a/b/*.vtt c/d/*.vtt");
-  process.exit(exitCode);
-}
-
-const args = process.argv.slice(2);
-if (args.length === 0 || args.includes("--help") || args.includes("-h")) {
-  showUsage(args.length === 0 ? 1 : 0);
-}
-
-function normalizeAndDedupe(text) {
-  // Split to lines, trim, remove empties
-  const lines = text
-    .replace(/\r\n/g, "\n")
-    .replace(/\r/g, "\n")
-    .split("\n")
-    .map((l) => l.trim())
-    .filter((l) => l.length > 0)
-    // Filter out common WebVTT metadata that may slip through
-    .filter(
-      (l) =>
-        !/^WEBVTT\b/i.test(l) && !/^Kind:/i.test(l) && !/^Language:/i.test(l),
-    );
-
-  // Deduplicate consecutive identical lines only (preserve legitimate repeats later)
-  const deduped = [];
-  for (const l of lines) {
-    if (deduped.length === 0 || deduped[deduped.length - 1] !== l) {
-      deduped.push(l);
-    }
+const command_name = path.basename(process.argv[1] || "vtt2txt");
+const package_info = (() => {
+  try {
+    return require(path.resolve(__dirname, "..", "package.json"));
+  } catch (error) {
+    return { version: "0.0.0" };
   }
-  return deduped.join("\n");
+})();
+
+function show_usage(exit_code = 0) {
+  const lines = [
+    chalk.bold("Usage:"),
+    `  ${chalk.cyan(`${command_name} [options] <patterns...>`)}`,
+    "",
+    chalk.bold("Description:"),
+    `  ${chalk.white("Convert WebVTT subtitle files into neatly grouped transcripts.")}`,
+    `  ${chalk.white("Merges consecutive cues per speaker, collapses duplicates, and omits speaker labels when only one person is talking.")}`,
+    `  ${chalk.white("Globs are resolved locally, and outputs are written alongside the source with a .txt extension.")}`,
+    "",
+    chalk.bold("Options:"),
+    `  ${chalk.cyan("-h, --help")}       Show this help message and exit (default: false)`,
+    `  ${chalk.cyan("-v, --version")}    Print the tool version and exit (default: false)`,
+    `  ${chalk.cyan("--debug")}          Enable verbose debug logging (default: false)`,
+    `  ${chalk.cyan("--quiet")}          Suppress non-error output (default: false)`,
+    `  ${chalk.cyan("-d, --dry-run")}    Analyze files without writing results (default: false)`,
+    "",
+    chalk.bold("Examples:"),
+    `${chalk.gray("# Convert every VTT file under transcripts and write .txt siblings")}`,
+    `${chalk.white("$0 transcripts/**/*.vtt")}`,
+    "",
+    `${chalk.gray("# Preview the transcript output without writing any files")}`,
+    `${chalk.white("$0 --dry-run media/*.vtt")}`,
+    "",
+    `${chalk.gray("# Combine multiple glob patterns and keep quiet about successes")}`,
+    `${chalk.white("$0 --quiet assets/**/*.vtt captions/episode-*.vtt")}`,
+    "",
+    `${chalk.gray("# Use -- to stop option parsing when file names begin with dashes")}`,
+    `${chalk.white("$0 -- --weird-name.vtt more/*.vtt")}`,
+  ];
+
+  console.log(lines.join("\n"));
+  process.exit(exit_code);
 }
 
-function convertFile(filePath) {
-  const src = path.resolve(filePath);
-  const ext = path.extname(src);
-  const out = src.slice(0, -ext.length) + ".txt";
+function show_version() {
+  const version_label = package_info.version || "0.0.0";
+  console.log(`${command_name} ${chalk.green(version_label)}`);
+  process.exit(0);
+}
+
+function create_logger({ is_debug, is_quiet }) {
+  const debug_prefix = chalk.magenta("[debug]");
+  return {
+    info: (...messages) => {
+      if (!is_quiet) {
+        console.log(...messages);
+      }
+    },
+    success: (...messages) => {
+      if (!is_quiet) {
+        console.log(...messages);
+      }
+    },
+    warn: (...messages) => {
+      console.warn(...messages);
+    },
+    error: (...messages) => {
+      console.error(...messages);
+    },
+    debug: (...messages) => {
+      if (is_debug) {
+        console.log(debug_prefix, ...messages);
+      }
+    },
+  };
+}
+
+function extract_dialogue_lines(vtt_content) {
+  const normalized_text = vtt_content
+    .replace(/\uFEFF/g, "")
+    .replace(/\r\n?/g, "\n");
+
+  const dialogue_lines = [];
+  const raw_blocks = normalized_text.split(/\n{2,}/);
+
+  for (const block of raw_blocks) {
+    const lines = block
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+
+    if (lines.length === 0) {
+      continue;
+    }
+
+    if (
+      /^WEBVTT\b/i.test(lines[0]) ||
+      /^NOTE\b/i.test(lines[0]) ||
+      /^STYLE\b/i.test(lines[0])
+    ) {
+      continue;
+    }
+
+    let line_index = 0;
+
+    if (
+      lines[line_index] &&
+      !lines[line_index].includes("-->") &&
+      lines[line_index + 1] &&
+      lines[line_index + 1].includes("-->")
+    ) {
+      line_index += 1;
+    }
+
+    if (lines[line_index] && lines[line_index].includes("-->")) {
+      line_index += 1;
+    }
+
+    const text_lines = lines.slice(line_index);
+    if (text_lines.length === 0) {
+      continue;
+    }
+
+    dialogue_lines.push(...text_lines);
+  }
+
+  return dialogue_lines;
+}
+
+function sanitize_dialogue_lines(lines) {
+  const sanitized_lines = [];
+  const html_tag_pattern = /<[^>]+>/g;
+
+  for (const raw_line of lines) {
+    const stripped_line = raw_line.replace(html_tag_pattern, "").trim();
+
+    if (stripped_line.length === 0) {
+      continue;
+    }
+
+    if (/^Kind:/i.test(stripped_line) || /^Language:/i.test(stripped_line)) {
+      continue;
+    }
+
+    if (sanitized_lines[sanitized_lines.length - 1] === stripped_line) {
+      continue;
+    }
+
+    sanitized_lines.push(stripped_line);
+  }
+
+  return sanitized_lines;
+}
+
+function format_speaker_blocks(lines) {
+  const speaker_pattern = /^([^:：]+?)\s*[:：]\s*(.*)$/u;
+  const groups = [];
+  let current_group = null;
+
+  const start_group = (speaker_name) => {
+    current_group = { speaker: speaker_name, lines: [] };
+    groups.push(current_group);
+  };
+
+  for (const raw_line of lines) {
+    const line = raw_line.trim();
+
+    if (line.length === 0) {
+      current_group = null;
+      continue;
+    }
+
+    const match = line.match(speaker_pattern);
+
+    if (match) {
+      const speaker_name = match[1].trim();
+      const message = match[2].trim();
+
+      if (!current_group || current_group.speaker !== speaker_name) {
+        start_group(speaker_name);
+      }
+
+      if (message.length > 0) {
+        current_group.lines.push(message);
+      }
+      continue;
+    }
+
+    if (!current_group) {
+      start_group(null);
+    }
+    current_group.lines.push(line);
+  }
+
+  const unique_speakers = new Set(
+    groups
+      .map((group) => (group.speaker ? group.speaker.trim() : ""))
+      .filter((name) => name.length > 0),
+  );
+
+  const omit_speaker_labels =
+    unique_speakers.size > 0 && unique_speakers.size <= 1;
+
+  const blocks = groups
+    .map((group) => {
+      const block_lines = [];
+
+      if (group.speaker && !omit_speaker_labels) {
+        block_lines.push(`${group.speaker}:`);
+      }
+
+      block_lines.push(...group.lines);
+
+      const filtered_lines = block_lines.filter(
+        (entry) => entry.trim().length > 0,
+      );
+      return filtered_lines.join("\n");
+    })
+    .filter((block) => block.trim().length > 0);
+
+  return blocks.join("\n\n");
+}
+
+function convert_file(file_path, options, logger) {
+  const source_path = path.resolve(file_path);
+  const extension_name = path.extname(source_path);
+  const output_path = extension_name
+    ? source_path.slice(0, -extension_name.length) + ".txt"
+    : `${source_path}.txt`;
 
   try {
-    const content = fs.readFileSync(src, "utf8");
-    // Convert via robust parser that handles inline timestamps/tags
-    const plain = vttToPlainText(content);
-    const finalText = normalizeAndDedupe(plain);
-    fs.writeFileSync(out, finalText, "utf8");
-    console.log(`Converted: ${src} -> ${out}`);
+    const file_content = fs.readFileSync(source_path, "utf8");
+    const dialogue_lines = extract_dialogue_lines(file_content);
+    const sanitized_lines = sanitize_dialogue_lines(dialogue_lines);
+    const formatted_output = format_speaker_blocks(sanitized_lines);
+
+    if (formatted_output.trim().length === 0) {
+      logger.warn(
+        chalk.yellow(`No transcript content found in ${source_path}`),
+      );
+      return false;
+    }
+
+    if (options.is_dry_run) {
+      logger.info(
+        chalk.yellow(`[dry-run] ${source_path} -> ${output_path}`),
+        chalk.gray("(no file written)"),
+      );
+      logger.debug(formatted_output);
+      return true;
+    }
+
+    fs.writeFileSync(output_path, `${formatted_output}\n`, "utf8");
+    logger.success(
+      `${chalk.green("Converted:")} ${chalk.white(`${source_path} -> ${output_path}`)}`,
+    );
     return true;
-  } catch (err) {
-    console.error(`Error processing ${src}: ${err.message}`);
+  } catch (error) {
+    logger.error(
+      chalk.red(`Error processing ${source_path}: ${error.message}`),
+    );
     return false;
   }
 }
 
-let totalPatterns = 0;
-let totalFiles = 0;
-let converted = 0;
+const args = process.argv.slice(2);
+const run_settings = {
+  is_debug: false,
+  is_quiet: false,
+  is_dry_run: false,
+};
+const patterns = [];
+let parsing_options = true;
 
-for (const pattern of args) {
-  totalPatterns++;
-  const matches = glob.sync(pattern, { nodir: true, nocase: true });
-  if (matches.length === 0) {
-    console.log(`No files match pattern: ${pattern}`);
+for (const argument of args) {
+  if (parsing_options && (argument === "-h" || argument === "--help")) {
+    show_usage(0);
+  }
+
+  if (parsing_options && (argument === "-v" || argument === "--version")) {
+    show_version();
+  }
+
+  if (parsing_options && argument === "--debug") {
+    run_settings.is_debug = true;
     continue;
   }
-  for (const filePath of matches) {
-    totalFiles++;
-    if (convertFile(filePath)) converted++;
+
+  if (parsing_options && argument === "--quiet") {
+    run_settings.is_quiet = true;
+    continue;
+  }
+
+  if (parsing_options && (argument === "-d" || argument === "--dry-run")) {
+    run_settings.is_dry_run = true;
+    continue;
+  }
+
+  if (parsing_options && argument === "--") {
+    parsing_options = false;
+    continue;
+  }
+
+  if (parsing_options && argument.startsWith("-")) {
+    console.error(chalk.red(`Unknown option: ${argument}`));
+    show_usage(1);
+  }
+
+  patterns.push(argument);
+}
+
+if (patterns.length === 0) {
+  show_usage(1);
+}
+
+const logger = create_logger(run_settings);
+
+if (run_settings.is_debug) {
+  logger.debug(chalk.gray(`Patterns:`), patterns.join(", "));
+}
+
+let total_patterns = 0;
+let total_files = 0;
+let converted_count = 0;
+
+for (const pattern of patterns) {
+  total_patterns += 1;
+  const matched_files = glob.sync(pattern, { nocase: true, nodir: true });
+
+  if (matched_files.length === 0) {
+    logger.warn(chalk.yellow(`No files match pattern: ${pattern}`));
+    continue;
+  }
+
+  logger.debug(
+    chalk.gray(
+      `Matched ${matched_files.length} file(s) for pattern ${pattern}`,
+    ),
+  );
+
+  for (const file_path of matched_files) {
+    total_files += 1;
+
+    if (convert_file(file_path, run_settings, logger)) {
+      converted_count += 1;
+    }
   }
 }
 
-console.log(
-  `Done. Processed ${totalFiles} file(s) from ${totalPatterns} pattern(s). Converted: ${converted}.`,
-);
+const summary_message = `Processed ${total_files} file(s) from ${total_patterns} pattern(s). Converted: ${converted_count}.`;
+const summary_color =
+  converted_count === total_files ? chalk.green : chalk.yellow;
+logger.info(chalk.bold(summary_color(summary_message)));
