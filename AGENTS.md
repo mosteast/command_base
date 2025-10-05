@@ -90,3 +90,10 @@ Support following options if possible:
 - Debug info should be printed:
   - before each step/stage.
   - before IO operations.
+
+## Types of Functions
+
+### File Processing Related
+
+- Should skip output files and files that have already been processed.
+- Should have refresh option to reprocess files.
