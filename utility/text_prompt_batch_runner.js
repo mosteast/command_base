@@ -48,7 +48,9 @@ async function run_text_prompt_batch_cli(raw_config) {
   const positional_patterns = Array.isArray(argv._) ? argv._ : [];
 
   if (positional_patterns.length === 0) {
-    logger.error(chalk.red("No files provided. Supply at least one file or glob."));
+    logger.error(
+      chalk.red("No files provided. Supply at least one file or glob."),
+    );
     render_help({ command_name, package_info, config, chalk });
     process.exitCode = 1;
     return { status: "missing-input" };
@@ -209,7 +211,9 @@ async function run_text_prompt_batch_cli(raw_config) {
   const process_job = async (job) => {
     if (!argv.quiet) {
       console.log(
-        chalk.cyan(`- ${config.present_progress_label}: ${job.relative_input_path}`),
+        chalk.cyan(
+          `- ${config.present_progress_label}: ${job.relative_input_path}`,
+        ),
       );
     }
 
@@ -294,9 +298,14 @@ async function run_text_prompt_batch_cli(raw_config) {
     chalk.redBright(`failed: ${failed_count}`),
   ].filter(Boolean);
 
-  logger.info(`Statistics => ${stats_fragments.map(strip_ansi_codes).join(", ")}`);
+  logger.info(
+    `Statistics => ${stats_fragments.map(strip_ansi_codes).join(", ")}`,
+  );
   if (!argv.quiet) {
-    console.log(chalk.magenta("Statistics"), stats_fragments.join(chalk.white(" | ")));
+    console.log(
+      chalk.magenta("Statistics"),
+      stats_fragments.join(chalk.white(" | ")),
+    );
   }
 
   if (failed_count > 0) {
@@ -314,20 +323,29 @@ async function run_text_prompt_batch_cli(raw_config) {
 
 function normalize_config(raw_config) {
   if (!raw_config || typeof raw_config !== "object") {
-    throw new Error("run_text_prompt_batch_cli requires a configuration object");
+    throw new Error(
+      "run_text_prompt_batch_cli requires a configuration object",
+    );
   }
 
-  const command_name = raw_config.command_name ||
+  const command_name =
+    raw_config.command_name ||
     path.basename(process.argv[1] || "text_prompt_batch");
 
   const description_lines = Array.isArray(raw_config.description_lines)
     ? raw_config.description_lines
-    : [String(raw_config.description || "Process text files with an AI prompt.")];
+    : [
+        String(
+          raw_config.description || "Process text files with an AI prompt.",
+        ),
+      ];
 
   const job_title = raw_config.job_title || "Processing";
   const job_noun = raw_config.job_noun || "processing";
-  const present_progress_label = raw_config.present_progress_label || "Processing";
-  const past_tense_summary_label = raw_config.past_tense_summary_label || "processed";
+  const present_progress_label =
+    raw_config.present_progress_label || "Processing";
+  const past_tense_summary_label =
+    raw_config.past_tense_summary_label || "processed";
 
   const output_suffix = raw_config.output_suffix || ".processed.txt";
   const generated_suffixes = Array.isArray(raw_config.generated_suffixes)
@@ -358,7 +376,9 @@ function normalize_config(raw_config) {
     present_progress_label,
     past_tense_summary_label,
     output_suffix,
-    generated_suffixes: generated_suffixes.map((suffix) => suffix.toLowerCase()),
+    generated_suffixes: generated_suffixes.map((suffix) =>
+      suffix.toLowerCase(),
+    ),
     generated_file_skip_reason:
       raw_config.generated_file_skip_reason || "already processed",
     existing_output_skip_reason:
@@ -366,8 +386,7 @@ function normalize_config(raw_config) {
     custom_skip_reason: raw_config.custom_skip_reason || "skipped",
     prompt_name,
     prompt_external_path: raw_config.prompt_external_path,
-    repo_root_path:
-      raw_config.repo_root_path || path.resolve(__dirname, ".."),
+    repo_root_path: raw_config.repo_root_path || path.resolve(__dirname, ".."),
     default_batch_size: Number.isFinite(raw_config.default_batch_size)
       ? raw_config.default_batch_size
       : 5,
@@ -508,9 +527,7 @@ function render_help({ command_name, package_info, config, chalk }) {
     lines.push(`  ${chalk.white("$0 notes/**/*.md")}`);
   }
   lines.push("");
-  lines.push(
-    chalk.gray(`${command_name} v${package_info.version || "0.0.0"}`),
-  );
+  lines.push(chalk.gray(`${command_name} v${package_info.version || "0.0.0"}`));
 
   console.log(lines.join("\n"));
 }
@@ -527,19 +544,23 @@ function build_option_docs({ config, chalk }) {
     },
     {
       flag: "--debug",
-      description: "Enable verbose debug logging for troubleshooting (default: false)",
+      description:
+        "Enable verbose debug logging for troubleshooting (default: false)",
     },
     {
       flag: "--quiet",
-      description: "Suppress informational output; only warnings and errors remain (default: false)",
+      description:
+        "Suppress informational output; only warnings and errors remain (default: false)",
     },
     {
       flag: "-d, --dry-run",
-      description: "Preview actions without invoking the AI or writing files (default: false)",
+      description:
+        "Preview actions without invoking the AI or writing files (default: false)",
     },
     {
       flag: "-r, --refresh",
-      description: "Rebuild outputs even when destination files already exist (default: false)",
+      description:
+        "Rebuild outputs even when destination files already exist (default: false)",
     },
     {
       flag: "--ai-platform <name>",
@@ -551,11 +572,13 @@ function build_option_docs({ config, chalk }) {
     },
     {
       flag: "--ai-temperature <number>",
-      description: "Sampling temperature forwarded to the AI adapter when supported.",
+      description:
+        "Sampling temperature forwarded to the AI adapter when supported.",
     },
     {
       flag: "--ai-max-tokens <number>",
-      description: "Maximum response tokens forwarded to the AI adapter when supported.",
+      description:
+        "Maximum response tokens forwarded to the AI adapter when supported.",
     },
     {
       flag: "-b, --batch-size <n>",
@@ -627,7 +650,9 @@ function create_logger({ chalk, command_name, is_debug, is_quiet }) {
 
 function format_messages(messages) {
   return messages
-    .map((message) => (typeof message === "string" ? message : JSON.stringify(message)))
+    .map((message) =>
+      typeof message === "string" ? message : JSON.stringify(message),
+    )
     .join(" ");
 }
 

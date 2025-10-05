@@ -84,3 +84,9 @@ Support following options if possible:
 ## Global/System Variables
 
 - Variables that's only used in tools should be set in source/zshrc_custom
+
+## Debug
+
+- Debug info should be printed:
+  - before each step/stage.
+  - before IO operations.

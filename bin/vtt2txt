@@ -22,7 +22,7 @@ function show_usage(exit_code = 0) {
     chalk.bold("Description:"),
     `  ${chalk.white("Convert WebVTT subtitle files into neatly grouped transcripts.")}`,
     `  ${chalk.white("Merges consecutive cues per speaker, collapses duplicates, and omits speaker labels when only one person is talking.")}`,
-    `  ${chalk.white("Globs are resolved locally, and outputs are written alongside the source with a .txt extension.")}`,
+    `  ${chalk.white("Globs are resolved locally, and outputs are written alongside the source with .txt appended to the original name (e.g., a.vtt -> a.vtt.txt).")}`,
     "",
     chalk.bold("Options:"),
     `  ${chalk.cyan("-h, --help")}       Show this help message and exit (default: false)`,
@@ -230,10 +230,7 @@ function format_speaker_blocks(lines) {
 
 function convert_file(file_path, options, logger) {
   const source_path = path.resolve(file_path);
-  const extension_name = path.extname(source_path);
-  const output_path = extension_name
-    ? source_path.slice(0, -extension_name.length) + ".txt"
-    : `${source_path}.txt`;
+  const output_path = `${source_path}.txt`;
 
   try {
     const file_content = fs.readFileSync(source_path, "utf8");

@@ -12,20 +12,38 @@ const command_name = path.basename(process.argv[1] || "text_optimize_speech");
 const repo_root_path = path.resolve(__dirname, "..");
 const prompt_external_path =
   "/Users/hailang/Library/Mobile Documents/com~apple~CloudDocs/main/download/tool/prompt/text_optimize_speech.build.md";
+const generated_output_marker = ".optimized.speech";
+
+const build_output_path = (input_path) => {
+  const parsed_path = path.parse(input_path);
+  const output_extension = parsed_path.ext || "";
+
+  return path.join(
+    parsed_path.dir,
+    `${parsed_path.name}${generated_output_marker}${output_extension}`,
+  );
+};
+
+const is_generated_output = (file_path) => {
+  const parsed_path = path.parse(file_path);
+  const normalized_name = parsed_path.name.toLowerCase();
+
+  return normalized_name.endsWith(generated_output_marker);
+};
 
 (async () => {
   await run_text_prompt_batch_cli({
     command_name,
     description_lines: [
       "Polish narrative text for voice delivery using the text_optimize_speech prompt.",
-      "Writes `[filename.ext].speech_optimized.md` alongside each input file.",
+      "Writes `[filename.optimized.speech.ext]` alongside each input file.",
     ],
     job_title: "Speech optimization",
     job_noun: "speech optimization",
     present_progress_label: "Optimizing for speech",
     past_tense_summary_label: "speech optimized",
-    output_suffix: ".speech_optimized.md",
-    generated_suffixes: [".speech_optimized.md"],
+    output_suffix: generated_output_marker,
+    generated_suffixes: [],
     generated_file_skip_reason: "already optimized",
     existing_output_skip_reason: "existing output",
     prompt_name: "text_optimize_speech",
@@ -33,6 +51,12 @@ const prompt_external_path =
     repo_root_path,
     default_batch_size: 5,
     default_retry_count: 3,
+    build_output_path,
+    should_skip_job: ({ absolute_input_path }) => {
+      return is_generated_output(absolute_input_path)
+        ? { reason: "already optimized" }
+        : null;
+    },
     examples: [
       {
         description:
