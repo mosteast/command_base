@@ -5,6 +5,7 @@ const path = require("path");
 const minimist = require("minimist");
 const chalk = require("chalk");
 const { globSync } = require("glob");
+const { spawn } = require("child_process");
 
 const {
   transcribeWithWhisper: transcribe_with_whisper,
@@ -32,10 +33,127 @@ if (existing_extra_dirs.length) {
   process.env.PATH = `${existing_extra_dirs.join(path.delimiter)}${current_path ? `${path.delimiter}${current_path}` : ""}`;
 }
 
+const vtt2txt_script_path = path.resolve(__dirname, "vtt2txt");
 const label_start = chalk.bold.blue("START");
 const label_done = chalk.bold.green("DONE");
 const label_fail = chalk.bold.red("FAIL");
 const label_warn = chalk.bold.yellow("WARN");
+const label_convert = chalk.bold.cyan("TXT");
+const label_debug = chalk.bold.magenta("DEBUG");
+let has_checked_vtt2txt = false;
+let vtt2txt_is_available = false;
+
+function ensure_vtt2txt_available() {
+  if (has_checked_vtt2txt) {
+    if (!vtt2txt_is_available) {
+      throw new Error(`Required helper missing: ${vtt2txt_script_path}`);
+    }
+    return;
+  }
+
+  has_checked_vtt2txt = true;
+  try {
+    fs.accessSync(vtt2txt_script_path, fs.constants.R_OK);
+    vtt2txt_is_available = true;
+  } catch (error) {
+    vtt2txt_is_available = false;
+    throw new Error(
+      `Unable to access ${vtt2txt_script_path}: ${error.message}`,
+    );
+  }
+}
+
+function spawn_command(command_path, command_args, spawn_options = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command_path, command_args, {
+      stdio: spawn_options.stdio || "inherit",
+      env: spawn_options.env || process.env,
+    });
+
+    child.on("error", (error) => {
+      reject(error);
+    });
+
+    child.on("exit", (code, signal) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      const signal_note = signal ? ` (signal: ${signal})` : "";
+      reject(
+        new Error(
+          `Command ${command_path} exited with code ${code}${signal_note}`,
+        ),
+      );
+    });
+  });
+}
+
+async function run_vtt2txt(vtt_path, runtime_flags) {
+  ensure_vtt2txt_available();
+  const cli_args = [];
+
+  if (runtime_flags.is_debug_enabled) {
+    cli_args.push("--debug");
+  }
+  if (runtime_flags.is_quiet_mode) {
+    cli_args.push("--quiet");
+  }
+  if (runtime_flags.is_dry_run_enabled) {
+    cli_args.push("--dry-run");
+  }
+  cli_args.push(vtt_path);
+
+  if (runtime_flags.is_debug_enabled) {
+    console.log(
+      `${label_debug} Preparing to run vtt2txt: ${chalk.gray(
+        `${process.execPath} ${[vtt2txt_script_path, ...cli_args].join(" ")}`,
+      )}`,
+    );
+  }
+
+  await spawn_command(process.execPath, [vtt2txt_script_path, ...cli_args]);
+}
+
+async function ensure_text_sidecars(outputs, runtime_flags, source_label) {
+  if (runtime_flags.should_skip_txt_conversion) {
+    if (runtime_flags.is_debug_enabled) {
+      console.log(
+        `${label_debug} Skipping VTT to TXT conversion for ${source_label || "current file"} (flag enabled).`,
+      );
+    }
+    return;
+  }
+  if (!Array.isArray(outputs) || outputs.length === 0) {
+    return;
+  }
+
+  const vtt_entries = outputs.filter((entry) => {
+    if (!entry || !entry.path) return false;
+    if (entry.format && entry.format.toLowerCase() === "vtt") return true;
+    return entry.path.toLowerCase().endsWith(".vtt");
+  });
+
+  if (!vtt_entries.length) {
+    return;
+  }
+
+  for (const entry of vtt_entries) {
+    const source_path = entry.path;
+    const target_path = `${source_path}.txt`;
+    if (!runtime_flags.is_quiet_mode) {
+      console.log(
+        `${label_convert} ${source_label ? `${source_label} ` : ""}${chalk.white(path.basename(source_path))} ${chalk.gray("->")} ${chalk.green(target_path)}`,
+      );
+    }
+    if (runtime_flags.is_debug_enabled) {
+      console.log(
+        `${label_debug} Ensuring text transcript for ${chalk.white(source_path)}`,
+      );
+    }
+    await run_vtt2txt(source_path, runtime_flags);
+  }
+}
 
 function show_help() {
   const cmd = path.basename(process.argv[1] || "videos_transcribe_whisper");
@@ -73,6 +191,9 @@ function show_help() {
     "      --concurrency N       Number of files to process in parallel (default: 3)",
   );
   console.log("      --extra ARG           Additional CLI args (repeatable)");
+  console.log(
+    "      --skip-vtt2txt        Skip converting VTT outputs to TXT sidecars (default: false)",
+  );
   console.log("  -h, --help                Show this help message");
   console.log("");
   console.log(chalk.bold("Examples:"));
@@ -201,8 +322,14 @@ async function main() {
       "extra",
       "concurrency",
     ],
-    boolean: ["help"],
-    alias: { o: "output-dir", h: "help", c: "concurrency" },
+    boolean: ["help", "debug", "quiet", "dry-run", "dryRun", "skip-vtt2txt"],
+    alias: {
+      o: "output-dir",
+      h: "help",
+      c: "concurrency",
+      d: "dry-run",
+      q: "quiet",
+    },
   });
 
   if (argv.help) {
@@ -226,6 +353,13 @@ async function main() {
     }
 
     const { files: input_paths, unmatched } = expand_input_patterns(raw_inputs);
+
+    const runtime_flags = {
+      is_debug_enabled: Boolean(argv.debug),
+      is_quiet_mode: Boolean(argv.quiet),
+      is_dry_run_enabled: Boolean(argv["dry-run"] || argv.dryRun),
+      should_skip_txt_conversion: Boolean(argv["skip-vtt2txt"]),
+    };
 
     if (unmatched.length) {
       unmatched.forEach((pattern) => {
@@ -318,6 +452,8 @@ async function main() {
               ),
             );
           }
+
+          await ensure_text_sidecars(outputs, runtime_flags, file_label);
 
           console.log(`${label_done} ${file_label}`);
         } catch (error) {
