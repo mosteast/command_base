@@ -1,0 +1,314 @@
+#!/usr/bin/env node
+"use strict";
+
+const path = require("path");
+const { spawn } = require("child_process");
+const { promisify } = require("util");
+const { globSync } = require("glob");
+const chalk = require("chalk");
+const yargs = require("yargs");
+
+const exec_file = promisify(require("child_process").execFile);
+const package_json = require("../package.json");
+
+function create_logger({ quiet_mode, debug_mode }) {
+  const prefix = chalk.bold.cyan("g");
+
+  function format(message) {
+    return `${prefix} ${message}`;
+  }
+
+  return {
+    info(message) {
+      if (quiet_mode) return;
+      console.log(format(chalk.blue(message)));
+    },
+    success(message) {
+      if (quiet_mode) return;
+      console.log(format(chalk.green(message)));
+    },
+    warn(message) {
+      console.warn(format(chalk.yellow(message)));
+    },
+    error(message, error) {
+      console.error(format(chalk.red(message)));
+      if (debug_mode && error) {
+        console.error(chalk.red(error.stack || String(error)));
+      }
+    },
+    debug(message) {
+      if (!debug_mode || quiet_mode) return;
+      console.log(format(chalk.magenta(`[debug] ${message}`)));
+    },
+    command(command_text) {
+      if (quiet_mode) return;
+      console.log(format(chalk.cyan(command_text)));
+    },
+  };
+}
+
+function build_help_text(script_name) {
+  return [
+    chalk.bold("Usage"),
+    `  ${script_name} [options] [commit message]`,
+    "",
+    chalk.bold("Description"),
+    "  Stage changes, create a commit, and push to the upstream remote with",
+    "  colorful logging, glob-aware staging, and dry-run safety switches.",
+    "",
+    chalk.bold("Options"),
+    "  -m, --message <text>      Commit message (defaults to current UTC time)",
+    "  -p, --paths <pattern...>  Globs to stage instead of staging all files",
+    "  --no-push                 Skip the git push step",
+    "  --quiet                   Print only warnings and errors",
+    "  -d, --dry-run             Preview actions without executing git commands",
+    "  --debug                   Show verbose debug output",
+    "  -v, --version             Show version number and exit",
+    "  -h, --help                Show this help message",
+    "",
+    chalk.bold("Examples"),
+    "# Stage every change, commit with default message, and push",
+    "$0",
+    "",
+    "# Provide a custom commit message and skip the push step",
+    '$0 -m "Refine developer tooling" --no-push',
+    "",
+    "# Stage selected files using glob patterns before committing",
+    '$0 --paths "src/**/*.ts" "test/**/*.ts" -m "Update utilities"',
+  ].join("\n");
+}
+
+function parse_cli_arguments() {
+  const parser = yargs(process.argv.slice(2))
+    .scriptName("g")
+    .help(false)
+    .version(false)
+    .parserConfiguration({
+      "camel-case-expansion": false,
+      "strip-dashed": false,
+    })
+    .option("message", {
+      alias: "m",
+      type: "string",
+      describe: "Commit message (defaults to current UTC time)",
+    })
+    .option("paths", {
+      alias: "p",
+      type: "array",
+      describe: "Glob patterns to stage instead of staging everything",
+    })
+    .option("no-push", {
+      type: "boolean",
+      default: false,
+      describe: "Skip pushing to the upstream remote",
+    })
+    .option("dry-run", {
+      alias: "d",
+      type: "boolean",
+      default: false,
+      describe: "Preview the git commands without executing them",
+    })
+    .option("quiet", {
+      type: "boolean",
+      default: false,
+      describe: "Suppress informational logs",
+    })
+    .option("debug", {
+      type: "boolean",
+      default: false,
+      describe: "Enable verbose debug logging",
+    })
+    .option("version", {
+      alias: "v",
+      type: "boolean",
+      describe: "Show version number and exit",
+    })
+    .option("help", {
+      alias: "h",
+      type: "boolean",
+      describe: "Show this help message",
+    })
+    .strict(false)
+    .usage(build_help_text("g"))
+    .wrap(Math.min(yargs.terminalWidth(), 100));
+
+  const argv = parser.parse();
+
+  if (argv.help) {
+    console.log(build_help_text(argv.$0 || "g"));
+    process.exit(0);
+  }
+
+  if (argv.version) {
+    console.log(package_json.version);
+    process.exit(0);
+  }
+
+  const positional_arguments = (argv._ || []).map(String);
+  const commit_message =
+    argv.message && argv.message.trim().length > 0
+      ? argv.message.trim()
+      : positional_arguments.join(" ").trim() || new Date().toUTCString();
+
+  return {
+    commit_message,
+    stage_patterns: Array.isArray(argv.paths)
+      ? argv.paths.map((value) => String(value))
+      : [],
+    push_enabled: !argv["no-push"],
+    dry_run: Boolean(argv["dry-run"]),
+    quiet_mode: Boolean(argv.quiet),
+    debug_mode: Boolean(argv.debug),
+  };
+}
+
+function format_argument(argument) {
+  if (/[\s"'$\\]/.test(argument)) {
+    const escaped = argument.replace(/(["\\$`!])/g, "\\$1");
+    return `"${escaped}"`;
+  }
+  return argument;
+}
+
+function format_command(command, args) {
+  return [command, ...(args || []).map(format_argument)].join(" ");
+}
+
+async function collect_stage_targets(patterns, logger) {
+  if (!patterns || patterns.length === 0) {
+    logger.debug("No glob patterns provided; will stage all tracked changes.");
+    return [];
+  }
+
+  const resolved_paths = new Set();
+
+  for (const pattern of patterns) {
+    try {
+      const matches = globSync(pattern, {
+        nocase: false,
+        nodir: false,
+        absolute: false,
+        windowsPathsNoEscape: true,
+      });
+
+      if (matches.length === 0) {
+        logger.warn(
+          `Pattern ${pattern} matched no files; staging the literal path.`,
+        );
+        resolved_paths.add(pattern);
+        continue;
+      }
+
+      for (const match of matches) {
+        resolved_paths.add(path.relative(process.cwd(), match));
+      }
+    } catch (error) {
+      logger.warn(`Failed to expand pattern ${pattern}; staging it literally.`);
+      resolved_paths.add(pattern);
+    }
+  }
+
+  return Array.from(resolved_paths);
+}
+
+async function run_command(command, args, { dry_run, logger }) {
+  const printable = format_command(command, args);
+  logger.command(printable);
+
+  if (dry_run) {
+    logger.info("Dry-run enabled; command execution skipped.");
+    return;
+  }
+
+  logger.debug(`Spawning process: ${printable}`);
+
+  await new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      stdio: "inherit",
+    });
+
+    child.on("error", (error) => {
+      reject(error);
+    });
+
+    child.on("exit", (code) => {
+      if (code === 0) {
+        resolve();
+      } else {
+        reject(new Error(`${printable} exited with code ${code}`));
+      }
+    });
+  });
+}
+
+async function read_git_status() {
+  const { stdout } = await exec_file("git", ["status", "--porcelain"], {
+    encoding: "utf8",
+  });
+  return stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+async function main() {
+  const cli = parse_cli_arguments();
+  const logger = create_logger({
+    quiet_mode: cli.quiet_mode,
+    debug_mode: cli.debug_mode,
+  });
+
+  logger.debug("Parsed CLI options:");
+  logger.debug(JSON.stringify(cli, null, 2));
+
+  const stage_targets = await collect_stage_targets(cli.stage_patterns, logger);
+
+  logger.info("Starting git automation workflow.");
+
+  try {
+    if (stage_targets.length === 0) {
+      logger.info("Staging all tracked changes.");
+      await run_command("git", ["add", "--all"], {
+        dry_run: cli.dry_run,
+        logger,
+      });
+    } else {
+      logger.info("Staging files resolved from glob patterns.");
+      await run_command("git", ["add", "--", ...stage_targets], {
+        dry_run: cli.dry_run,
+        logger,
+      });
+    }
+
+    logger.debug("Checking git status for staged changes.");
+    const status_lines = cli.dry_run ? ["[dry-run]"] : await read_git_status();
+
+    if (status_lines.length === 0) {
+      logger.warn("No staged changes detected; skipping commit and push.");
+      return;
+    }
+
+    logger.info(`Creating commit with message: ${cli.commit_message}`);
+    await run_command("git", ["commit", "-m", cli.commit_message], {
+      dry_run: cli.dry_run,
+      logger,
+    });
+
+    if (cli.push_enabled) {
+      logger.info("Pushing commit to the configured upstream.");
+      await run_command("git", ["push"], {
+        dry_run: cli.dry_run,
+        logger,
+      });
+    } else {
+      logger.warn("Push step skipped by user request.");
+    }
+
+    logger.success("Git workflow completed successfully.");
+  } catch (error) {
+    logger.error("Git workflow failed.", error);
+    process.exitCode = 1;
+  }
+}
+
+main();

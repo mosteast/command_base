@@ -24,17 +24,7 @@ source "$HOME/code_base/command_base/secret/variable"
 plugins=(git)
 
 unalias g
-function g() {
-  gaa
-  # use first param as commit message if exists
-  # or use UTC date string as commit message
-  gcmsg "${1:-$(date -u)}"
-  ggp
-}
-
-function ggg() {
-  npm run format && g "$@"
-}
+unalias ggg 2>/dev/null
 
 PROMPT='%{$fg[cyan]%}%c $(git_prompt_info)'
 PROMPT+="

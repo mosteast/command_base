@@ -1,0 +1,278 @@
+#!/usr/bin/env node
+"use strict";
+
+const path = require("path");
+const { spawn } = require("child_process");
+const chalk = require("chalk");
+const yargs = require("yargs");
+
+const package_json = require("../package.json");
+
+function create_logger({ quiet_mode, debug_mode }) {
+  const prefix = chalk.bold.cyan("ggg");
+
+  function format(message) {
+    return `${prefix} ${message}`;
+  }
+
+  return {
+    info(message) {
+      if (quiet_mode) return;
+      console.log(format(chalk.blue(message)));
+    },
+    success(message) {
+      if (quiet_mode) return;
+      console.log(format(chalk.green(message)));
+    },
+    warn(message) {
+      console.warn(format(chalk.yellow(message)));
+    },
+    error(message, error) {
+      console.error(format(chalk.red(message)));
+      if (debug_mode && error) {
+        console.error(chalk.red(error.stack || String(error)));
+      }
+    },
+    debug(message) {
+      if (!debug_mode || quiet_mode) return;
+      console.log(format(chalk.magenta(`[debug] ${message}`)));
+    },
+    command(command_text) {
+      if (quiet_mode) return;
+      console.log(format(chalk.cyan(command_text)));
+    },
+  };
+}
+
+function build_help_text(script_name) {
+  return [
+    chalk.bold("Usage"),
+    `  ${script_name} [options] [commit message]`,
+    "",
+    chalk.bold("Description"),
+    "  Run the project formatter and delegate to the g command for staging,",
+    "  committing, and pushing, with dry-run and debug friendly output.",
+    "",
+    chalk.bold("Options"),
+    "  -m, --message <text>      Commit message passed to g",
+    "  -p, --paths <pattern...>  Globs forwarded to g for staging",
+    "  --no-push                 Skip the git push step via g",
+    "  --skip-format             Skip running npm run format",
+    "  --quiet                   Print only warnings and errors",
+    "  -d, --dry-run             Preview actions without executing commands",
+    "  --debug                   Show verbose debug output",
+    "  -v, --version             Show version number and exit",
+    "  -h, --help                Show this help message",
+    "",
+    chalk.bold("Examples"),
+    "# Format the project, commit with default message, and push",
+    "$0",
+    "",
+    "# Format, supply a commit message, and skip pushing",
+    '$0 -m "Align linting output" --no-push',
+    "",
+    "# Skip formatting and commit only selected files",
+    '$0 --skip-format --paths "src/**/*.ts" -m "Update tests"',
+  ].join("\n");
+}
+
+function parse_cli_arguments() {
+  const parser = yargs(process.argv.slice(2))
+    .scriptName("ggg")
+    .help(false)
+    .version(false)
+    .parserConfiguration({
+      "camel-case-expansion": false,
+      "strip-dashed": false,
+    })
+    .option("message", {
+      alias: "m",
+      type: "string",
+      describe: "Commit message forwarded to g",
+    })
+    .option("paths", {
+      alias: "p",
+      type: "array",
+      describe: "Glob patterns staged via g instead of staging all changes",
+    })
+    .option("no-push", {
+      type: "boolean",
+      default: false,
+      describe: "Do not push after committing",
+    })
+    .option("skip-format", {
+      type: "boolean",
+      default: false,
+      describe: "Skip running npm run format before delegating to g",
+    })
+    .option("dry-run", {
+      alias: "d",
+      type: "boolean",
+      default: false,
+      describe: "Preview the formatter and git automation without executing",
+    })
+    .option("quiet", {
+      type: "boolean",
+      default: false,
+      describe: "Suppress informational logs",
+    })
+    .option("debug", {
+      type: "boolean",
+      default: false,
+      describe: "Enable verbose debug logging",
+    })
+    .option("version", {
+      alias: "v",
+      type: "boolean",
+      describe: "Show version number and exit",
+    })
+    .option("help", {
+      alias: "h",
+      type: "boolean",
+      describe: "Show this help message",
+    })
+    .strict(false)
+    .usage(build_help_text("ggg"))
+    .wrap(Math.min(yargs.terminalWidth(), 100));
+
+  const argv = parser.parse();
+
+  if (argv.help) {
+    console.log(build_help_text(argv.$0 || "ggg"));
+    process.exit(0);
+  }
+
+  if (argv.version) {
+    console.log(package_json.version);
+    process.exit(0);
+  }
+
+  const positional_arguments = (argv._ || []).map(String);
+  const commit_message =
+    argv.message && argv.message.trim().length > 0
+      ? argv.message.trim()
+      : positional_arguments.join(" ").trim();
+
+  return {
+    commit_message,
+    stage_patterns: Array.isArray(argv.paths)
+      ? argv.paths.map((value) => String(value))
+      : [],
+    push_enabled: !argv["no-push"],
+    format_enabled: !argv["skip-format"],
+    dry_run: Boolean(argv["dry-run"]),
+    quiet_mode: Boolean(argv.quiet),
+    debug_mode: Boolean(argv.debug),
+  };
+}
+
+function format_argument(argument) {
+  if (/[\s"'$\\]/.test(argument)) {
+    const escaped = argument.replace(/(["\\$`!])/g, "\\$1");
+    return `"${escaped}"`;
+  }
+  return argument;
+}
+
+function format_command(command, args) {
+  return [command, ...(args || []).map(format_argument)].join(" ");
+}
+
+async function run_command(command, args, { dry_run, logger }) {
+  const printable = format_command(command, args);
+  logger.command(printable);
+
+  if (dry_run) {
+    logger.info("Dry-run enabled; command execution skipped.");
+    return;
+  }
+
+  logger.debug(`Spawning process: ${printable}`);
+
+  await new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      stdio: "inherit",
+    });
+
+    child.on("error", (error) => {
+      reject(error);
+    });
+
+    child.on("exit", (code) => {
+      if (code === 0) {
+        resolve();
+      } else {
+        reject(new Error(`${printable} exited with code ${code}`));
+      }
+    });
+  });
+}
+
+function build_g_arguments(cli) {
+  const args = [];
+
+  if (cli.commit_message && cli.commit_message.length > 0) {
+    args.push("--message", cli.commit_message);
+  }
+
+  for (const pattern of cli.stage_patterns) {
+    args.push("--paths", pattern);
+  }
+
+  if (!cli.push_enabled) {
+    args.push("--no-push");
+  }
+
+  if (cli.quiet_mode) {
+    args.push("--quiet");
+  }
+
+  if (cli.dry_run) {
+    args.push("--dry-run");
+  }
+
+  if (cli.debug_mode) {
+    args.push("--debug");
+  }
+
+  return args;
+}
+
+async function main() {
+  const cli = parse_cli_arguments();
+  const logger = create_logger({
+    quiet_mode: cli.quiet_mode,
+    debug_mode: cli.debug_mode,
+  });
+
+  logger.debug("Parsed CLI options:");
+  logger.debug(JSON.stringify(cli, null, 2));
+
+  try {
+    if (cli.format_enabled) {
+      logger.info("Running npm formatter before commit.");
+      await run_command("npm", ["run", "format"], {
+        dry_run: cli.dry_run,
+        logger,
+      });
+    } else {
+      logger.warn("Formatter step skipped by user request.");
+    }
+
+    const g_script_path = path.resolve(__dirname, "g");
+    const g_arguments = build_g_arguments(cli);
+
+    logger.info("Delegating to g for git automation.");
+    await run_command(g_script_path, g_arguments, {
+      dry_run: cli.dry_run,
+      logger,
+    });
+
+    logger.success("Formatter and git workflow completed successfully.");
+  } catch (error) {
+    logger.error("ggg workflow failed.", error);
+    process.exitCode = 1;
+  }
+}
+
+main();
