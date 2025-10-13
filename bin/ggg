@@ -1,278 +1,229 @@
-#!/usr/bin/env node
-"use strict";
+#!/usr/bin/env bash
 
-const path = require("path");
-const { spawn } = require("child_process");
-const chalk = require("chalk");
-const yargs = require("yargs");
+set -euo pipefail
 
-const package_json = require("../package.json");
+script_name=$(basename "$0")
+script_version="0.1.0"
 
-function create_logger({ quiet_mode, debug_mode }) {
-  const prefix = chalk.bold.cyan("ggg");
+GREEN=$'\033[32m'
+YELLOW=$'\033[33m'
+BLUE=$'\033[34m'
+RED=$'\033[31m'
+RESET=$'\033[0m'
 
-  function format(message) {
-    return `${prefix} ${message}`;
-  }
+LEVEL_ERROR=0
+LEVEL_WARN=1
+LEVEL_INFO=2
+LEVEL_DEBUG=3
 
-  return {
-    info(message) {
-      if (quiet_mode) return;
-      console.log(format(chalk.blue(message)));
-    },
-    success(message) {
-      if (quiet_mode) return;
-      console.log(format(chalk.green(message)));
-    },
-    warn(message) {
-      console.warn(format(chalk.yellow(message)));
-    },
-    error(message, error) {
-      console.error(format(chalk.red(message)));
-      if (debug_mode && error) {
-        console.error(chalk.red(error.stack || String(error)));
-      }
-    },
-    debug(message) {
-      if (!debug_mode || quiet_mode) return;
-      console.log(format(chalk.magenta(`[debug] ${message}`)));
-    },
-    command(command_text) {
-      if (quiet_mode) return;
-      console.log(format(chalk.cyan(command_text)));
-    },
-  };
+log_threshold=$LEVEL_INFO
+dry_run=false
+
+handle_error() {
+  local exit_code=$?
+  if [ "$exit_code" -ne 0 ]; then
+    log_error "Execution failed with exit code ${exit_code}."
+  fi
+  exit "$exit_code"
+}
+trap handle_error ERR
+
+print_help() {
+  cat <<EOF
+Usage: ${script_name} [options] [commit message]
+
+Description:
+  Format the project using npm scripts, then delegate to the 'g' command to stage, commit, and push changes.
+
+Options:
+  -h, --help        Show this help message and exit.
+  -v, --version     Show the version number and exit.
+  --debug           Print verbose debug logs.
+  --quiet           Print only warnings and errors.
+  -d, --dry-run     Print the planned actions without executing them.
+
+Examples:
+  # Format code, commit with a custom message, and push
+  \$0 "Run format before commit"
+
+  # Preview the commands without executing them
+  \$0 --dry-run
+
+  # Run with detailed logs and rely on the default timestamp commit message
+  \$0 --debug
+EOF
 }
 
-function build_help_text(script_name) {
-  return [
-    chalk.bold("Usage"),
-    `  ${script_name} [options] [commit message]`,
-    "",
-    chalk.bold("Description"),
-    "  Run the project formatter and delegate to the g command for staging,",
-    "  committing, and pushing, with dry-run and debug friendly output.",
-    "",
-    chalk.bold("Options"),
-    "  -m, --message <text>      Commit message passed to g",
-    "  -p, --paths <pattern...>  Globs forwarded to g for staging",
-    "  --no-push                 Skip the git push step via g",
-    "  --skip-format             Skip running npm run format",
-    "  --quiet                   Print only warnings and errors",
-    "  -d, --dry-run             Preview actions without executing commands",
-    "  --debug                   Show verbose debug output",
-    "  -v, --version             Show version number and exit",
-    "  -h, --help                Show this help message",
-    "",
-    chalk.bold("Examples"),
-    "# Format the project, commit with default message, and push",
-    "$0",
-    "",
-    "# Format, supply a commit message, and skip pushing",
-    '$0 -m "Align linting output" --no-push',
-    "",
-    "# Skip formatting and commit only selected files",
-    '$0 --skip-format --paths "src/**/*.ts" -m "Update tests"',
-  ].join("\n");
+print_version() {
+  echo "${script_version}"
 }
 
-function parse_cli_arguments() {
-  const parser = yargs(process.argv.slice(2))
-    .scriptName("ggg")
-    .help(false)
-    .version(false)
-    .parserConfiguration({
-      "camel-case-expansion": false,
-      "strip-dashed": false,
-    })
-    .option("message", {
-      alias: "m",
-      type: "string",
-      describe: "Commit message forwarded to g",
-    })
-    .option("paths", {
-      alias: "p",
-      type: "array",
-      describe: "Glob patterns staged via g instead of staging all changes",
-    })
-    .option("no-push", {
-      type: "boolean",
-      default: false,
-      describe: "Do not push after committing",
-    })
-    .option("skip-format", {
-      type: "boolean",
-      default: false,
-      describe: "Skip running npm run format before delegating to g",
-    })
-    .option("dry-run", {
-      alias: "d",
-      type: "boolean",
-      default: false,
-      describe: "Preview the formatter and git automation without executing",
-    })
-    .option("quiet", {
-      type: "boolean",
-      default: false,
-      describe: "Suppress informational logs",
-    })
-    .option("debug", {
-      type: "boolean",
-      default: false,
-      describe: "Enable verbose debug logging",
-    })
-    .option("version", {
-      alias: "v",
-      type: "boolean",
-      describe: "Show version number and exit",
-    })
-    .option("help", {
-      alias: "h",
-      type: "boolean",
-      describe: "Show this help message",
-    })
-    .strict(false)
-    .usage(build_help_text("ggg"))
-    .wrap(Math.min(yargs.terminalWidth(), 100));
+log_emit() {
+  local level=$1
+  local color=$2
+  local label=$3
+  shift 3
+  local message="$*"
 
-  const argv = parser.parse();
+  if [ "$log_threshold" -lt "$level" ]; then
+    return 0
+  fi
 
-  if (argv.help) {
-    console.log(build_help_text(argv.$0 || "ggg"));
-    process.exit(0);
-  }
-
-  if (argv.version) {
-    console.log(package_json.version);
-    process.exit(0);
-  }
-
-  const positional_arguments = (argv._ || []).map(String);
-  const commit_message =
-    argv.message && argv.message.trim().length > 0
-      ? argv.message.trim()
-      : positional_arguments.join(" ").trim();
-
-  return {
-    commit_message,
-    stage_patterns: Array.isArray(argv.paths)
-      ? argv.paths.map((value) => String(value))
-      : [],
-    push_enabled: !argv["no-push"],
-    format_enabled: !argv["skip-format"],
-    dry_run: Boolean(argv["dry-run"]),
-    quiet_mode: Boolean(argv.quiet),
-    debug_mode: Boolean(argv.debug),
-  };
+  if [ "$level" -le "$LEVEL_WARN" ]; then
+    >&2 printf "%b[%s]%b %s\n" "$color" "$label" "$RESET" "$message"
+  else
+    printf "%b[%s]%b %s\n" "$color" "$label" "$RESET" "$message"
+  fi
 }
 
-function format_argument(argument) {
-  if (/[\s"'$\\]/.test(argument)) {
-    const escaped = argument.replace(/(["\\$`!])/g, "\\$1");
-    return `"${escaped}"`;
-  }
-  return argument;
+log_error() {
+  log_emit "$LEVEL_ERROR" "$RED" "ERROR" "$*"
 }
 
-function format_command(command, args) {
-  return [command, ...(args || []).map(format_argument)].join(" ");
+log_warn() {
+  log_emit "$LEVEL_WARN" "$YELLOW" "WARN" "$*"
 }
 
-async function run_command(command, args, { dry_run, logger }) {
-  const printable = format_command(command, args);
-  logger.command(printable);
-
-  if (dry_run) {
-    logger.info("Dry-run enabled; command execution skipped.");
-    return;
-  }
-
-  logger.debug(`Spawning process: ${printable}`);
-
-  await new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
-      stdio: "inherit",
-    });
-
-    child.on("error", (error) => {
-      reject(error);
-    });
-
-    child.on("exit", (code) => {
-      if (code === 0) {
-        resolve();
-      } else {
-        reject(new Error(`${printable} exited with code ${code}`));
-      }
-    });
-  });
+log_info() {
+  log_emit "$LEVEL_INFO" "$GREEN" "INFO" "$*"
 }
 
-function build_g_arguments(cli) {
-  const args = [];
-
-  if (cli.commit_message && cli.commit_message.length > 0) {
-    args.push("--message", cli.commit_message);
-  }
-
-  for (const pattern of cli.stage_patterns) {
-    args.push("--paths", pattern);
-  }
-
-  if (!cli.push_enabled) {
-    args.push("--no-push");
-  }
-
-  if (cli.quiet_mode) {
-    args.push("--quiet");
-  }
-
-  if (cli.dry_run) {
-    args.push("--dry-run");
-  }
-
-  if (cli.debug_mode) {
-    args.push("--debug");
-  }
-
-  return args;
+log_debug() {
+  log_emit "$LEVEL_DEBUG" "$BLUE" "DEBUG" "$*"
 }
 
-async function main() {
-  const cli = parse_cli_arguments();
-  const logger = create_logger({
-    quiet_mode: cli.quiet_mode,
-    debug_mode: cli.debug_mode,
-  });
-
-  logger.debug("Parsed CLI options:");
-  logger.debug(JSON.stringify(cli, null, 2));
-
-  try {
-    if (cli.format_enabled) {
-      logger.info("Running npm formatter before commit.");
-      await run_command("npm", ["run", "format"], {
-        dry_run: cli.dry_run,
-        logger,
-      });
-    } else {
-      logger.warn("Formatter step skipped by user request.");
-    }
-
-    const g_script_path = path.resolve(__dirname, "g");
-    const g_arguments = build_g_arguments(cli);
-
-    logger.info("Delegating to g for git automation.");
-    await run_command(g_script_path, g_arguments, {
-      dry_run: cli.dry_run,
-      logger,
-    });
-
-    logger.success("Formatter and git workflow completed successfully.");
-  } catch (error) {
-    logger.error("ggg workflow failed.", error);
-    process.exitCode = 1;
-  }
+format_command() {
+  local formatted=""
+  local arg
+  for arg in "$@"; do
+    formatted+=$(printf '%q ' "$arg")
+  done
+  printf "%s" "${formatted% }"
 }
 
-main();
+ensure_dependency() {
+  local dependency=$1
+  log_debug "Verifying dependency: ${dependency}"
+  if ! which "$dependency" >/dev/null 2>&1; then
+    log_error "Required dependency '${dependency}' is not installed or not on PATH."
+    exit 1
+  fi
+}
+
+execute_step() {
+  local description=$1
+  shift
+  local command_str
+  command_str=$(format_command "$@")
+  log_debug "${description}"
+  log_debug "Command: ${command_str}"
+
+  if [ "$dry_run" = true ]; then
+    log_info "Dry run: ${command_str}"
+    return 0
+  fi
+
+  "$@"
+}
+
+run_formatter() {
+  execute_step "Running npm formatter." npm run format
+}
+
+delegate_to_g() {
+  local g_path=$1
+  shift
+  execute_step "Delegating to '${g_path}'." "$g_path" "$@"
+}
+
+run() {
+  local -a positional=()
+  local -a g_flags=()
+
+  while (($#)); do
+    case "$1" in
+      -h|--help)
+        print_help
+        exit 0
+        ;;
+      -v|--version)
+        print_version
+        exit 0
+        ;;
+      --debug)
+        log_threshold=$LEVEL_DEBUG
+        g_flags+=("--debug")
+        shift
+        ;;
+      --quiet)
+        log_threshold=$LEVEL_WARN
+        g_flags+=("--quiet")
+        shift
+        ;;
+      -d|--dry-run)
+        dry_run=true
+        g_flags+=("--dry-run")
+        shift
+        ;;
+      --)
+        shift
+        while (($#)); do
+          positional+=("$1")
+          shift
+        done
+        ;;
+      -*)
+        log_error "Unknown option: $1"
+        exit 1
+        ;;
+      *)
+        positional+=("$1")
+        shift
+        ;;
+    esac
+  done
+
+  local commit_message=""
+  if [ "${#positional[@]}" -gt 0 ]; then
+    commit_message="${positional[*]}"
+  fi
+
+  ensure_dependency npm
+  ensure_dependency g
+
+  local g_path
+  log_debug "Locating 'g' command via which."
+  log_debug "Command: which g"
+  g_path=$(which g)
+
+  if [ "$dry_run" = true ]; then
+    log_info "Dry run: $(format_command npm run format)"
+    local -a delegate_args=("$g_path")
+    if [ "${#g_flags[@]}" -gt 0 ]; then
+      delegate_args+=("${g_flags[@]}")
+    fi
+    if [ -n "$commit_message" ]; then
+      delegate_args+=("$commit_message")
+    fi
+    log_info "Dry run: $(format_command "${delegate_args[@]}")"
+    return 0
+  fi
+
+  run_formatter
+
+  if [ -n "$commit_message" ]; then
+    if [ "${#g_flags[@]}" -gt 0 ]; then
+      delegate_to_g "$g_path" "${g_flags[@]}" "$commit_message"
+    else
+      delegate_to_g "$g_path" "$commit_message"
+    fi
+  else
+    if [ "${#g_flags[@]}" -gt 0 ]; then
+      delegate_to_g "$g_path" "${g_flags[@]}"
+    else
+      delegate_to_g "$g_path"
+    fi
+  fi
+}
+
+run "$@"

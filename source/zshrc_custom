@@ -23,8 +23,7 @@ source "$HOME/code_base/command_base/secret/variable"
 
 plugins=(git)
 
-unalias g
-unalias ggg 2>/dev/null
+unalias g 2>/dev/null
 
 PROMPT='%{$fg[cyan]%}%c $(git_prompt_info)'
 PROMPT+="

@@ -1,314 +1,305 @@
-#!/usr/bin/env node
-"use strict";
+#!/usr/bin/env bash
 
-const path = require("path");
-const { spawn } = require("child_process");
-const { promisify } = require("util");
-const { globSync } = require("glob");
-const chalk = require("chalk");
-const yargs = require("yargs");
+set -euo pipefail
 
-const exec_file = promisify(require("child_process").execFile);
-const package_json = require("../package.json");
+script_name=$(basename "$0")
+script_version="0.1.0"
 
-function create_logger({ quiet_mode, debug_mode }) {
-  const prefix = chalk.bold.cyan("g");
+GREEN=$'\033[32m'
+YELLOW=$'\033[33m'
+BLUE=$'\033[34m'
+RED=$'\033[31m'
+RESET=$'\033[0m'
 
-  function format(message) {
-    return `${prefix} ${message}`;
-  }
+LEVEL_ERROR=0
+LEVEL_WARN=1
+LEVEL_INFO=2
+LEVEL_DEBUG=3
 
-  return {
-    info(message) {
-      if (quiet_mode) return;
-      console.log(format(chalk.blue(message)));
-    },
-    success(message) {
-      if (quiet_mode) return;
-      console.log(format(chalk.green(message)));
-    },
-    warn(message) {
-      console.warn(format(chalk.yellow(message)));
-    },
-    error(message, error) {
-      console.error(format(chalk.red(message)));
-      if (debug_mode && error) {
-        console.error(chalk.red(error.stack || String(error)));
-      }
-    },
-    debug(message) {
-      if (!debug_mode || quiet_mode) return;
-      console.log(format(chalk.magenta(`[debug] ${message}`)));
-    },
-    command(command_text) {
-      if (quiet_mode) return;
-      console.log(format(chalk.cyan(command_text)));
-    },
-  };
+log_threshold=$LEVEL_INFO
+dry_run=false
+
+handle_error() {
+  local exit_code=$?
+  if [ "$exit_code" -ne 0 ]; then
+    log_error "Execution failed with exit code ${exit_code}."
+  fi
+  exit "$exit_code"
+}
+trap handle_error ERR
+
+print_help() {
+  cat <<EOF
+Usage: ${script_name} [options] [commit message]
+
+Description:
+  Stage all changes, create a commit, and push the current branch to its configured upstream.
+
+Options:
+  -h, --help        Show this help message and exit.
+  -v, --version     Show the version number and exit.
+  --debug           Print verbose debug logs.
+  --quiet           Print only warnings and errors.
+  -d, --dry-run     Print the planned actions without executing them.
+
+Examples:
+  # Commit all changes with a custom message
+  \$0 "Add payment gateway integration"
+
+  # Preview actions without committing or pushing
+  \$0 --dry-run
+
+  # Commit using a UTC timestamp as the message with debug logs
+  \$0 --debug
+EOF
 }
 
-function build_help_text(script_name) {
-  return [
-    chalk.bold("Usage"),
-    `  ${script_name} [options] [commit message]`,
-    "",
-    chalk.bold("Description"),
-    "  Stage changes, create a commit, and push to the upstream remote with",
-    "  colorful logging, glob-aware staging, and dry-run safety switches.",
-    "",
-    chalk.bold("Options"),
-    "  -m, --message <text>      Commit message (defaults to current UTC time)",
-    "  -p, --paths <pattern...>  Globs to stage instead of staging all files",
-    "  --no-push                 Skip the git push step",
-    "  --quiet                   Print only warnings and errors",
-    "  -d, --dry-run             Preview actions without executing git commands",
-    "  --debug                   Show verbose debug output",
-    "  -v, --version             Show version number and exit",
-    "  -h, --help                Show this help message",
-    "",
-    chalk.bold("Examples"),
-    "# Stage every change, commit with default message, and push",
-    "$0",
-    "",
-    "# Provide a custom commit message and skip the push step",
-    '$0 -m "Refine developer tooling" --no-push',
-    "",
-    "# Stage selected files using glob patterns before committing",
-    '$0 --paths "src/**/*.ts" "test/**/*.ts" -m "Update utilities"',
-  ].join("\n");
+print_version() {
+  echo "${script_version}"
 }
 
-function parse_cli_arguments() {
-  const parser = yargs(process.argv.slice(2))
-    .scriptName("g")
-    .help(false)
-    .version(false)
-    .parserConfiguration({
-      "camel-case-expansion": false,
-      "strip-dashed": false,
-    })
-    .option("message", {
-      alias: "m",
-      type: "string",
-      describe: "Commit message (defaults to current UTC time)",
-    })
-    .option("paths", {
-      alias: "p",
-      type: "array",
-      describe: "Glob patterns to stage instead of staging everything",
-    })
-    .option("no-push", {
-      type: "boolean",
-      default: false,
-      describe: "Skip pushing to the upstream remote",
-    })
-    .option("dry-run", {
-      alias: "d",
-      type: "boolean",
-      default: false,
-      describe: "Preview the git commands without executing them",
-    })
-    .option("quiet", {
-      type: "boolean",
-      default: false,
-      describe: "Suppress informational logs",
-    })
-    .option("debug", {
-      type: "boolean",
-      default: false,
-      describe: "Enable verbose debug logging",
-    })
-    .option("version", {
-      alias: "v",
-      type: "boolean",
-      describe: "Show version number and exit",
-    })
-    .option("help", {
-      alias: "h",
-      type: "boolean",
-      describe: "Show this help message",
-    })
-    .strict(false)
-    .usage(build_help_text("g"))
-    .wrap(Math.min(yargs.terminalWidth(), 100));
+log_emit() {
+  local level=$1
+  local color=$2
+  local label=$3
+  shift 3
+  local message="$*"
 
-  const argv = parser.parse();
+  if [ "$log_threshold" -lt "$level" ]; then
+    return 0
+  fi
 
-  if (argv.help) {
-    console.log(build_help_text(argv.$0 || "g"));
-    process.exit(0);
-  }
-
-  if (argv.version) {
-    console.log(package_json.version);
-    process.exit(0);
-  }
-
-  const positional_arguments = (argv._ || []).map(String);
-  const commit_message =
-    argv.message && argv.message.trim().length > 0
-      ? argv.message.trim()
-      : positional_arguments.join(" ").trim() || new Date().toUTCString();
-
-  return {
-    commit_message,
-    stage_patterns: Array.isArray(argv.paths)
-      ? argv.paths.map((value) => String(value))
-      : [],
-    push_enabled: !argv["no-push"],
-    dry_run: Boolean(argv["dry-run"]),
-    quiet_mode: Boolean(argv.quiet),
-    debug_mode: Boolean(argv.debug),
-  };
+  if [ "$level" -le "$LEVEL_WARN" ]; then
+    >&2 printf "%b[%s]%b %s\n" "$color" "$label" "$RESET" "$message"
+  else
+    printf "%b[%s]%b %s\n" "$color" "$label" "$RESET" "$message"
+  fi
 }
 
-function format_argument(argument) {
-  if (/[\s"'$\\]/.test(argument)) {
-    const escaped = argument.replace(/(["\\$`!])/g, "\\$1");
-    return `"${escaped}"`;
-  }
-  return argument;
+log_error() {
+  log_emit "$LEVEL_ERROR" "$RED" "ERROR" "$*"
 }
 
-function format_command(command, args) {
-  return [command, ...(args || []).map(format_argument)].join(" ");
+log_warn() {
+  log_emit "$LEVEL_WARN" "$YELLOW" "WARN" "$*"
 }
 
-async function collect_stage_targets(patterns, logger) {
-  if (!patterns || patterns.length === 0) {
-    logger.debug("No glob patterns provided; will stage all tracked changes.");
-    return [];
-  }
-
-  const resolved_paths = new Set();
-
-  for (const pattern of patterns) {
-    try {
-      const matches = globSync(pattern, {
-        nocase: false,
-        nodir: false,
-        absolute: false,
-        windowsPathsNoEscape: true,
-      });
-
-      if (matches.length === 0) {
-        logger.warn(
-          `Pattern ${pattern} matched no files; staging the literal path.`,
-        );
-        resolved_paths.add(pattern);
-        continue;
-      }
-
-      for (const match of matches) {
-        resolved_paths.add(path.relative(process.cwd(), match));
-      }
-    } catch (error) {
-      logger.warn(`Failed to expand pattern ${pattern}; staging it literally.`);
-      resolved_paths.add(pattern);
-    }
-  }
-
-  return Array.from(resolved_paths);
+log_info() {
+  log_emit "$LEVEL_INFO" "$GREEN" "INFO" "$*"
 }
 
-async function run_command(command, args, { dry_run, logger }) {
-  const printable = format_command(command, args);
-  logger.command(printable);
-
-  if (dry_run) {
-    logger.info("Dry-run enabled; command execution skipped.");
-    return;
-  }
-
-  logger.debug(`Spawning process: ${printable}`);
-
-  await new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
-      stdio: "inherit",
-    });
-
-    child.on("error", (error) => {
-      reject(error);
-    });
-
-    child.on("exit", (code) => {
-      if (code === 0) {
-        resolve();
-      } else {
-        reject(new Error(`${printable} exited with code ${code}`));
-      }
-    });
-  });
+log_debug() {
+  log_emit "$LEVEL_DEBUG" "$BLUE" "DEBUG" "$*"
 }
 
-async function read_git_status() {
-  const { stdout } = await exec_file("git", ["status", "--porcelain"], {
-    encoding: "utf8",
-  });
-  return stdout
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean);
+format_command() {
+  local formatted=""
+  local arg
+  for arg in "$@"; do
+    formatted+=$(printf '%q ' "$arg")
+  done
+  printf "%s" "${formatted% }"
 }
 
-async function main() {
-  const cli = parse_cli_arguments();
-  const logger = create_logger({
-    quiet_mode: cli.quiet_mode,
-    debug_mode: cli.debug_mode,
-  });
-
-  logger.debug("Parsed CLI options:");
-  logger.debug(JSON.stringify(cli, null, 2));
-
-  const stage_targets = await collect_stage_targets(cli.stage_patterns, logger);
-
-  logger.info("Starting git automation workflow.");
-
-  try {
-    if (stage_targets.length === 0) {
-      logger.info("Staging all tracked changes.");
-      await run_command("git", ["add", "--all"], {
-        dry_run: cli.dry_run,
-        logger,
-      });
-    } else {
-      logger.info("Staging files resolved from glob patterns.");
-      await run_command("git", ["add", "--", ...stage_targets], {
-        dry_run: cli.dry_run,
-        logger,
-      });
-    }
-
-    logger.debug("Checking git status for staged changes.");
-    const status_lines = cli.dry_run ? ["[dry-run]"] : await read_git_status();
-
-    if (status_lines.length === 0) {
-      logger.warn("No staged changes detected; skipping commit and push.");
-      return;
-    }
-
-    logger.info(`Creating commit with message: ${cli.commit_message}`);
-    await run_command("git", ["commit", "-m", cli.commit_message], {
-      dry_run: cli.dry_run,
-      logger,
-    });
-
-    if (cli.push_enabled) {
-      logger.info("Pushing commit to the configured upstream.");
-      await run_command("git", ["push"], {
-        dry_run: cli.dry_run,
-        logger,
-      });
-    } else {
-      logger.warn("Push step skipped by user request.");
-    }
-
-    logger.success("Git workflow completed successfully.");
-  } catch (error) {
-    logger.error("Git workflow failed.", error);
-    process.exitCode = 1;
-  }
+ensure_dependency() {
+  local dependency=$1
+  log_debug "Verifying dependency: ${dependency}"
+  if ! which "$dependency" >/dev/null 2>&1; then
+    log_error "Required dependency '${dependency}' is not installed or not on PATH."
+    exit 1
+  fi
 }
 
-main();
+execute_step() {
+  local description=$1
+  shift
+  local command_str
+  command_str=$(format_command "$@")
+  log_debug "${description}"
+  log_debug "Command: ${command_str}"
+
+  if [ "$dry_run" = true ]; then
+    log_info "Dry run: ${command_str}"
+    return 0
+  fi
+
+  "$@"
+}
+
+verify_git_repository() {
+  log_debug "Checking if current directory is inside a Git repository."
+  log_debug "Command: git rev-parse --is-inside-work-tree"
+  if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    log_error "This command must be run inside a Git repository."
+    exit 1
+  fi
+}
+
+collect_commit_message() {
+  local provided_message=$1
+  if [ -n "$provided_message" ]; then
+    echo "$provided_message"
+    return
+  fi
+
+  log_debug "No commit message provided; generating UTC timestamp."
+  log_debug 'Command: date -u +"%Y-%m-%dT%H:%M:%SZ"'
+  date -u +"%Y-%m-%dT%H:%M:%SZ"
+}
+
+confirm_pending_changes() {
+  log_debug "Inspecting repository status for staged or working tree changes."
+  log_debug "Command: git diff --quiet --ignore-submodules --exit-code"
+  if git diff --quiet --ignore-submodules --exit-code; then
+    log_debug "Command: git diff --cached --quiet --ignore-submodules --exit-code"
+    if git diff --cached --quiet --ignore-submodules --exit-code; then
+      log_warn "No changes detected; nothing to commit or push."
+      exit 0
+    fi
+  fi
+}
+
+get_current_branch() {
+  log_debug "Command: git rev-parse --abbrev-ref HEAD"
+  git rev-parse --abbrev-ref HEAD
+}
+
+detect_default_remote() {
+  log_debug "Detecting default Git remote."
+  log_debug "Command: git remote"
+  local remote_list
+  remote_list=$(git remote)
+  if [ -z "$remote_list" ]; then
+    log_error "No Git remotes configured; cannot push."
+    exit 1
+  fi
+
+  if printf '%s\n' "$remote_list" | grep -qx 'origin'; then
+    log_debug "Using remote 'origin'."
+    echo "origin"
+    return
+  fi
+
+  local selected_remote
+  selected_remote=$(printf '%s\n' "$remote_list" | head -n 1)
+  if [ -z "$selected_remote" ]; then
+    log_error "Failed to determine a Git remote."
+    exit 1
+  fi
+  log_warn "Remote 'origin' not found; using '${selected_remote}'."
+  echo "$selected_remote"
+}
+
+commit_changes() {
+  local message=$1
+
+  execute_step "Creating commit." git commit -m "$message"
+}
+
+push_changes() {
+  log_debug "Determining current branch for push."
+  local current_branch
+  current_branch=$(get_current_branch)
+  log_debug "Command: git rev-parse --abbrev-ref --symbolic-full-name @{u}"
+  if git rev-parse --abbrev-ref --symbolic-full-name "@{u}" >/dev/null 2>&1; then
+    log_debug "Branch '${current_branch}' already has an upstream configured."
+    execute_step "Pushing branch '${current_branch}' to its upstream." git push
+    log_info "Branch '${current_branch}' pushed successfully."
+  else
+    log_warn "Branch '${current_branch}' has no upstream configured."
+    local remote
+    remote=$(detect_default_remote)
+    execute_step "Pushing branch '${current_branch}' to '${remote}' and setting upstream." git push --set-upstream "$remote" "$current_branch"
+    log_info "Branch '${current_branch}' pushed and upstream set to '${remote}/${current_branch}'."
+  fi
+}
+
+run() {
+  local commit_message_input=""
+  local -a positional=()
+
+  while (($#)); do
+    case "$1" in
+      -h|--help)
+        print_help
+        exit 0
+        ;;
+      -v|--version)
+        print_version
+        exit 0
+        ;;
+      --debug)
+        log_threshold=$LEVEL_DEBUG
+        shift
+        ;;
+      --quiet)
+        log_threshold=$LEVEL_WARN
+        shift
+        ;;
+      -d|--dry-run)
+        dry_run=true
+        shift
+        ;;
+      --)
+        shift
+        while (($#)); do
+          positional+=("$1")
+          shift
+        done
+        ;;
+      -*)
+        log_error "Unknown option: $1"
+        exit 1
+        ;;
+      *)
+        positional+=("$1")
+        shift
+        ;;
+    esac
+  done
+
+  if [ "${#positional[@]}" -gt 0 ]; then
+    commit_message_input="${positional[*]}"
+  fi
+
+  ensure_dependency git
+  ensure_dependency date
+  verify_git_repository
+
+  execute_step "Staging all changes." git add --all
+
+  if [ "$dry_run" = false ]; then
+    confirm_pending_changes
+  else
+    log_debug "Skipping change detection in dry-run mode."
+  fi
+
+  local commit_message
+  commit_message=$(collect_commit_message "$commit_message_input")
+  log_info "Using commit message: ${commit_message}"
+
+  if [ "$dry_run" = true ]; then
+    log_debug "Dry-run mode active; skipping commit and push."
+    local commit_command
+    commit_command=$(format_command git commit -m "$commit_message")
+    log_info "Dry run: ${commit_command}"
+    local current_branch
+    current_branch=$(get_current_branch)
+    log_debug "Command: git rev-parse --abbrev-ref --symbolic-full-name @{u}"
+    if git rev-parse --abbrev-ref --symbolic-full-name "@{u}" >/dev/null 2>&1; then
+      log_debug "Branch '${current_branch}' already has an upstream configured."
+      log_info "Dry run: $(format_command git push)"
+    else
+      log_warn "Branch '${current_branch}' has no upstream configured."
+      local remote
+      remote=$(detect_default_remote)
+      log_info "Dry run: $(format_command git push --set-upstream "$remote" "$current_branch")"
+    fi
+    return 0
+  fi
+
+  commit_changes "$commit_message"
+  push_changes
+}
+
+run "$@"
