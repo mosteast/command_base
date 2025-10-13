@@ -18,6 +18,9 @@ LEVEL_DEBUG=3
 
 log_threshold=$LEVEL_INFO
 dry_run=false
+has_staged_changes=false
+has_branch_ahead=false
+has_upstream=false
 
 handle_error() {
   local exit_code=$?
@@ -147,15 +150,46 @@ collect_commit_message() {
   date -u +"%Y-%m-%dT%H:%M:%SZ"
 }
 
-confirm_pending_changes() {
-  log_debug "Inspecting repository status for staged or working tree changes."
+assess_repository_state() {
+  has_staged_changes=false
+  has_branch_ahead=false
+  has_upstream=false
+
+  log_debug "Assessing repository state after staging."
+  log_debug "Command: git diff --cached --quiet --ignore-submodules --exit-code"
+  if ! git diff --cached --quiet --ignore-submodules --exit-code; then
+    has_staged_changes=true
+    log_debug "Staged changes detected."
+  else
+    log_debug "No staged changes detected."
+  fi
+
   log_debug "Command: git diff --quiet --ignore-submodules --exit-code"
-  if git diff --quiet --ignore-submodules --exit-code; then
-    log_debug "Command: git diff --cached --quiet --ignore-submodules --exit-code"
-    if git diff --cached --quiet --ignore-submodules --exit-code; then
-      log_warn "No changes detected; nothing to commit or push."
-      exit 0
+  if ! git diff --quiet --ignore-submodules --exit-code; then
+    log_warn "Unstaged changes remain after staging. Review required before committing."
+  fi
+
+  log_debug "Command: git rev-parse --abbrev-ref --symbolic-full-name @{u}"
+  if git rev-parse --abbrev-ref --symbolic-full-name "@{u}" >/dev/null 2>&1; then
+    has_upstream=true
+    log_debug "Command: git rev-list --left-right --count @{u}...HEAD"
+    local ahead_output
+    ahead_output=$(git rev-list --left-right --count "@{u}...HEAD")
+    local ahead_count=""
+    read -r _ ahead_count <<<"$ahead_output"
+    if [ -n "$ahead_count" ] && [ "$ahead_count" -gt 0 ]; then
+      has_branch_ahead=true
+      log_debug "HEAD is ahead of upstream by ${ahead_count} commits."
+    else
+      log_debug "HEAD is not ahead of upstream."
     fi
+  else
+    log_warn "Current branch has no upstream configured."
+  fi
+
+  if [ "$has_staged_changes" = false ] && [ "$has_upstream" = true ] && [ "$has_branch_ahead" = false ]; then
+    log_warn "No staged changes and branch is up to date with upstream; nothing to do."
+    exit 0
   fi
 }
 
@@ -268,38 +302,47 @@ run() {
 
   execute_step "Staging all changes." git add --all
 
-  if [ "$dry_run" = false ]; then
-    confirm_pending_changes
-  else
-    log_debug "Skipping change detection in dry-run mode."
-  fi
+  assess_repository_state
 
   local commit_message
   commit_message=$(collect_commit_message "$commit_message_input")
   log_info "Using commit message: ${commit_message}"
 
   if [ "$dry_run" = true ]; then
-    log_debug "Dry-run mode active; skipping commit and push."
-    local commit_command
-    commit_command=$(format_command git commit -m "$commit_message")
-    log_info "Dry run: ${commit_command}"
+    log_debug "Dry-run mode active; reporting intended actions."
+    if [ "$has_staged_changes" = true ]; then
+      log_info "Dry run: $(format_command git commit -m "$commit_message")"
+    else
+      log_info "Dry run: no staged changes; commit step skipped."
+    fi
     local current_branch
     current_branch=$(get_current_branch)
-    log_debug "Command: git rev-parse --abbrev-ref --symbolic-full-name @{u}"
-    if git rev-parse --abbrev-ref --symbolic-full-name "@{u}" >/dev/null 2>&1; then
-      log_debug "Branch '${current_branch}' already has an upstream configured."
-      log_info "Dry run: $(format_command git push)"
+    if [ "$has_branch_ahead" = true ] || [ "$has_staged_changes" = true ] || [ "$has_upstream" = false ]; then
+      log_debug "Branch '${current_branch}' requires a push."
+      if [ "$has_upstream" = true ]; then
+        log_info "Dry run: $(format_command git push)"
+      else
+        local remote
+        remote=$(detect_default_remote)
+        log_info "Dry run: $(format_command git push --set-upstream "$remote" "$current_branch")"
+      fi
     else
-      log_warn "Branch '${current_branch}' has no upstream configured."
-      local remote
-      remote=$(detect_default_remote)
-      log_info "Dry run: $(format_command git push --set-upstream "$remote" "$current_branch")"
+      log_info "Dry run: branch '${current_branch}' already synced with upstream; push step skipped."
     fi
     return 0
   fi
 
-  commit_changes "$commit_message"
-  push_changes
+  if [ "$has_staged_changes" = true ]; then
+    commit_changes "$commit_message"
+  else
+    log_info "No staged changes detected; skipping commit."
+  fi
+
+  if [ "$has_branch_ahead" = true ] || [ "$has_staged_changes" = true ] || [ "$has_upstream" = false ]; then
+    push_changes
+  else
+    log_info "Branch already synchronized with upstream; skipping push."
+  fi
 }
 
 run "$@"
