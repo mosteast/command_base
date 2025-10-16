@@ -575,179 +575,201 @@ if (existingExtraDirs.length) {
   process.env.PATH = `${existingExtraDirs.join(path.delimiter)}${currentPath ? `${path.delimiter}${currentPath}` : ""}`;
 }
 
+function print_help_line(message = "") {
+  if (message === undefined || message === null) {
+    return;
+  }
+  if (message === "") {
+    original_console.log("");
+    return;
+  }
+  process_output("log", `${message}`, { force: true });
+}
+
 function showHelp() {
   const cmd = path.basename(process.argv[1] || "videos_normalize");
-  console.log(palette.headline("Usage:"));
-  console.log(`  ${palette.stage(cmd)} <video-file> [options]`);
-  console.log("");
-  console.log(palette.headline("Audio extraction options:"));
-  console.log(
+  print_help_line(palette.headline("Usage:"));
+  print_help_line(`  ${palette.stage(cmd)} <video-file> [options]`);
+  print_help_line("");
+  print_help_line(palette.headline("Audio extraction options:"));
+  print_help_line(
     palette.dim("      --audio-output PATH        Audio output path"),
   );
-  console.log(
+  print_help_line(
     palette.dim("      --audio-format EXT         Audio extension override"),
   );
-  console.log(
+  print_help_line(
     palette.dim(
       "      --audio-stream INDEX       Audio stream index (default: 0)",
     ),
   );
-  console.log(
+  print_help_line(
     palette.dim(
       "      --audio-bitrate RATE       Fallback transcode bitrate (default: 192k)",
     ),
   );
-  console.log(
+  print_help_line(
     palette.dim(
       "      --audio-sample-rate HZ     Fallback transcode sample rate",
     ),
   );
-  console.log(
+  print_help_line(
     palette.dim(
       "      --audio-source PATH        Use existing audio file (skip extraction)",
     ),
   );
-  console.log(
+  print_help_line(
     palette.dim("      --skip-audio               Skip audio extraction step"),
   );
-  console.log("");
-  console.log(palette.headline("Transcription options:"));
-  console.log(
+  print_help_line("");
+  print_help_line(palette.headline("Transcription options:"));
+  print_help_line(
     palette.dim("      --skip-transcript          Skip transcription"),
   );
-  console.log(
+  print_help_line(
     palette.dim("      --transcript-dir DIR       Directory for transcripts"),
   );
-  console.log(
+  print_help_line(
     palette.dim(
       "      --transcript-output PATH   Desired transcript file path",
     ),
   );
-  console.log(
+  print_help_line(
     palette.dim(
       "      --transcript-format FORMAT Transcript format(s), repeat or comma-separated (default: srt,vtt)",
     ),
   );
-  console.log(
+  print_help_line(
     palette.dim(
       `      --whisper-model NAME       Whisper model (default: ${DEFAULT_WHISPER_MODEL})`,
     ),
   );
-  console.log(palette.dim("      --whisper-language CODE    Force language"));
-  console.log(
+  print_help_line(
+    palette.dim("      --whisper-language CODE    Force language"),
+  );
+  print_help_line(
     palette.dim(
       "      --whisper-task TASK        transcribe (default) or translate",
     ),
   );
-  console.log(
+  print_help_line(
     palette.dim("      --whisper-device DEVICE    Device, e.g. cpu or cuda"),
   );
-  console.log(
+  print_help_line(
     palette.dim(
       "      --whisper-compute-type VAL Compute type for faster-whisper",
     ),
   );
-  console.log(
+  print_help_line(
     palette.dim("      --whisper-bin PATH         Path to whisper executable"),
   );
-  console.log(
+  print_help_line(
     palette.dim(
       "      --whisper-extra ARG        Extra whisper CLI args (repeatable)",
     ),
   );
-  console.log("");
-  console.log(palette.headline("Compression options:"));
-  console.log(
+  print_help_line("");
+  print_help_line(palette.headline("Compression options:"));
+  print_help_line(
     palette.dim("      --skip-compress            Skip video compression"),
   );
-  console.log(
+  print_help_line(
     palette.dim("      --compress-output PATH     Output video path"),
   );
-  console.log(
+  print_help_line(
     palette.dim("      --compress-crf VALUE       CRF value (default: 23)"),
   );
-  console.log(
+  print_help_line(
     palette.dim("      --compress-preset NAME     Preset (default: medium)"),
   );
-  console.log(
+  print_help_line(
     palette.dim(
       "      --compress-audio-bitrate RATE Audio bitrate (default: 128k)",
     ),
   );
-  console.log(
+  print_help_line(
     palette.dim(
       "      --compress-video-codec NAME Video codec (default: libx264)",
     ),
   );
-  console.log(
+  print_help_line(
     palette.dim("      --compress-audio-codec NAME Audio codec (default: aac)"),
   );
-  console.log(
+  print_help_line(
     palette.dim(
       "      --compress-pix-format NAME Pixel format (default: yuv420p)",
     ),
   );
-  console.log(
+  print_help_line(
     palette.dim(
       "      --compress-max-height PX   Downscale max height (default: 1080)",
     ),
   );
-  console.log(
+  print_help_line(
     palette.dim("      --compress-keep-resolution Keep original resolution"),
   );
-  console.log(
+  print_help_line(
     palette.dim(
       "      --compress-tune NAME       Optional tune (film, animation, etc.)",
     ),
   );
-  console.log(
+  print_help_line(
     palette.dim(
       "      --compress-extra ARG       Extra ffmpeg args (repeatable)",
     ),
   );
-  console.log("");
-  console.log(palette.headline("Shared options:"));
-  console.log(palette.dim("      --ffmpeg PATH              Path to ffmpeg"));
-  console.log(palette.dim("      --ffprobe PATH             Path to ffprobe"));
-  console.log(
+  print_help_line("");
+  print_help_line(palette.headline("Shared options:"));
+  print_help_line(
+    palette.dim("      --ffmpeg PATH              Path to ffmpeg"),
+  );
+  print_help_line(
+    palette.dim("      --ffprobe PATH             Path to ffprobe"),
+  );
+  print_help_line(
     palette.dim(
       "      --trash-input              Move processed input videos to trash",
     ),
   );
-  console.log(
+  print_help_line(
     palette.dim(
       "      --job-mode MODE           Processing strategy: step (default) or file",
     ),
   );
-  console.log(
+  print_help_line(
     palette.dim("      --force                    Overwrite existing outputs"),
   );
-  console.log(
+  print_help_line(
     palette.dim("  -h, --help                     Show this help message"),
   );
-  console.log("");
-  console.log(palette.headline("Examples:"));
-  console.log(palette.stage(`  ${cmd} --force ~/videos/raw.mp4`));
-  console.log(palette.stage(`  ${cmd} --skip-transcript ~/videos/project`));
-  console.log(
+  print_help_line("");
+  print_help_line(palette.headline("Examples:"));
+  print_help_line(palette.stage(`  ${cmd} --force ~/videos/raw.mp4`));
+  print_help_line(palette.stage(`  ${cmd} --skip-transcript ~/videos/project`));
+  print_help_line(
     palette.stage(
       `  ${cmd} --compress-output ~/videos/raw.compressed.medium.mp4 ~/videos/raw.mp4`,
     ),
   );
-  console.log(palette.stage(`  ${cmd} --skip-compress ~/videos/*.mp4`));
-  console.log(
+  print_help_line(palette.stage(`  ${cmd} --skip-compress ~/videos/*.mp4`));
+  print_help_line(
     palette.stage(
       `  ${cmd} --job-mode file --skip-transcript ~/videos/**/*.mp4`,
     ),
   );
-  console.log(
+  print_help_line(
     palette.stage(
       `  ${cmd} --job-mode file ~/videos/**/*.{mp4,ts,webm,mkv,mov,avi,m4v}(N)`,
     ),
   );
-  console.log(
+  print_help_line(
     palette.stage(
       `  ${cmd} --compress-output ~/archive/normalized.mp4 ~/videos/**/*.{mp4,ts,webm,mkv,mov,avi,m4v}(N)`,
+    ),
+  );
+  print_help_line(
+    palette.stage(
+      `  ${cmd} --job-mode file a/b/{2025-10-{01,02,03,04},2025-09-28}/**/*.{mp4,ts,webm,mkv}(N)`,
     ),
   );
 }
@@ -1679,7 +1701,7 @@ async function main() {
     })
     .help(false)
     .version(false)
-    .alias("h", "help")
+    .alias("help", "h")
     .option("audio-output", { type: "string" })
     .option("audio-format", { type: "string" })
     .option("audio-stream", { type: "string" })
@@ -1726,6 +1748,7 @@ async function main() {
   const argv = parser.parse();
 
   if (argv.help) {
+    teardown_keypress_listener();
     showHelp();
     return;
   }
