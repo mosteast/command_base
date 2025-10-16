@@ -3,7 +3,7 @@
 # Initialize variables
 CHANNEL_URL=""
 PLAYLIST_URL=""
-OUTPUT_DIR="~/Library/Mobile Documents/com~apple~CloudDocs/main/download/YouTube/%(uploader)s"
+OUTPUT_DIR="~/Library/Mobile Documents/com~apple~CloudDocs/main/download/video/YouTube/%(uploader)s"
 VIDEO_URLS=()
 ONLY_AUDIO=false
 ONLY_SUBTITLE=false
