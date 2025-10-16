@@ -21,6 +21,7 @@ dry_run=false
 has_staged_changes=false
 has_branch_ahead=false
 has_upstream=false
+merge_in_progress=false
 
 handle_error() {
   local exit_code=$?
@@ -138,10 +139,28 @@ verify_git_repository() {
   fi
 }
 
+detect_merge_in_progress() {
+  log_debug "Checking for ongoing merge."
+  log_debug "Command: git rev-parse -q --verify MERGE_HEAD"
+  if git rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then
+    merge_in_progress=true
+    log_debug "Merge in progress detected (MERGE_HEAD present)."
+  else
+    merge_in_progress=false
+    log_debug "No merge in progress."
+  fi
+}
+
 collect_commit_message() {
   local provided_message=$1
   if [ -n "$provided_message" ]; then
     echo "$provided_message"
+    return
+  fi
+
+  if [ "$merge_in_progress" = true ]; then
+    log_info "Merge in progress; using existing merge commit message."
+    echo ""
     return
   fi
 
@@ -188,6 +207,10 @@ assess_repository_state() {
   fi
 
   if [ "$has_staged_changes" = false ] && [ "$has_upstream" = true ] && [ "$has_branch_ahead" = false ]; then
+    if [ "$merge_in_progress" = true ]; then
+      log_warn "Merge in progress with no staged changes detected; attempting commit anyway."
+      return
+    fi
     log_warn "No staged changes and branch is up to date with upstream; nothing to do."
     exit 0
   fi
@@ -227,7 +250,11 @@ detect_default_remote() {
 commit_changes() {
   local message=$1
 
-  execute_step "Creating commit." git commit -m "$message"
+  if [ "$merge_in_progress" = true ] && [ -z "$message" ]; then
+    execute_step "Creating merge commit using existing message." git commit --no-edit
+  else
+    execute_step "Creating commit." git commit -m "$message"
+  fi
 }
 
 push_changes() {
@@ -299,6 +326,7 @@ run() {
   ensure_dependency git
   ensure_dependency date
   verify_git_repository
+  detect_merge_in_progress
 
   execute_step "Staging all changes." git add --all
 
@@ -306,12 +334,20 @@ run() {
 
   local commit_message
   commit_message=$(collect_commit_message "$commit_message_input")
-  log_info "Using commit message: ${commit_message}"
+  if [ "$merge_in_progress" = true ] && [ -z "$commit_message" ]; then
+    log_info "Using merge message from MERGE_MSG."
+  else
+    log_info "Using commit message: ${commit_message}"
+  fi
 
   if [ "$dry_run" = true ]; then
     log_debug "Dry-run mode active; reporting intended actions."
-    if [ "$has_staged_changes" = true ]; then
-      log_info "Dry run: $(format_command git commit -m "$commit_message")"
+    if [ "$has_staged_changes" = true ] || [ "$merge_in_progress" = true ]; then
+      if [ "$merge_in_progress" = true ] && [ -z "$commit_message" ]; then
+        log_info "Dry run: $(format_command git commit --no-edit)"
+      else
+        log_info "Dry run: $(format_command git commit -m "$commit_message")"
+      fi
     else
       log_info "Dry run: no staged changes; commit step skipped."
     fi
@@ -332,7 +368,7 @@ run() {
     return 0
   fi
 
-  if [ "$has_staged_changes" = true ]; then
+  if [ "$has_staged_changes" = true ] || [ "$merge_in_progress" = true ]; then
     commit_changes "$commit_message"
   else
     log_info "No staged changes detected; skipping commit."
