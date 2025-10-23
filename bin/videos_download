@@ -197,6 +197,22 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Remove exact duplicate video URLs to avoid redundant downloads in the same run
+if [ ${#VIDEO_URLS[@]} -gt 1 ]; then
+    DEDUPED_VIDEO_URLS=()
+    for candidate_url in "${VIDEO_URLS[@]}"; do
+        if printf '%s\n' "${DEDUPED_VIDEO_URLS[@]}" | grep -Fxq -- "$candidate_url"; then
+            log_warn "Skipping duplicate URL in argument list: '${candidate_url}'"
+            continue
+        fi
+        DEDUPED_VIDEO_URLS+=("$candidate_url")
+    done
+    if [ ${#DEDUPED_VIDEO_URLS[@]} -lt ${#VIDEO_URLS[@]} ]; then
+        log_info "Video URL list reduced from ${#VIDEO_URLS[@]} to ${#DEDUPED_VIDEO_URLS[@]} unique entries."
+    fi
+    VIDEO_URLS=("${DEDUPED_VIDEO_URLS[@]}")
+fi
+
 # Validate audio/subtitle options
 if [ "$ONLY_AUDIO" = true ] && [ "$ONLY_SUBTITLE" = true ]; then
     log_error "Cannot use both --only-audio and --only-subtitle options together."
@@ -359,21 +375,23 @@ elif [ -n "$PLAYLIST_URL" ]; then
 else
     overall_exit_code=0
     failed_video_urls=()
+    expanded_output_dir="${OUTPUT_DIR/#\~/$HOME}"
+    [ -z "$expanded_output_dir" ] && expanded_output_dir="manual_video_downloads"
+    manual_archive_hash=$(printf "%s" "$expanded_output_dir" | md5sum | cut -d' ' -f1)
+    manual_archive_file="${ARCHIVE_DIR}/manual_urls_${manual_archive_hash}.txt"
+
+    if [ "$REFRESH" = true ]; then
+        if [ -f "$manual_archive_file" ]; then
+            log_info "Refresh requested; clearing archive cache at '${manual_archive_file}'."
+            rm -f "$manual_archive_file"
+        else
+            log_warn "Refresh requested but no manual video archive found to clear."
+        fi
+    fi
+
+    [ "$OVERWRITE" != true ] && touch "$manual_archive_file"
 
     for url in "${VIDEO_URLS[@]}"; do
-        # Generate a unique archive file name based on the video URL
-        ARCHIVE_FILE="${ARCHIVE_DIR}/$(echo "$url" | md5sum | cut -d' ' -f1).txt"
-
-        if [ "$REFRESH" = true ]; then
-            if [ -f "$ARCHIVE_FILE" ]; then
-                log_info "Refresh requested; clearing archive cache at '$ARCHIVE_FILE'."
-                rm -f "$ARCHIVE_FILE"
-            else
-                log_warn "Refresh requested but no archive cache found for '$url'."
-            fi
-        fi
-
-        [ "$OVERWRITE" != true ] && touch "$ARCHIVE_FILE"
 
         if retry_command "Video download: ${url}" yt-dlp \
             $EMBED_SUBS_OPTS \
@@ -386,7 +404,7 @@ else
             --sub-langs "en,en-US,zh-Hans,zh-Hant,zh-CN,zh" \
             --sleep-subtitles 1 \
             --continue \
-            $( [ "$OVERWRITE" != true ] && echo "--download-archive $ARCHIVE_FILE --no-overwrites" ) \
+            $( [ "$OVERWRITE" != true ] && echo "--download-archive $manual_archive_file --no-overwrites" ) \
             $( [ "$OVERWRITE" = true ] && echo "--force-overwrites" ) \
             --sleep-interval 1 \
             --max-sleep-interval 3 \
