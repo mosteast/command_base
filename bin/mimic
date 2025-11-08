@@ -1,87 +1,497 @@
 #!/usr/bin/env node
 
-const { cd, pwd } = require("shelljs");
-const { basename, resolve } = require("path");
+"use strict";
+
+const path = require("path");
+const fs = require("fs/promises");
+const util = require("util");
+const { execFile } = require("child_process");
+const yargs_factory = require("yargs/yargs");
+const chalk = require("chalk");
 const { trim } = require("lodash");
 const { command } = require("@mosteast/command");
+const { cd: shell_cd, pwd: shell_pwd, which: shell_which } = require("shelljs");
 
-const N_parent = "parent";
+const package_json = require("../package.json");
 
-// Precondition: github CLI installed
-require("yargs").command({
-  command:
-    "$0 <repo_uri> [dir_path] [--branch] [--create_remote] [--keep_origin] [--keep_branch]",
-  describe: `Clone and parenting a repository
-Example:
+const exec_file = util.promisify(execFile);
 
-mimic mosteast/giao foo --branch feature.rds --create_remote mosteast/foo
-`,
-  builder(argv) {
-    return argv.options({
-      branch: {
-        type: "string",
-        default: "",
-      },
-      create_remote: {
-        type: "string",
-        describe: "Whether to create remote repository in github",
-      },
-      keep_origin: {
-        type: "boolean",
-        default: false,
-        describe: `Whether rename origin to ${N_parent}`,
-      },
-      keep_branch: {
-        type: "boolean",
-        default: false,
-        describe: `Whether rename branch to ${N_parent}`,
-      },
-    });
-  },
-  async handler({
-    repo_uri,
-    dir_path,
-    branch,
-    create_remote,
-    keep_origin,
-    keep_branch,
-  }) {
-    const wd = pwd().toString();
-    const repo = basename(trim(repo_uri, "/"), ".git");
-    let dir;
+const DEFAULT_PARENT_REMOTE = "parent";
+const DEFAULT_FORK_BRANCH = "master";
+const REQUIRED_BINARIES = ["git", "gh"];
 
-    if (!dir_path) {
-      dir_path = resolve(wd, repo);
-      dir = repo;
-    } else {
-      dir = trim(dir_path, "/").split("/").pop();
-    }
+function hide_process_argv(argv) {
+  return Array.isArray(argv) ? argv.slice(2) : [];
+}
 
-    if (branch) {
-      branch = `--single-branch --branch ${branch}`;
-    }
+function create_logger({ quiet_mode, debug_mode }) {
+  const prefix = chalk.dim("mimic");
 
-    await command(
-      `gh repo clone ${repo_uri} "${dir_path}" -- ${branch} --recursive`,
-    );
+  function format_message(message) {
+    return `${prefix} ${message}`;
+  }
 
-    cd(dir_path);
-
-    if (!keep_origin) {
-      await command(`git remote rename origin ${N_parent}`);
-    }
-
-    if (!keep_branch) {
-      await command(`git branch -m master ${N_parent}`);
-      await command(`git checkout -b master`);
-    }
-
-    if (create_remote) {
-      let remote = "";
-      if (typeof create_remote === "string") {
-        remote = create_remote;
+  return {
+    info(message) {
+      if (quiet_mode) return;
+      console.log(format_message(chalk.green(message)));
+    },
+    warn(message) {
+      console.warn(format_message(chalk.yellow(message)));
+    },
+    error(message, error) {
+      console.error(format_message(chalk.red(message)));
+      if (debug_mode && error) {
+        console.error(chalk.red(error.stack || String(error)));
       }
-      await command(`gh repo create ${remote}`);
+    },
+    debug(message) {
+      if (!debug_mode || quiet_mode) return;
+      console.log(format_message(chalk.cyan(`[debug] ${message}`)));
+    },
+  };
+}
+
+function build_help_text(script_name) {
+  return [
+    chalk.bold("Usage"),
+    `  ${script_name} <repo_uri> [dir_path] [options]`,
+    "",
+    chalk.bold("Description"),
+    "  Clone a GitHub repository, rename its upstream remote and branch to a",
+    "  dedicated parent reference, and optionally bootstrap a working branch",
+    "  plus a brand-new remote fork.",
+    "",
+    chalk.bold("Options"),
+    "  -b, --branch <name>           Clone a specific branch (default: repo default)",
+    "  --keep-origin                 Preserve the original origin remote (default: false)",
+    "  --keep-branch                 Skip renaming the default branch (default: false)",
+    "  --parent-name <name>          Name to assign to the parent remote (default: parent)",
+    "  --fork-branch <name>          Working branch created from parent (default: master)",
+    "  --create-remote               Create a brand new GitHub repo via gh (default: false)",
+    "  --remote-name <name>          Name for the new remote repo (default: derived from target dir)",
+    "  --remote-visibility <value>   Visibility for the new repo (public|private|internal)",
+    "  -d, --dry-run                 Show planned commands without running them",
+    "  --quiet                       Print only warnings and errors",
+    "  --debug                       Show verbose debug logs",
+    "  -v, --version                 Show version and exit",
+    "  -h, --help                    Show this help message",
+    "",
+    chalk.bold("Examples"),
+    "  # Clone a repo and prepare parent/master branches",
+    "  $0 mosteast/giao forked/giao",
+    "",
+    "  # Clone a feature branch and keep original naming",
+    "  $0 mosteast/giao --branch feature/login --keep-origin --keep-branch",
+    "",
+    "  # Clone and immediately create a private remote fork",
+    "  $0 mosteast/giao demo --create-remote --remote-name myuser/demo",
+  ].join("\n");
+}
+
+function parse_cli_arguments() {
+  const parser = yargs_factory(hide_process_argv(process.argv))
+    .scriptName("mimic")
+    .help(false)
+    .version(false)
+    .showHelpOnFail(false)
+    .parserConfiguration({
+      "camel-case-expansion": false,
+      "strip-dashed": false,
+    })
+    .command("$0 [repo_uri] [dir_path]", false, (cmd) =>
+      cmd
+        .positional("repo_uri", {
+          type: "string",
+          describe: "GitHub repository URI or slug",
+        })
+        .positional("dir_path", {
+          type: "string",
+          describe: "Directory to clone into (defaults to repo name)",
+        }),
+    )
+    .option("branch", {
+      alias: ["b"],
+      type: "string",
+      describe: "Branch to clone",
+      default: "",
+    })
+    .option("keep-origin", {
+      alias: ["keep_origin"],
+      type: "boolean",
+      default: false,
+      describe: "Keep the origin remote name untouched",
+    })
+    .option("keep-branch", {
+      alias: ["keep_branch"],
+      type: "boolean",
+      default: false,
+      describe: "Keep the default branch name untouched",
+    })
+    .option("parent-name", {
+      alias: ["parent_name"],
+      type: "string",
+      default: DEFAULT_PARENT_REMOTE,
+      describe: "Name to assign to the parent remote/branch",
+    })
+    .option("fork-branch", {
+      alias: ["fork_branch"],
+      type: "string",
+      default: DEFAULT_FORK_BRANCH,
+      describe: "Working branch name created from the parent branch",
+    })
+    .option("create-remote", {
+      alias: ["create_remote"],
+      type: "boolean",
+      default: false,
+      describe: "Create a brand-new remote repo using gh",
+    })
+    .option("remote-name", {
+      alias: ["remote_name"],
+      type: "string",
+      describe:
+        "Explicit name for the remote repo (defaults to target dir name)",
+    })
+    .option("remote-visibility", {
+      alias: ["remote_visibility"],
+      type: "string",
+      default: "private",
+      choices: ["private", "public", "internal"],
+      describe: "Visibility for the remote repo created through gh",
+    })
+    .option("dry-run", {
+      alias: ["d"],
+      type: "boolean",
+      default: false,
+      describe: "Preview every step without running commands",
+    })
+    .option("quiet", {
+      type: "boolean",
+      default: false,
+      describe: "Print only warnings and errors",
+    })
+    .option("debug", {
+      type: "boolean",
+      default: false,
+      describe: "Print verbose debug logs",
+    })
+    .option("version", {
+      alias: ["v"],
+      type: "boolean",
+      describe: "Show version information",
+    })
+    .option("help", {
+      alias: ["h"],
+      type: "boolean",
+      describe: "Show help message",
+    })
+    .usage("$0 <repo_uri> [dir_path] [options]")
+    .wrap(Math.min(100, process.stdout.columns || 100));
+
+  const argv = parser.parse();
+  const script_name = argv.$0 || "mimic";
+
+  if (argv.help) {
+    console.log(build_help_text(script_name));
+    process.exit(0);
+  }
+
+  if (argv.version) {
+    console.log(package_json.version);
+    process.exit(0);
+  }
+
+  const repo_uri = trim(String(argv.repo_uri || ""));
+  if (!repo_uri) {
+    console.error(chalk.red("Error: <repo_uri> is required."));
+    console.log(build_help_text(script_name));
+    process.exit(1);
+  }
+
+  return {
+    script_name,
+    repo_uri,
+    dir_path: argv.dir_path ? String(argv.dir_path) : "",
+    branch: argv.branch ? String(argv.branch) : "",
+    keep_origin: Boolean(argv["keep-origin"]),
+    keep_branch: Boolean(argv["keep-branch"]),
+    parent_remote_name: argv["parent-name"]
+      ? String(argv["parent-name"])
+      : DEFAULT_PARENT_REMOTE,
+    fork_branch_name: argv["fork-branch"]
+      ? String(argv["fork-branch"])
+      : DEFAULT_FORK_BRANCH,
+    create_remote: Boolean(argv["create-remote"]),
+    remote_name: argv["remote-name"] ? String(argv["remote-name"]) : "",
+    remote_visibility: argv["remote-visibility"]
+      ? String(argv["remote-visibility"])
+      : "private",
+    dry_run: Boolean(argv["dry-run"]),
+    quiet_mode: Boolean(argv.quiet),
+    debug_mode: Boolean(argv.debug),
+  };
+}
+
+function ensure_required_binaries(logger) {
+  logger.debug(`Checking required binaries: ${REQUIRED_BINARIES.join(", ")}`);
+  const missing = REQUIRED_BINARIES.filter(
+    (binary_name) => !shell_which(binary_name),
+  );
+  if (missing.length > 0) {
+    throw new Error(
+      `Missing required tool(s): ${missing.join(
+        ", ",
+      )}. Install them and try again.`,
+    );
+  }
+}
+
+function get_repo_name(repo_uri) {
+  const cleaned_uri = repo_uri.replace(/\.git$/, "");
+  const segments = cleaned_uri.split("/").filter(Boolean);
+  return segments.pop() || "";
+}
+
+function resolve_target_path(input_dir_path, working_directory, repo_name) {
+  if (input_dir_path && input_dir_path.trim()) {
+    return path.resolve(working_directory, input_dir_path);
+  }
+  return path.resolve(working_directory, repo_name);
+}
+
+function quote_argument(value) {
+  const text = String(value ?? "");
+  if (text.length === 0) {
+    return '""';
+  }
+  return `"${text.replace(/(["\\$`])/g, "\\$1")}"`;
+}
+
+async function ensure_target_directory_available(target_path) {
+  try {
+    await fs.stat(target_path);
+    throw new Error(
+      `Target path already exists: ${path.relative(process.cwd(), target_path) || target_path}`,
+    );
+  } catch (error) {
+    if (error && error.code === "ENOENT") {
+      return;
     }
-  },
-}).argv;
+    if (error && error.code !== "ENOENT") {
+      throw new Error(
+        `Unable to verify target directory: ${error.message || String(error)}`,
+      );
+    }
+  }
+}
+
+async function run_shell_command(command_text, options, logger) {
+  logger.debug(`Executing command: ${command_text}`);
+  if (options.dry_run) {
+    logger.info(chalk.cyan(`[dry-run] ${command_text}`));
+    return { code: 0, ok: true };
+  }
+
+  const result = await command(command_text, { mute: true });
+  if (result.code !== 0) {
+    throw new Error(`Command failed (${result.code}): ${command_text}`);
+  }
+  return result;
+}
+
+async function get_current_branch() {
+  const { stdout } = await exec_file("git", [
+    "rev-parse",
+    "--abbrev-ref",
+    "HEAD",
+  ]);
+  const branch_name = stdout.trim();
+  if (!branch_name) {
+    throw new Error("Unable to determine current branch name.");
+  }
+  return branch_name;
+}
+
+async function rename_branch_if_needed(
+  current_branch,
+  parent_branch_name,
+  options,
+  logger,
+) {
+  if (current_branch === parent_branch_name) {
+    logger.debug(
+      `Current branch already named ${parent_branch_name}; skipping rename.`,
+    );
+    return;
+  }
+  logger.info(
+    `Renaming branch ${current_branch} -> ${parent_branch_name} for parent tracking.`,
+  );
+  await run_shell_command(
+    `git branch -m ${quote_argument(current_branch)} ${quote_argument(parent_branch_name)}`,
+    options,
+    logger,
+  );
+}
+
+async function checkout_fork_branch(fork_branch_name, options, logger) {
+  logger.debug(`Checking if branch ${fork_branch_name} already exists.`);
+  const result = await command(
+    `git show-ref --verify --quiet refs/heads/${fork_branch_name}`,
+    { mute: true, ignore_stdio: true },
+  );
+  if (result.code === 0) {
+    logger.info(`Switching to existing branch ${fork_branch_name}.`);
+    await run_shell_command(
+      `git checkout ${quote_argument(fork_branch_name)}`,
+      options,
+      logger,
+    );
+    return;
+  }
+
+  logger.info(`Creating working branch ${fork_branch_name}.`);
+  await run_shell_command(
+    `git checkout -b ${quote_argument(fork_branch_name)}`,
+    options,
+    logger,
+  );
+}
+
+function resolve_visibility_flag(visibility) {
+  if (visibility === "public") return "--public";
+  if (visibility === "internal") return "--internal";
+  return "--private";
+}
+
+async function create_remote_repository(remote_repo_name, options, logger) {
+  const visibility_flag = resolve_visibility_flag(options.remote_visibility);
+  const create_parts = ["gh repo create"];
+  if (remote_repo_name) {
+    create_parts.push(remote_repo_name);
+  }
+  create_parts.push("--source .", "--remote origin", visibility_flag);
+
+  logger.info(
+    `Creating ${options.remote_visibility} remote ${remote_repo_name || "(derived)"} via gh.`,
+  );
+  await run_shell_command(create_parts.join(" "), options, logger);
+}
+
+async function mimic_repository(options, logger) {
+  ensure_required_binaries(logger);
+
+  const working_directory = shell_pwd().toString();
+  logger.debug(`Working directory: ${working_directory}`);
+
+  const repo_name = get_repo_name(options.repo_uri);
+  if (!repo_name) {
+    throw new Error("Unable to infer repository name from the provided URI.");
+  }
+
+  const target_directory = resolve_target_path(
+    options.dir_path,
+    working_directory,
+    repo_name,
+  );
+  const relative_target =
+    path.relative(working_directory, target_directory) || target_directory;
+
+  logger.info(`Target directory: ${relative_target}`);
+  logger.debug("Validating target directory availability.");
+  await ensure_target_directory_available(target_directory);
+
+  const git_flags = ["--recursive"];
+  if (options.branch) {
+    git_flags.push("--single-branch", `--branch ${options.branch}`);
+  }
+  const flags_text = git_flags.length ? ` -- ${git_flags.join(" ")}` : "";
+  const clone_command = `gh repo clone ${quote_argument(options.repo_uri)} ${quote_argument(target_directory)}${flags_text}`;
+
+  logger.info(`Cloning ${options.repo_uri} into ${relative_target}.`);
+  await run_shell_command(clone_command, options, logger);
+
+  if (options.dry_run) {
+    logger.info("Dry run complete; no repository changes were applied.");
+    return;
+  }
+
+  const change_dir_result = shell_cd(target_directory);
+  if (change_dir_result.code !== 0) {
+    throw new Error(`Unable to enter directory: ${target_directory}`);
+  }
+  logger.debug(`Entered directory ${target_directory}.`);
+
+  if (!options.keep_origin) {
+    logger.info(
+      `Renaming origin remote to ${options.parent_remote_name} for parent tracking.`,
+    );
+    await run_shell_command(
+      `git remote rename origin ${quote_argument(options.parent_remote_name)}`,
+      options,
+      logger,
+    );
+  } else {
+    logger.debug("Skipping remote rename due to --keep-origin.");
+  }
+
+  if (!options.keep_branch) {
+    const current_branch = await get_current_branch();
+    logger.debug(`Detected default branch ${current_branch}.`);
+    await rename_branch_if_needed(
+      current_branch,
+      options.parent_remote_name,
+      options,
+      logger,
+    );
+    await checkout_fork_branch(options.fork_branch_name, options, logger);
+  } else {
+    logger.debug("Skipping branch adjustments due to --keep-branch.");
+  }
+
+  if (options.create_remote) {
+    const derived_remote_name = options.remote_name || repo_name;
+    await create_remote_repository(derived_remote_name, options, logger);
+  } else {
+    logger.debug(
+      "Skipping remote creation because --create-remote not provided.",
+    );
+  }
+
+  logger.info("Repository mimic completed successfully.");
+}
+
+async function main() {
+  const cli_options = parse_cli_arguments();
+  const logger = create_logger({
+    quiet_mode: cli_options.quiet_mode,
+    debug_mode: cli_options.debug_mode,
+  });
+
+  logger.debug(
+    `CLI options: ${JSON.stringify({
+      repo_uri: cli_options.repo_uri,
+      dir_path: cli_options.dir_path,
+      branch: cli_options.branch,
+      keep_origin: cli_options.keep_origin,
+      keep_branch: cli_options.keep_branch,
+      parent_remote_name: cli_options.parent_remote_name,
+      fork_branch_name: cli_options.fork_branch_name,
+      create_remote: cli_options.create_remote,
+      remote_name: cli_options.remote_name,
+      remote_visibility: cli_options.remote_visibility,
+      dry_run: cli_options.dry_run,
+      quiet_mode: cli_options.quiet_mode,
+      debug_mode: cli_options.debug_mode,
+    })}`,
+  );
+
+  try {
+    await mimic_repository(cli_options, logger);
+  } catch (error) {
+    logger.error("Failed to complete mimic workflow.", error);
+    process.exit(1);
+  }
+}
+
+main();
