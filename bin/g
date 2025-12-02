@@ -73,11 +73,7 @@ log_emit() {
     return 0
   fi
 
-  if [ "$level" -le "$LEVEL_WARN" ]; then
-    >&2 printf "%b[%s]%b %s\n" "$color" "$label" "$RESET" "$message"
-  else
-    printf "%b[%s]%b %s\n" "$color" "$label" "$RESET" "$message"
-  fi
+  >&2 printf "%b[%s]%b %s\n" "$color" "$label" "$RESET" "$message"
 }
 
 log_error() {
