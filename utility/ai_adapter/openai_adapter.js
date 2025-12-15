@@ -13,9 +13,18 @@ function create_openai_adapter(support_context) {
 
       const base_url =
         process.env.OPENAI_API_BASE && process.env.OPENAI_API_BASE.length > 0
-          ? support.trim_trailing_slash(process.env.OPENAI_API_BASE)
+          ? process.env.OPENAI_API_BASE
           : "https://api.openai.com/v1";
-      const endpoint = `${support.trim_trailing_slash(base_url)}/chat/completions`;
+
+      const normalized_base_url = normalize_openai_base_url(base_url, support);
+
+      if (request.logger?.debug && normalized_base_url !== base_url) {
+        request.logger.debug(
+          `Normalized OPENAI_API_BASE to ${normalized_base_url}`,
+        );
+      }
+
+      const endpoint = `${support.trim_trailing_slash(normalized_base_url)}/chat/completions`;
 
       const payload = {
         model: request.model || process.env.OPENAI_DEFAULT_MODEL || "gpt-4o",
@@ -49,3 +58,22 @@ function create_openai_adapter(support_context) {
 module.exports = {
   create_openai_adapter,
 };
+
+function normalize_openai_base_url(raw_base_url, support) {
+  const fallback_base = "https://api.openai.com/v1";
+  const trimming_helper =
+    support && typeof support.trim_trailing_slash === "function"
+      ? support.trim_trailing_slash
+      : (value) => value.replace(/\/$/, "");
+
+  const base_without_trailing = trimming_helper(
+    raw_base_url && raw_base_url.length > 0 ? raw_base_url : fallback_base,
+  );
+
+  const version_regex = /\/v\d+$/i;
+  const base_with_version = version_regex.test(base_without_trailing)
+    ? base_without_trailing
+    : `${base_without_trailing}/v1`;
+
+  return trimming_helper(base_with_version);
+}

@@ -11,7 +11,9 @@ function create_codex_adapter(support_context) {
       const raw_cli_args = context.parse_cli_arg_string(
         process.env.CODEX_CLI_ARGS,
       );
-      const cli_args = ensure_non_interactive_cli_args(raw_cli_args);
+      const cli_args = ensure_non_interactive_cli_args(
+        sanitize_codex_cli_args(raw_cli_args, request.logger),
+      );
       const model_flag =
         process.env.CODEX_CLI_MODEL_FLAG === ""
           ? null
@@ -175,6 +177,92 @@ function ensure_stdin_placeholder(command_args) {
   }
 
   command_args.push("--", "-");
+}
+
+function sanitize_codex_cli_args(cli_args, logger) {
+  if (!Array.isArray(cli_args) || cli_args.length === 0) {
+    return [];
+  }
+
+  const supported_effort_values = new Set(["minimal", "low", "medium", "high"]);
+  const sanitized_args = [];
+  let override_adjusted = false;
+
+  const normalize_effort_override = (override_value) => {
+    if (typeof override_value !== "string" || override_value.length === 0) {
+      return override_value;
+    }
+    const [key, raw_value = ""] = override_value.split("=", 2);
+    if (key !== "model_reasoning_effort") {
+      return override_value;
+    }
+    const normalized_value = raw_value.trim().toLowerCase();
+    if (supported_effort_values.has(normalized_value)) {
+      const canonical_value = normalized_value;
+      if (canonical_value !== raw_value) {
+        override_adjusted = true;
+      }
+      return `${key}=${canonical_value}`;
+    }
+    override_adjusted = true;
+    return `${key}=high`;
+  };
+
+  for (let index = 0; index < cli_args.length; index += 1) {
+    const token = cli_args[index];
+    const has_inline_override =
+      typeof token === "string" && token.startsWith("--override=");
+    if (has_inline_override) {
+      const sanitized_override = normalize_effort_override(
+        token.slice("--override=".length),
+      );
+      if (
+        typeof sanitized_override === "string" &&
+        sanitized_override.length > 0
+      ) {
+        sanitized_args.push("--override", sanitized_override);
+      } else {
+        sanitized_args.push(token);
+      }
+      continue;
+    }
+
+    const is_override_flag = token === "--override" || token === "-o";
+    if (is_override_flag) {
+      const next_value = cli_args[index + 1];
+      const sanitized_override =
+        typeof next_value === "string"
+          ? normalize_effort_override(next_value)
+          : next_value;
+
+      if (
+        typeof sanitized_override === "string" &&
+        sanitized_override.length > 0
+      ) {
+        sanitized_args.push("--override", sanitized_override);
+        index += 1;
+        continue;
+      }
+
+      // Preserve original tokens when override value is missing or non-string.
+      sanitized_args.push(token);
+      if (next_value !== undefined) {
+        sanitized_args.push(next_value);
+        index += 1;
+      }
+      continue;
+    }
+
+    sanitized_args.push(token);
+  }
+
+  if (override_adjusted && logger?.warn) {
+    logger.warn(
+      "Adjusted CODEX_CLI_ARGS model_reasoning_effort to supported value (minimal|low|medium|high).",
+    );
+  }
+
+  return sanitized_args;
 }
 
 module.exports = {

@@ -32,7 +32,7 @@ async function run_text_prompt_batch_cli(raw_config) {
   }
 
   if (argv.version) {
-    show_version({ command_name, package_info, chalk });
+    show_version({ package_info });
     return { status: "version" };
   }
 
@@ -618,10 +618,8 @@ function build_example_lines({ command_name, examples, chalk }) {
   return lines;
 }
 
-function show_version({ command_name, package_info, chalk }) {
-  console.log(
-    `${command_name} ${chalk.green(package_info.version || "0.0.0")}`,
-  );
+function show_version({ package_info }) {
+  console.log(package_info.version || "0.0.0");
 }
 
 function create_logger({ chalk, command_name, is_debug, is_quiet }) {
@@ -641,7 +639,7 @@ function create_logger({ chalk, command_name, is_debug, is_quiet }) {
       console.error(prefix, chalk.red(format_messages(messages)));
     },
     debug: (...messages) => {
-      if (is_debug) {
+      if (is_debug && !is_quiet) {
         console.log(debug_prefix, ...messages);
       }
     },

@@ -1,0 +1,1435 @@
+#!/usr/bin/env node
+
+"use strict";
+
+const fs = require("fs/promises");
+const path = require("path");
+const { spawn, spawnSync } = require("child_process");
+
+const chalk = require("chalk");
+const yargs = require("yargs");
+
+const package_json = require("../package.json");
+
+const valid_formats = ["csv", "jsonl"];
+const valid_modes = ["per_post", "unique", "ghost"];
+const valid_content_types = [
+  "posts",
+  "reels",
+  "igtv",
+  "tagged",
+  "saved",
+  "liked",
+];
+const valid_download_file_name_tokens = [
+  "timestamp",
+  "id",
+  "safe_title_or_desc",
+  "safe_author",
+  "index_or_empty",
+];
+const default_download_file_name_format = [
+  "timestamp",
+  "id",
+  "safe_title_or_desc",
+  "safe_author",
+  "index_or_empty",
+];
+const default_download_file_name_delimiter = "__";
+
+const palette = {
+  headline: chalk.cyanBright.bold,
+  info: chalk.cyanBright,
+  success: chalk.greenBright,
+  warn: chalk.yellowBright,
+  error: chalk.redBright,
+  detail: chalk.gray,
+  path: chalk.magentaBright,
+};
+
+function sanitize_filename_component(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  return text.replace(/[^a-z0-9._-]+/gi, "_");
+}
+
+function expand_user_path(raw_path) {
+  if (!raw_path) return raw_path;
+  const text = String(raw_path);
+  if (!text.startsWith("~")) return text;
+  const home_dir = process.env.HOME;
+  if (!home_dir) return text;
+  if (text === "~") return home_dir;
+  if (text.startsWith("~/")) return path.join(home_dir, text.slice(2));
+  return text;
+}
+
+function create_logger({ command_name, quiet_mode, debug_mode }) {
+  const prefix = chalk.dim(command_name);
+
+  function format_message(message) {
+    return `${prefix} ${message}`;
+  }
+
+  return {
+    info(message) {
+      if (quiet_mode) return;
+      console.log(format_message(palette.info(message)));
+    },
+    warn(message) {
+      console.warn(format_message(palette.warn(message)));
+    },
+    error(message, error) {
+      console.error(format_message(palette.error(message)));
+      if (debug_mode && error) {
+        console.error(palette.detail(error.stack || String(error)));
+      }
+    },
+    debug(message) {
+      if (!debug_mode || quiet_mode) return;
+      console.log(format_message(palette.detail(`[debug] ${message}`)));
+    },
+  };
+}
+
+function parse_optional_json(raw_text) {
+  const trimmed = String(raw_text || "").trim();
+  if (!trimmed) return null;
+  try {
+    return JSON.parse(trimmed);
+  } catch (error) {
+    return null;
+  }
+}
+
+function probe_python_for_instaloader(python_bin, spawn_sync = spawnSync) {
+  const probe_script = [
+    "import json, sys",
+    "payload = {'executable': sys.executable, 'python_version': sys.version.split()[0]}",
+    "try:",
+    "  import instaloader",
+    "  payload['ok'] = True",
+    "  payload['instaloader_version'] = getattr(instaloader, '__version__', None)",
+    "except Exception as exc:",
+    "  payload['ok'] = False",
+    "  payload['error_type'] = type(exc).__name__",
+    "  payload['error'] = str(exc)",
+    "print(json.dumps(payload, ensure_ascii=False))",
+    "raise SystemExit(0 if payload.get('ok') else 1)",
+  ].join("\n");
+
+  const result = spawn_sync(python_bin, ["-c", probe_script], {
+    encoding: "utf8",
+  });
+
+  if (result && result.error) {
+    return {
+      ok: false,
+      python_bin,
+      spawn_error: result.error.code || String(result.error),
+      details: null,
+    };
+  }
+
+  const parsed = parse_optional_json(result.stdout);
+  return {
+    ok: Boolean(parsed && parsed.ok),
+    python_bin,
+    spawn_error: null,
+    details: parsed,
+  };
+}
+
+function build_python_candidates(requested_python_bin) {
+  const seen = new Set();
+  const candidates = [];
+
+  function add(candidate) {
+    const text = String(candidate || "").trim();
+    if (!text) return;
+    if (seen.has(text)) return;
+    seen.add(text);
+    candidates.push(text);
+  }
+
+  add(requested_python_bin);
+
+  add(process.env.INSTAGRAM_LIKES_EXPORT_PYTHON);
+  add(process.env.PYTHON_BIN);
+  add(process.env.PYTHON);
+
+  add("python3");
+  add("python");
+
+  [
+    "python3.13",
+    "python3.12",
+    "python3.11",
+    "python3.10",
+    "python3.9",
+    "python3.8",
+  ].forEach(add);
+
+  if (process.platform === "darwin") {
+    [
+      "/opt/homebrew/bin/python3",
+      "/opt/homebrew/bin/python3.13",
+      "/opt/homebrew/bin/python3.12",
+      "/opt/homebrew/bin/python3.11",
+      "/opt/homebrew/bin/python3.10",
+      "/opt/homebrew/bin/python3.9",
+      "/opt/homebrew/bin/python3.8",
+      "/opt/homebrew/opt/python@3.13/bin/python3.13",
+      "/opt/homebrew/opt/python@3.12/bin/python3.12",
+      "/opt/homebrew/opt/python@3.11/bin/python3.11",
+      "/opt/homebrew/opt/python@3.10/bin/python3.10",
+      "/usr/local/bin/python3",
+      "/usr/local/bin/python3.13",
+      "/usr/local/bin/python3.12",
+      "/usr/local/bin/python3.11",
+      "/usr/local/bin/python3.10",
+      "/usr/local/bin/python3.9",
+      "/usr/local/bin/python3.8",
+    ].forEach(add);
+  }
+
+  return candidates;
+}
+
+function format_instaloader_install_hint(python_probe) {
+  const executable =
+    python_probe && python_probe.details && python_probe.details.executable;
+  const python_version =
+    python_probe && python_probe.details && python_probe.details.python_version;
+  const resolved_executable =
+    executable || python_probe.python_bin || "python3";
+  const version_suffix = python_version ? ` (${python_version})` : "";
+
+  return [
+    `Instaloader is not available in: ${resolved_executable}${version_suffix}`,
+    "",
+    "Install Instaloader for that interpreter:",
+    `  ${resolved_executable} -m pip install instaloader==4.15`,
+    "",
+    "Or pick a different interpreter:",
+    "  instagram_likes_export --python /path/to/python3 <target_user>",
+  ].join("\n");
+}
+
+function resolve_python_bin({
+  requested_python_bin,
+  user_provided_python,
+  logger,
+  spawn_sync = spawnSync,
+}) {
+  const candidates = build_python_candidates(requested_python_bin);
+  if (!candidates.length) {
+    return requested_python_bin || "python3";
+  }
+
+  logger.debug("Step: detect Python interpreter (Instaloader import check)");
+
+  const probe_results = [];
+  for (const candidate of candidates) {
+    logger.debug(`Probing python: ${candidate}`);
+    const probe = probe_python_for_instaloader(candidate, spawn_sync);
+    probe_results.push(probe);
+
+    if (probe.ok) {
+      if (candidate !== requested_python_bin && !user_provided_python) {
+        const detail = probe.details || {};
+        const requested_label = requested_python_bin || "python3";
+        logger.warn(
+          `Default python '${requested_label}' cannot import Instaloader; using '${candidate}' (instaloader ${detail.instaloader_version || "unknown"}).`,
+        );
+      }
+      return candidate;
+    }
+
+    if (user_provided_python && candidate === requested_python_bin) {
+      const hint = format_instaloader_install_hint(probe);
+      const details = probe.details || {};
+      const reason = probe.spawn_error
+        ? `spawn_error=${probe.spawn_error}`
+        : `${details.error_type || "ImportError"}: ${details.error || "instaloader import failed"}`;
+
+      throw new Error(`${hint}\n\nReason: ${reason}`);
+    }
+  }
+
+  const attempted = probe_results
+    .map((probe) => {
+      if (probe.ok) return `${probe.python_bin} (ok)`;
+      if (probe.spawn_error)
+        return `${probe.python_bin} (spawn_error=${probe.spawn_error})`;
+      const details = probe.details || {};
+      const reason = details.error_type
+        ? `${details.error_type}: ${details.error}`
+        : "import failed";
+      return `${probe.python_bin} (${reason})`;
+    })
+    .join("\n  - ");
+
+  throw new Error(
+    [
+      "Unable to find a Python interpreter that can import Instaloader.",
+      "",
+      "Attempted:",
+      `  - ${attempted}`,
+      "",
+      "Tip: install Instaloader for the interpreter you want to use:",
+      "  python3 -m pip install instaloader==4.15",
+      "",
+      "Or pass the interpreter explicitly:",
+      "  instagram_likes_export --python /path/to/python3 <target_user>",
+    ].join("\n"),
+  );
+}
+
+function build_help_text(command_name) {
+  const modes_list = valid_modes.join(", ");
+  const content_type_list = valid_content_types.join(", ");
+  return [
+    `${chalk.bold("Usage")}`,
+    `  ${command_name} [options] <target_user>`,
+    "",
+    `${chalk.bold("Description")}`,
+    "  Export likers for Instagram media accessible via Instaloader (profile posts/reels/tagged,",
+    "  plus your saved/liked feeds) using a Python helper script.",
+    "  Downloads post media by default (use --skip-download to disable).",
+    "",
+    `${chalk.bold("Options")}`,
+    "  -u, --user <name>              Target profile username (or positional <target_user>).",
+    "  --session-user <name>          Username used for the Instaloader session (defaults to --user).",
+    "  --session-file <path>          Optional session file path (defaults to Instaloader's standard location).",
+    `  --content-type <type>          Content sources to scan (repeatable / comma-separated). Types: ${content_type_list} (default: liked).`,
+    "                               Note: content types 'saved' and 'liked' require --user == --session-user.",
+    "  --likers-source <source>       How to fetch liker lists (default: auto). Sources: auto, graphql, iphone.",
+    "                               auto: GraphQL then fallback to iPhone when blocked; iphone: always use iPhone endpoint.",
+    "  --on-block <policy>            When Instagram blocks a request. Policies: abort, skip_post (default: abort).",
+    "                               abort: stop with fix instructions; skip_post: keep going but omit likers for blocked posts.",
+    `  --mode <mode>                  Output modes (repeatable / comma-separated). Modes: ${modes_list} (default: per_post).`,
+    `  --format <csv|jsonl>           Output format (default: csv).`,
+    "  -o, --out-dir <dir>            Output directory for default filenames (default: <target_user>_likes).",
+    "  --prefix <name>                Output filename prefix (default: instagram_likes.<target_user>).",
+    "  --per-post-output <path>       Output path for per-post liker rows.",
+    "  --unique-output <path>         Output path for unique liker rows.",
+    "  --ghost-output <path>          Output path for ghost follower rows.",
+    "  --checkpoint <path>            JSON checkpoint for resuming per_post runs.",
+    "  --since <YYYY-MM-DD>           Only process posts on/after this UTC date.",
+    "  --until <YYYY-MM-DD>           Only process posts on/before this UTC date.",
+    "  --max-posts <n>                Stop after processing N posts.",
+    "  --post-filter <pattern>        Only process posts whose shortcode matches fnmatch patterns (repeatable).",
+    "  --max-attempts <n>             Retry attempts for rate limits/connection errors (default: 3).",
+    "  --backoff-seconds <n>          Sleep seconds between retries (default: 120).",
+    "  --skip-download                Skip downloading post media (default: false).",
+    "  --download-dir <dir>           Download directory for post media (default: --out-dir).",
+    "  --download-file-name-format <tokens>  Downloaded media filename tokens (default: timestamp,id,safe_title_or_desc,safe_author,index_or_empty).",
+    "                               Tokens: timestamp, id, safe_title_or_desc, safe_author, index_or_empty.",
+    `  --download-file-name-delimiter <text> Delimiter between downloaded filename components (default: ${default_download_file_name_delimiter}).`,
+    "  -d, --dry-run                  Print what would be processed without writing outputs (default: false).",
+    "  --refresh                      Reprocess and overwrite outputs even if they already exist (default: false).",
+    "  --json                         Print JSON summary only (default: false).",
+    "  --python <path>                Python executable (default: python3; auto-fallback if Instaloader missing).",
+    "  --quiet                        Print only warnings and errors (default: false).",
+    "  --debug                        Verbose output and debug logs (default: false).",
+    "  --debug-cookie                 Print a redacted session cookie snapshot (default: false).",
+    "  -v, --version                  Show version number and exit.",
+    "  -h, --help                     Show this help message and exit.",
+    "",
+    `${chalk.bold("Examples")}`,
+    `  ${chalk.gray("# Export liked posts (default content type) into ./my_account_likes and download media")}`,
+    `  ${command_name} my_account --max-posts 20`,
+    "",
+    `  ${chalk.gray("# Export per-post likes for your own posts + reels")}`,
+    `  ${command_name} my_account --content-type posts,reels --out-dir ./ig_exports`,
+    "",
+    `  ${chalk.gray("# Export liked posts but skip downloading media")}`,
+    `  ${command_name} my_account --skip-download --max-posts 20 --out-dir ./ig_exports`,
+    "",
+    `  ${chalk.gray("# Download media with a custom filename format (omit caption + author)")}`,
+    `  ${command_name} my_account --download-file-name-format timestamp,id,index_or_empty --max-posts 5`,
+    "",
+    `  ${chalk.gray("# Export unique likers and ghost followers (refresh to overwrite outputs)")}`,
+    `  ${command_name} my_account --mode unique --mode ghost --refresh`,
+    "",
+    `  ${chalk.gray("# Resume a previous per-post export by appending new rows (requires checkpoint)")}`,
+    `  ${command_name} my_account --mode per_post --out-dir ./ig_exports`,
+    "",
+    `  ${chalk.gray("# Filter posts by shortcode pattern and stop after 50 posts")}`,
+    `  ${command_name} my_account --post-filter \"Cw*\" --max-posts 50`,
+    "",
+    `  ${chalk.gray("# Debug session cookies (redacted; prints to stderr)")}`,
+    `  ${command_name} my_account --session-user my_account --debug-cookie --content-type liked --max-posts 5`,
+    "",
+    `  ${chalk.gray("# Work around GraphQL blocks by fetching likers via the iPhone endpoint")}`,
+    `  ${command_name} my_account --content-type liked --likers-source iphone --max-posts 5`,
+    "",
+    `  ${chalk.gray("# Keep downloading posts even if Instagram blocks liker lists")}`,
+    `  ${command_name} my_account --content-type liked --on-block skip_post --max-posts 50`,
+    "",
+    `${chalk.bold("Setup")}`,
+    "  You need an Instaloader session before running:",
+    "    instaloader --login <session-user>",
+    "  If Instaloader is missing, install it:",
+    "    python3 -m pip install instaloader==4.15",
+  ].join("\n");
+}
+
+function extract_json_summary_from_exporter_output(raw_output) {
+  const normalized_output = String(raw_output || "").trim();
+  if (!normalized_output) {
+    throw new Error("No output received from exporter; expected JSON summary.");
+  }
+
+  const lines = normalized_output
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    try {
+      return JSON.parse(lines[index]);
+    } catch (error) {
+      continue;
+    }
+  }
+
+  const last_brace_index = normalized_output.lastIndexOf("{");
+  if (last_brace_index !== -1) {
+    const tail_candidate = normalized_output.slice(last_brace_index);
+    try {
+      return JSON.parse(tail_candidate);
+    } catch (error) {
+      // fall through
+    }
+  }
+
+  throw new Error(
+    "Unable to locate JSON summary in exporter output. Run with --debug to inspect raw output.",
+  );
+}
+
+function normalize_list_flag(raw_value) {
+  if (raw_value === undefined || raw_value === null) return [];
+  const values = Array.isArray(raw_value) ? raw_value : [raw_value];
+  const flattened = [];
+
+  for (const entry of values) {
+    if (entry === undefined || entry === null) continue;
+    const text = String(entry).trim();
+    if (!text) continue;
+    text
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean)
+      .forEach((value) => flattened.push(value));
+  }
+
+  return flattened;
+}
+
+function normalize_download_file_name_format(raw_value) {
+  if (raw_value === undefined || raw_value === null || raw_value === "") {
+    return [...default_download_file_name_format];
+  }
+
+  const values = Array.isArray(raw_value) ? raw_value : [raw_value];
+  const tokens = [];
+
+  for (const entry of values) {
+    if (entry === undefined || entry === null) continue;
+    const text = String(entry).trim();
+    if (!text) continue;
+
+    text
+      .split(/[, +]+/g)
+      .map((value) => value.trim())
+      .filter(Boolean)
+      .forEach((value) => tokens.push(value.toLowerCase()));
+  }
+
+  const seen = new Set();
+  const normalized = [];
+
+  for (const token of tokens) {
+    if (!valid_download_file_name_tokens.includes(token)) {
+      throw new Error(
+        `Invalid --download-file-name-format token '${token}'. Expected one of: ${valid_download_file_name_tokens.join(", ")}`,
+      );
+    }
+    if (seen.has(token)) continue;
+    seen.add(token);
+    normalized.push(token);
+  }
+
+  if (!normalized.length) {
+    return [...default_download_file_name_format];
+  }
+
+  return normalized;
+}
+
+function normalize_download_file_name_delimiter(raw_value) {
+  if (raw_value === undefined || raw_value === null || raw_value === "") {
+    return default_download_file_name_delimiter;
+  }
+
+  const delimiter = String(raw_value);
+  if (
+    delimiter.includes("/") ||
+    delimiter.includes("\\") ||
+    delimiter.includes("\0")
+  ) {
+    throw new Error(
+      "Invalid --download-file-name-delimiter: must not contain path separators.",
+    );
+  }
+  if (!delimiter.trim()) {
+    throw new Error(
+      "Invalid --download-file-name-delimiter: must not be empty.",
+    );
+  }
+
+  return delimiter;
+}
+
+function normalize_content_types(raw_value) {
+  const default_content_types = ["liked"];
+
+  const resolved_values = normalize_list_flag(raw_value).map((value) =>
+    value.toLowerCase(),
+  );
+
+  const seen = new Set();
+  const normalized = [];
+
+  for (const value of resolved_values) {
+    if (seen.has(value)) continue;
+    seen.add(value);
+    normalized.push(value);
+  }
+
+  const final_values = normalized.length ? normalized : default_content_types;
+
+  for (const value of final_values) {
+    if (!valid_content_types.includes(value)) {
+      throw new Error(
+        `Invalid content type '${value}'. Supported types: ${valid_content_types.join(", ")}`,
+      );
+    }
+  }
+
+  return final_values;
+}
+
+function normalize_modes(raw_value) {
+  const default_modes = ["per_post"];
+  const resolved_values = normalize_list_flag(raw_value).map((value) =>
+    value.toLowerCase(),
+  );
+
+  const seen = new Set();
+  const normalized = [];
+
+  for (const value of resolved_values) {
+    if (seen.has(value)) continue;
+    seen.add(value);
+    normalized.push(value);
+  }
+
+  const final_values = normalized.length ? normalized : default_modes;
+
+  for (const value of final_values) {
+    if (!valid_modes.includes(value)) {
+      throw new Error(
+        `Invalid mode '${value}'. Supported modes: ${valid_modes.join(", ")}`,
+      );
+    }
+  }
+
+  return final_values;
+}
+
+function compute_output_strategy({
+  modes,
+  refresh,
+  dry_run,
+  existing_outputs,
+  checkpoint_exists,
+}) {
+  const requested_modes = Array.isArray(modes) ? modes.slice() : [];
+
+  const existing = {
+    per_post: Boolean(existing_outputs && existing_outputs.per_post),
+    unique: Boolean(existing_outputs && existing_outputs.unique),
+    ghost: Boolean(existing_outputs && existing_outputs.ghost),
+  };
+
+  const append_outputs = { per_post: false, unique: false, ghost: false };
+
+  if (dry_run) {
+    return { action: "continue", append_outputs };
+  }
+
+  if (refresh) {
+    return { action: "continue", append_outputs };
+  }
+
+  const wants_per_post = requested_modes.includes("per_post");
+  const wants_unique = requested_modes.includes("unique");
+  const wants_ghost = requested_modes.includes("ghost");
+
+  if (wants_unique && existing.unique) {
+    return {
+      action: "abort",
+      reason:
+        "unique output already exists (use --refresh or change output path)",
+    };
+  }
+
+  if (wants_ghost && existing.ghost) {
+    return {
+      action: "abort",
+      reason:
+        "ghost output already exists (use --refresh or change output path)",
+    };
+  }
+
+  if (wants_per_post && existing.per_post) {
+    const only_per_post = wants_per_post && !wants_unique && !wants_ghost;
+    if (!checkpoint_exists) {
+      return {
+        action: "abort",
+        reason:
+          "per_post output exists but checkpoint is missing (use --refresh or provide --checkpoint)",
+      };
+    }
+    if (!only_per_post) {
+      return {
+        action: "abort",
+        reason:
+          "per_post output exists; use --refresh when requesting unique/ghost outputs",
+      };
+    }
+    append_outputs.per_post = true;
+    return { action: "append", append_outputs };
+  }
+
+  return { action: "continue", append_outputs };
+}
+
+function normalize_positive_integer(raw_value, fallback_value) {
+  if (raw_value === undefined || raw_value === null || raw_value === "") {
+    return fallback_value;
+  }
+  const numeric_value = Number(raw_value);
+  if (!Number.isFinite(numeric_value)) {
+    return fallback_value;
+  }
+  const rounded = Math.floor(numeric_value);
+  if (rounded < 1) {
+    return fallback_value;
+  }
+  return rounded;
+}
+
+function validate_date_string(raw_value, option_name) {
+  if (raw_value === undefined || raw_value === null || raw_value === "") {
+    return undefined;
+  }
+  const text = String(raw_value).trim();
+  if (!text) return undefined;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) {
+    throw new Error(`${option_name} expects YYYY-MM-DD, received '${text}'.`);
+  }
+  return text;
+}
+
+async function path_exists(file_path) {
+  if (!file_path) return false;
+  try {
+    await fs.access(file_path);
+    return true;
+  } catch (error) {
+    if (error && error.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+async function output_has_data_rows(file_path, format_name) {
+  if (!file_path) return false;
+  try {
+    const file_handle = await fs.open(file_path, "r");
+    try {
+      const buffer = Buffer.alloc(65536);
+      const { bytesRead } = await file_handle.read(buffer, 0, buffer.length, 0);
+      if (!bytesRead) return false;
+      const text = buffer.slice(0, bytesRead).toString("utf8");
+      const lines = text
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean);
+      if (format_name === "csv") {
+        return lines.length > 1;
+      }
+      if (format_name === "jsonl") {
+        return lines.length > 0;
+      }
+      return true;
+    } finally {
+      await file_handle.close();
+    }
+  } catch (error) {
+    if (error && error.code === "ENOENT") return false;
+    return true;
+  }
+}
+
+function parse_cli_arguments(command_name) {
+  const parser = yargs(process.argv.slice(2))
+    .scriptName(command_name)
+    .help(false)
+    .version(false)
+    .parserConfiguration({
+      "camel-case-expansion": false,
+      "strip-dashed": false,
+    })
+    .option("user", {
+      alias: "u",
+      type: "string",
+      describe: "Target profile username (or positional <target_user>).",
+    })
+    .option("session-user", {
+      type: "string",
+      describe:
+        "Username used for the Instaloader session (defaults to --user).",
+    })
+    .option("session-file", {
+      type: "string",
+      describe:
+        "Optional session file path (defaults to Instaloader standard).",
+    })
+    .option("content-type", {
+      type: "array",
+      describe:
+        "Content sources to scan (repeatable / comma-separated): posts, reels, igtv, tagged, saved, liked.",
+    })
+    .option("likers-source", {
+      type: "string",
+      default: "auto",
+      choices: ["auto", "graphql", "iphone"],
+      describe: "How to fetch liker lists: auto, graphql, iphone.",
+    })
+    .option("on-block", {
+      type: "string",
+      default: "abort",
+      choices: ["abort", "skip_post"],
+      describe: "When Instagram blocks a request: abort, skip_post.",
+    })
+    .option("mode", {
+      type: "array",
+      describe:
+        "Output mode (repeatable / comma-separated): per_post, unique, ghost.",
+    })
+    .option("format", {
+      type: "string",
+      describe: "Output format: csv or jsonl.",
+      default: "csv",
+    })
+    .option("out-dir", {
+      alias: "o",
+      type: "string",
+      describe: "Output directory for default filenames.",
+    })
+    .option("skip-download", {
+      type: "boolean",
+      describe:
+        "Skip downloading post media (downloads are enabled by default).",
+    })
+    .option("download", {
+      type: "boolean",
+      describe:
+        "[deprecated] Downloads are enabled by default; use --skip-download to disable.",
+    })
+    .option("prefix", {
+      type: "string",
+      describe:
+        "Output filename prefix (default: instagram_likes.<target_user>).",
+    })
+    .option("per-post-output", {
+      type: "string",
+      describe: "Output path for per-post liker rows.",
+    })
+    .option("unique-output", {
+      type: "string",
+      describe: "Output path for unique liker rows.",
+    })
+    .option("ghost-output", {
+      type: "string",
+      describe: "Output path for ghost follower rows.",
+    })
+    .option("checkpoint", {
+      type: "string",
+      describe: "Checkpoint JSON path for resuming per_post exports.",
+    })
+    .option("since", {
+      type: "string",
+      describe: "Only process posts on/after this date (YYYY-MM-DD).",
+    })
+    .option("until", {
+      type: "string",
+      describe: "Only process posts on/before this date (YYYY-MM-DD).",
+    })
+    .option("max-posts", {
+      type: "number",
+      describe: "Stop after processing N posts.",
+    })
+    .option("post-filter", {
+      type: "array",
+      describe:
+        "Only process posts whose shortcode matches fnmatch patterns (repeatable).",
+    })
+    .option("max-attempts", {
+      type: "number",
+      default: 3,
+      describe: "Retry attempts for rate limits/connection errors.",
+    })
+    .option("backoff-seconds", {
+      type: "number",
+      default: 120,
+      describe: "Sleep seconds between retries.",
+    })
+    .option("download-dir", {
+      type: "string",
+      describe: "Download directory for post media (defaults to --out-dir).",
+    })
+    .option("download-file-name-format", {
+      type: "string",
+      default: default_download_file_name_format.join(","),
+      describe:
+        "Downloaded media filename tokens (comma-separated): timestamp, id, safe_title_or_desc, safe_author, index_or_empty.",
+    })
+    .option("download-file-name-delimiter", {
+      type: "string",
+      default: default_download_file_name_delimiter,
+      describe: "Delimiter between downloaded media filename components.",
+    })
+    .option("dry-run", {
+      alias: "d",
+      type: "boolean",
+      default: false,
+      describe: "Print what would be processed without writing outputs.",
+    })
+    .option("refresh", {
+      type: "boolean",
+      default: false,
+      describe: "Reprocess and overwrite outputs even if they already exist.",
+    })
+    .option("json", {
+      type: "boolean",
+      default: false,
+      describe: "Print JSON summary only.",
+    })
+    .option("python", {
+      type: "string",
+      default: "python3",
+      describe: "Python executable.",
+    })
+    .option("quiet", {
+      type: "boolean",
+      default: false,
+      describe: "Print only warnings and errors.",
+    })
+    .option("debug", {
+      type: "boolean",
+      default: false,
+      describe: "Verbose output and debug logs.",
+    })
+    .option("debug-cookie", {
+      type: "boolean",
+      default: false,
+      describe: "Print a redacted session cookie snapshot.",
+    })
+    .option("version", {
+      alias: "v",
+      type: "boolean",
+      describe: "Show version number and exit.",
+    })
+    .option("help", {
+      alias: "h",
+      type: "boolean",
+      describe: "Show help and exit.",
+    })
+    .strict()
+    .usage(build_help_text(command_name))
+    .wrap(Math.min(yargs.terminalWidth(), 110));
+
+  const argv = parser.parse();
+
+  if (argv.help) {
+    console.log(build_help_text(argv.$0 || command_name));
+    process.exit(0);
+  }
+
+  if (argv.version) {
+    console.log(package_json.version);
+    process.exit(0);
+  }
+
+  const positional_args = Array.isArray(argv._) ? argv._.map(String) : [];
+  const target_user =
+    (argv.user ? String(argv.user) : "") || positional_args[0] || "";
+
+  const session_user = argv["session-user"]
+    ? String(argv["session-user"])
+    : target_user;
+
+  const out_dir = argv["out-dir"]
+    ? String(argv["out-dir"])
+    : target_user
+      ? `${sanitize_filename_component(target_user)}_likes`
+      : ".";
+
+  return {
+    target_user,
+    session_user,
+    session_file: argv["session-file"] ? String(argv["session-file"]) : "",
+    raw_content_types: argv["content-type"],
+    likers_source: argv["likers-source"]
+      ? String(argv["likers-source"])
+      : "auto",
+    on_block: argv["on-block"] ? String(argv["on-block"]) : "abort",
+    raw_modes: argv.mode,
+    format: String(argv.format || "csv"),
+    out_dir,
+    prefix: argv.prefix ? String(argv.prefix) : "",
+    per_post_output: argv["per-post-output"]
+      ? String(argv["per-post-output"])
+      : "",
+    unique_output: argv["unique-output"] ? String(argv["unique-output"]) : "",
+    ghost_output: argv["ghost-output"] ? String(argv["ghost-output"]) : "",
+    checkpoint: argv.checkpoint ? String(argv.checkpoint) : "",
+    since: argv.since ? String(argv.since) : "",
+    until: argv.until ? String(argv.until) : "",
+    max_posts: argv["max-posts"],
+    raw_post_filters: argv["post-filter"],
+    max_attempts: argv["max-attempts"],
+    backoff_seconds: argv["backoff-seconds"],
+    skip_download: Boolean(argv["skip-download"]),
+    legacy_download: argv.download,
+    download_dir: argv["download-dir"] ? String(argv["download-dir"]) : "",
+    download_file_name_format: argv["download-file-name-format"]
+      ? String(argv["download-file-name-format"])
+      : "",
+    download_file_name_delimiter: argv["download-file-name-delimiter"]
+      ? String(argv["download-file-name-delimiter"])
+      : "",
+    dry_run: Boolean(argv["dry-run"]),
+    refresh: Boolean(argv.refresh),
+    json_only: Boolean(argv.json),
+    python_bin: String(argv.python || "python3"),
+    quiet_mode: Boolean(argv.quiet),
+    debug_mode: Boolean(argv.debug),
+    debug_cookie: Boolean(argv["debug-cookie"]),
+  };
+}
+
+function build_default_output_paths({
+  target_user,
+  out_dir,
+  prefix,
+  format_name,
+  modes,
+}) {
+  const ext = format_name === "jsonl" ? "jsonl" : "csv";
+  const resolved_out_dir = path.resolve(expand_user_path(out_dir || "."));
+  const default_prefix = prefix
+    ? sanitize_filename_component(prefix)
+    : `instagram_likes.${sanitize_filename_component(target_user)}`;
+
+  const per_post_output_path = modes.includes("per_post")
+    ? path.join(resolved_out_dir, `${default_prefix}.per_post.${ext}`)
+    : "";
+  const unique_output_path = modes.includes("unique")
+    ? path.join(resolved_out_dir, `${default_prefix}.unique.${ext}`)
+    : "";
+  const ghost_output_path = modes.includes("ghost")
+    ? path.join(resolved_out_dir, `${default_prefix}.ghost.${ext}`)
+    : "";
+  const checkpoint_path = modes.includes("per_post")
+    ? path.join(resolved_out_dir, `${default_prefix}.checkpoint.json`)
+    : "";
+
+  return {
+    per_post_output_path,
+    unique_output_path,
+    ghost_output_path,
+    checkpoint_path,
+  };
+}
+
+function summarize_path(file_path) {
+  if (!file_path) return "";
+  return path.relative(process.cwd(), file_path) || file_path;
+}
+
+function render_summary(summary, { json_only, quiet_mode }) {
+  if (json_only) {
+    console.log(JSON.stringify(summary, null, 2));
+    return;
+  }
+
+  if (quiet_mode) {
+    return;
+  }
+
+  const headline = palette.headline("instagram_likes_export summary");
+  console.log(headline);
+  console.log(
+    `${palette.info("processed_posts")}: ${palette.success(
+      String(summary.processed_posts ?? 0),
+    )}`,
+  );
+  console.log(
+    `${palette.info("skipped_posts")}: ${palette.success(
+      String(summary.skipped_posts ?? 0),
+    )}`,
+  );
+  if (summary.blocked_posts) {
+    console.log(
+      `${palette.info("blocked_posts")}: ${palette.success(
+        String(summary.blocked_posts ?? 0),
+      )}`,
+    );
+  }
+  if (summary.downloaded_posts !== undefined) {
+    console.log(
+      `${palette.info("downloaded_posts")}: ${palette.success(
+        String(summary.downloaded_posts ?? 0),
+      )}`,
+    );
+  }
+  if (summary.unique_likers !== undefined) {
+    console.log(
+      `${palette.info("unique_likers")}: ${palette.success(
+        String(summary.unique_likers),
+      )}`,
+    );
+  }
+  if (summary.ghost_followers !== undefined) {
+    console.log(
+      `${palette.info("ghost_followers")}: ${palette.success(
+        String(summary.ghost_followers),
+      )}`,
+    );
+  }
+
+  const output_fields = [
+    ["per_post_output", summary.per_post_output],
+    ["unique_output", summary.unique_output],
+    ["ghost_output", summary.ghost_output],
+  ];
+
+  for (const [label, file_path] of output_fields) {
+    if (!file_path) continue;
+    console.log(
+      `${palette.detail(label)}: ${palette.path(summarize_path(file_path))}`,
+    );
+  }
+
+  if (summary.download_dir) {
+    console.log(
+      `${palette.detail("download_dir")}: ${palette.path(
+        summarize_path(String(summary.download_dir)),
+      )}`,
+    );
+  }
+
+  if (Array.isArray(summary.warnings) && summary.warnings.length > 0) {
+    console.log(palette.warn("warnings:"));
+    summary.warnings.forEach((warning) => {
+      console.log(palette.warn(`  - ${warning}`));
+    });
+  }
+}
+
+function run_python_exporter({
+  python_bin,
+  exporter_script_path,
+  config_payload,
+  logger,
+  quiet_mode,
+}) {
+  return new Promise((resolve, reject) => {
+    const config_json = JSON.stringify(config_payload);
+    const args = [exporter_script_path, "--config-json", config_json];
+
+    logger.debug(
+      `Spawning exporter: ${python_bin} ${args
+        .map((value) => (value.includes(" ") ? JSON.stringify(value) : value))
+        .join(" ")}`,
+    );
+
+    const child = spawn(python_bin, args, {
+      stdio: ["ignore", "pipe", "pipe"],
+      env: process.env,
+    });
+
+    let stdout = "";
+    let stderr = "";
+
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+
+    child.stderr.on("data", (chunk) => {
+      const text = chunk.toString();
+      stderr += text;
+      if (!quiet_mode) {
+        process.stderr.write(text);
+      }
+    });
+
+    child.on("error", (error) => {
+      reject(error);
+    });
+
+    child.on("close", (code) => {
+      if (code === 0) {
+        resolve({ stdout, stderr });
+        return;
+      }
+
+      const error = new Error(
+        `Exporter failed with exit code ${code === null ? "unknown" : code}`,
+      );
+      error.stdout = stdout;
+      error.stderr = stderr;
+      error.exit_code = code;
+      reject(error);
+    });
+  });
+}
+
+async function main() {
+  const command_name = path.basename(
+    process.argv[1] || "instagram_likes_export",
+  );
+
+  const argv = parse_cli_arguments(command_name);
+  const user_provided_python = process.argv.some(
+    (arg) => arg === "--python" || String(arg).startsWith("--python="),
+  );
+  const user_provided_skip_download = process.argv.some(
+    (arg) =>
+      arg === "--skip-download" || String(arg).startsWith("--skip-download="),
+  );
+  const user_provided_legacy_download = process.argv.some(
+    (arg) => arg === "--download" || String(arg).startsWith("--download="),
+  );
+
+  const logger = create_logger({
+    command_name,
+    quiet_mode: argv.quiet_mode,
+    debug_mode: argv.debug_mode,
+  });
+
+  logger.debug("Step: validate and normalize inputs");
+
+  if (!argv.target_user) {
+    logger.error(
+      "Missing <target_user>. Provide --user or a positional username.",
+    );
+    console.log(build_help_text(command_name));
+    process.exitCode = 1;
+    return;
+  }
+
+  if (!argv.session_user) {
+    logger.error("Missing --session-user (or provide --user to default it).");
+    console.log(build_help_text(command_name));
+    process.exitCode = 1;
+    return;
+  }
+
+  const format_name = String(argv.format || "csv").toLowerCase();
+  if (!valid_formats.includes(format_name)) {
+    logger.error(
+      `Invalid --format '${argv.format}'. Expected one of: ${valid_formats.join(", ")}`,
+    );
+    process.exitCode = 1;
+    return;
+  }
+
+  const modes = normalize_modes(argv.raw_modes);
+  const content_types = normalize_content_types(argv.raw_content_types);
+
+  const since = validate_date_string(argv.since, "--since");
+  const until = validate_date_string(argv.until, "--until");
+
+  const max_posts = argv.max_posts
+    ? normalize_positive_integer(argv.max_posts, 0)
+    : 0;
+  const normalized_max_posts = max_posts > 0 ? max_posts : undefined;
+
+  const post_filters = normalize_list_flag(argv.raw_post_filters);
+
+  const max_attempts = normalize_positive_integer(argv.max_attempts, 3);
+  const backoff_seconds = normalize_positive_integer(argv.backoff_seconds, 120);
+
+  let download_file_name_format = [];
+  let download_file_name_delimiter = default_download_file_name_delimiter;
+  try {
+    download_file_name_format = normalize_download_file_name_format(
+      argv.download_file_name_format,
+    );
+    download_file_name_delimiter = normalize_download_file_name_delimiter(
+      argv.download_file_name_delimiter,
+    );
+  } catch (error) {
+    logger.error(error.message || String(error), error);
+    process.exitCode = 1;
+    return;
+  }
+
+  if (user_provided_skip_download && user_provided_legacy_download) {
+    logger.error(
+      "Conflicting flags: use either --skip-download or legacy --download (not both).",
+    );
+    process.exitCode = 1;
+    return;
+  }
+
+  if (user_provided_legacy_download) {
+    const legacy_value =
+      typeof argv.legacy_download === "boolean" ? argv.legacy_download : true;
+    if (legacy_value) {
+      logger.warn(
+        "Deprecated flag --download is no longer needed; downloads are enabled by default (use --skip-download to disable).",
+      );
+    } else {
+      logger.warn(
+        "Deprecated flag --download=false is replaced by --skip-download.",
+      );
+    }
+  }
+
+  const legacy_forces_download_off =
+    user_provided_legacy_download && argv.legacy_download === false;
+
+  const download_disabled_reason = argv.dry_run
+    ? "--dry-run"
+    : argv.skip_download
+      ? "--skip-download"
+      : legacy_forces_download_off
+        ? "--download=false"
+        : "";
+
+  const download_enabled =
+    !argv.skip_download &&
+    !legacy_forces_download_off &&
+    argv.dry_run === false;
+
+  if (
+    (argv.skip_download || legacy_forces_download_off) &&
+    Boolean(argv.download_dir)
+  ) {
+    logger.error(
+      `Invalid options: --download-dir cannot be used together with ${download_disabled_reason || "--skip-download"}.`,
+    );
+    process.exitCode = 1;
+    return;
+  }
+
+  const download_dir = download_enabled
+    ? path.resolve(expand_user_path(argv.download_dir || argv.out_dir || "."))
+    : "";
+
+  if (
+    !download_enabled &&
+    !argv.dry_run &&
+    content_types.some((value) => value === "liked" || value === "saved")
+  ) {
+    logger.warn(
+      `Note: this command exports likers/metadata; it will not download post media when you use ${download_disabled_reason || "--skip-download"}.`,
+    );
+  }
+
+  const defaults = build_default_output_paths({
+    target_user: argv.target_user,
+    out_dir: argv.out_dir,
+    prefix: argv.prefix,
+    format_name,
+    modes,
+  });
+
+  const per_post_output_path = modes.includes("per_post")
+    ? path.resolve(
+        expand_user_path(argv.per_post_output || defaults.per_post_output_path),
+      )
+    : "";
+  const unique_output_path = modes.includes("unique")
+    ? path.resolve(
+        expand_user_path(argv.unique_output || defaults.unique_output_path),
+      )
+    : "";
+  const ghost_output_path = modes.includes("ghost")
+    ? path.resolve(
+        expand_user_path(argv.ghost_output || defaults.ghost_output_path),
+      )
+    : "";
+  const checkpoint_path = modes.includes("per_post")
+    ? path.resolve(
+        expand_user_path(argv.checkpoint || defaults.checkpoint_path),
+      )
+    : "";
+
+  logger.debug("Step: detect existing outputs");
+  logger.debug(`per_post_output_path=${per_post_output_path || "<disabled>"}`);
+  logger.debug(`unique_output_path=${unique_output_path || "<disabled>"}`);
+  logger.debug(`ghost_output_path=${ghost_output_path || "<disabled>"}`);
+  logger.debug(`checkpoint_path=${checkpoint_path || "<disabled>"}`);
+  logger.debug(
+    `download_enabled=${download_enabled} download_dir=${download_dir || "<disabled>"}`,
+  );
+  if (download_enabled) {
+    logger.debug(
+      `download_file_name_format=${download_file_name_format.join(",")} download_file_name_delimiter=${JSON.stringify(
+        download_file_name_delimiter,
+      )}`,
+    );
+  }
+
+  const existing_outputs = {
+    per_post: await output_has_data_rows(per_post_output_path, format_name),
+    unique: await output_has_data_rows(unique_output_path, format_name),
+    ghost: await output_has_data_rows(ghost_output_path, format_name),
+  };
+  const checkpoint_exists = await path_exists(checkpoint_path);
+
+  const strategy = compute_output_strategy({
+    modes,
+    refresh: argv.refresh,
+    dry_run: argv.dry_run,
+    existing_outputs,
+    checkpoint_exists,
+  });
+
+  if (strategy.action === "abort") {
+    logger.error(
+      `Refusing to continue: ${strategy.reason || "unsafe outputs"}`,
+    );
+    logger.warn(
+      "Tip: use --refresh to overwrite outputs, or choose new output paths.",
+    );
+    process.exitCode = 1;
+    return;
+  }
+
+  if (strategy.action === "append") {
+    logger.warn(
+      "Detected existing per_post output + checkpoint; appending new rows.",
+    );
+  }
+
+  logger.debug("Step: build exporter config");
+  const exporter_config = {
+    target_user: argv.target_user,
+    session_user: argv.session_user,
+    session_file: argv.session_file
+      ? expand_user_path(argv.session_file)
+      : null,
+    refresh: argv.refresh,
+    dry_run: argv.dry_run,
+    format: format_name,
+    modes,
+    content_types,
+    likers_source: argv.likers_source,
+    on_block: argv.on_block,
+    output_path: per_post_output_path || null,
+    unique_output_path: unique_output_path || null,
+    ghost_output_path: ghost_output_path || null,
+    checkpoint_path: checkpoint_path || null,
+    since: since || null,
+    until: until || null,
+    max_posts: normalized_max_posts ?? null,
+    post_filters,
+    append_outputs: strategy.append_outputs,
+    max_attempts,
+    backoff_seconds,
+    download: download_enabled,
+    download_dir: download_dir || null,
+    download_file_name_format,
+    download_file_name_delimiter,
+    debug: argv.debug_mode,
+    debug_cookie: argv.debug_cookie,
+    quiet: argv.quiet_mode,
+  };
+
+  const exporter_script_path = path.resolve(
+    __dirname,
+    "../utility/instagram_likes_exporter.py",
+  );
+
+  let python_bin = argv.python_bin;
+  try {
+    python_bin = resolve_python_bin({
+      requested_python_bin: argv.python_bin,
+      user_provided_python,
+      logger,
+    });
+  } catch (error) {
+    logger.error(error.message || String(error), error);
+    process.exitCode = 1;
+    return;
+  }
+
+  logger.debug("Step: run python exporter");
+  try {
+    const { stdout } = await run_python_exporter({
+      python_bin,
+      exporter_script_path,
+      config_payload: exporter_config,
+      logger,
+      quiet_mode: argv.quiet_mode,
+    });
+
+    const summary = extract_json_summary_from_exporter_output(stdout);
+
+    render_summary(summary, {
+      json_only: argv.json_only,
+      quiet_mode: argv.quiet_mode,
+    });
+  } catch (error) {
+    logger.error(error.message || String(error), error);
+    if (error && error.stderr && (argv.quiet_mode || argv.debug_mode)) {
+      console.error(palette.error("Exporter stderr:"));
+      console.error(String(error.stderr).trim());
+    }
+    if (argv.debug_mode && error && error.stdout) {
+      console.error(palette.detail("Exporter stdout:"));
+      console.error(String(error.stdout).trim());
+    }
+    process.exitCode = 1;
+  }
+}
+
+if (require.main === module) {
+  main().catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });
+}
+
+module.exports = {
+  extract_json_summary_from_exporter_output,
+  normalize_content_types,
+  normalize_download_file_name_delimiter,
+  normalize_download_file_name_format,
+  normalize_modes,
+  compute_output_strategy,
+  build_python_candidates,
+  probe_python_for_instaloader,
+  resolve_python_bin,
+};

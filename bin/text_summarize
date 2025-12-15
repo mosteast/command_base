@@ -11,6 +11,7 @@ const {
 const command_name = path.basename(process.argv[1] || "text_summarize");
 const repo_root_path = path.resolve(__dirname, "..");
 const prompt_external_path =
+  process.env.TEXT_SUMMARIZE_PROMPT ||
   "/Users/hailang/Library/Mobile Documents/com~apple~CloudDocs/main/download/tool/prompt/summarize_text.build.md";
 
 (async () => {
@@ -19,6 +20,7 @@ const prompt_external_path =
     description_lines: [
       "Summarize one or more files with the summarize_text prompt.",
       "Writes `[filename.ext].summarized.md` alongside each input file.",
+      "Override prompt path with TEXT_SUMMARIZE_PROMPT=/path/to/prompt.md.",
     ],
     job_title: "Summarization",
     job_noun: "summarization",
