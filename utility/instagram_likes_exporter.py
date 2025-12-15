@@ -16,6 +16,7 @@ import re
 import sys
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from types import SimpleNamespace
 
 
 debug_enabled = False
@@ -32,6 +33,10 @@ DEFAULT_DOWNLOAD_FILE_NAME_FORMAT = [
     "index_or_empty",
 ]
 VALID_DOWNLOAD_FILE_NAME_TOKENS = set(DEFAULT_DOWNLOAD_FILE_NAME_FORMAT)
+
+
+class Instagram_login_required_error(RuntimeError):
+    pass
 
 
 def configure_logging(debug: bool, quiet: bool, debug_cookie: bool = False) -> None:
@@ -404,6 +409,64 @@ def save_checkpoint(checkpoint_path: Optional[Path], processed_posts: Set[str]) 
         json.dump(checkpoint_payload, handle, ensure_ascii=False, indent=2)
 
 
+def load_processed_posts_from_per_post_output(
+    per_post_path: Path, format_name: str
+) -> Set[str]:
+    processed_posts: Set[str] = set()
+    if not per_post_path.exists():
+        return processed_posts
+
+    normalized_format = str(format_name or "csv").strip().lower()
+    log(f"Scanning per_post output for exported posts: {per_post_path}", level="debug")
+
+    try:
+        if normalized_format == "csv":
+            with per_post_path.open("r", encoding="utf-8", newline="") as handle:
+                reader = csv.reader(handle)
+                header = next(reader, None)
+                if not header:
+                    return processed_posts
+
+                shortcode_index = 0
+                for index, field_name in enumerate(header):
+                    if str(field_name).strip() == "post_shortcode":
+                        shortcode_index = index
+                        break
+
+                for row in reader:
+                    if not row or shortcode_index >= len(row):
+                        continue
+                    shortcode = str(row[shortcode_index]).strip()
+                    if shortcode:
+                        processed_posts.add(shortcode)
+        elif normalized_format == "jsonl":
+            with per_post_path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    text = line.strip()
+                    if not text:
+                        continue
+                    try:
+                        payload = json.loads(text)
+                    except Exception:
+                        continue
+                    shortcode = payload.get("post_shortcode")
+                    if shortcode:
+                        processed_posts.add(str(shortcode).strip())
+        else:
+            log(
+                f"Unsupported format '{format_name}' while scanning {per_post_path}; expected csv or jsonl.",
+                level="warn",
+            )
+    except Exception as exc:
+        log(f"Failed to scan per_post output {per_post_path}: {exc}", level="warn")
+
+    log(
+        f"Detected {len(processed_posts)} exported posts in per_post output.",
+        level="debug",
+    )
+    return processed_posts
+
+
 def date_within_bounds(
     post_date: dt.datetime,
     since: Optional[dt.datetime],
@@ -458,6 +521,7 @@ def iter_liked_posts(
     context,
     max_attempts: int,
     backoff_seconds: int,
+    session_user: str,
 ) -> Iterable[Any]:
     import instaloader
     import time
@@ -494,6 +558,28 @@ def iter_liked_posts(
                 )
                 time.sleep(backoff_seconds)
             except instaloader.exceptions.ConnectionException as exc:
+                error_text = str(exc)
+                if is_login_required_error(error_text):
+                    raise Instagram_login_required_error(
+                        render_instagram_login_required_hint(
+                            error_text, session_user=session_user
+                        )
+                    ) from exc
+                if is_instagram_retry_later_error(error_text):
+                    attempt_index += 1
+                    if attempt_index >= max_attempts:
+                        raise RuntimeError(
+                            render_instagram_retry_later_hint(
+                                error_text, session_user=session_user
+                            )
+                        ) from exc
+                    log(
+                        "Instagram asked to wait before retrying liked feed. "
+                        f"Sleeping {backoff_seconds}s (attempt {attempt_index} of {max_attempts}).",
+                        level="warn",
+                    )
+                    time.sleep(backoff_seconds)
+                    continue
                 attempt_index += 1
                 if attempt_index >= max_attempts:
                     raise
@@ -531,6 +617,7 @@ def iter_post_likers_via_iphone_endpoint(
     mediaid: str,
     max_attempts: int,
     backoff_seconds: int,
+    session_user: str,
 ) -> Iterable[Any]:
     import instaloader
     import time
@@ -569,6 +656,28 @@ def iter_post_likers_via_iphone_endpoint(
                 )
                 time.sleep(backoff_seconds)
             except instaloader.exceptions.ConnectionException as exc:
+                error_text = str(exc)
+                if is_login_required_error(error_text):
+                    raise Instagram_login_required_error(
+                        render_instagram_login_required_hint(
+                            error_text, session_user=session_user
+                        )
+                    ) from exc
+                if is_instagram_retry_later_error(error_text):
+                    attempt_index += 1
+                    if attempt_index >= max_attempts:
+                        raise RuntimeError(
+                            render_instagram_retry_later_hint(
+                                error_text, session_user=session_user
+                            )
+                        ) from exc
+                    log(
+                        "Instagram asked to wait before retrying media likers. "
+                        f"Sleeping {backoff_seconds}s (attempt {attempt_index} of {max_attempts}).",
+                        level="warn",
+                    )
+                    time.sleep(backoff_seconds)
+                    continue
                 attempt_index += 1
                 if attempt_index >= max_attempts:
                     raise
@@ -629,6 +738,67 @@ def render_instagram_blocked_hint(error_text: str, session_user: str) -> str:
         "     instagram_likes_export --max-posts 1 --content-type liked --likers-source iphone\n"
         "  4) If you just need downloads (likers omitted when blocked):\n"
         "     instagram_likes_export --max-posts 10 --content-type liked --on-block skip_post\n"
+        "\n"
+        f"Original error: {error_text}"
+    )
+
+
+def is_instagram_block_error(error_text: str) -> bool:
+    normalized = str(error_text or "").lower()
+    return any(
+        keyword in normalized
+        for keyword in (
+            "feedback_required",
+            "checkpoint_required",
+            "challenge_required",
+        )
+    )
+
+
+def is_instagram_retry_later_error(error_text: str) -> bool:
+    normalized = str(error_text or "").lower()
+    return "please wait a few minutes" in normalized
+
+
+def render_instagram_retry_later_hint(error_text: str, session_user: str) -> str:
+    return (
+        "Instagram temporarily blocked requests from this session/IP with:\n"
+        "  \"Please wait a few minutes before you try again.\"\n"
+        "\n"
+        "Fix:\n"
+        "  1) Stop retrying for now (retries can extend the cooldown).\n"
+        "  2) Wait a while, then retry with a small batch:\n"
+        "     instagram_likes_export --max-posts 1 --content-type liked --likers-source iphone\n"
+        "  3) If you must re-login, do it after the cooldown:\n"
+        f"     instaloader --login {session_user}\n"
+        "\n"
+        f"Original error: {error_text}"
+    )
+
+
+def is_login_required_error(error_text: str) -> bool:
+    normalized = str(error_text or "").lower()
+    return "login_required" in normalized or "login required" in normalized
+
+
+def render_instagram_login_required_hint(error_text: str, session_user: str) -> str:
+    python_executable = sys.executable or "python3"
+    return (
+        "Instagram returned 'login_required' for an authenticated endpoint.\n"
+        "\n"
+        "This usually means your Instaloader session is expired, logged out, or belongs to a different account.\n"
+        "\n"
+        "Fix:\n"
+        "  1) Recreate the Instaloader session (uses the same interpreter as this run):\n"
+        f"     {python_executable} -m instaloader --login {session_user}\n"
+        "     If Instaloader says 'Checkpoint required', open the printed /auth_platform/ URL in your browser\n"
+        "     (prefix it with https://www.instagram.com), complete the prompts, then retry the login.\n"
+        "     If Instagram says 'Please wait a few minutes before you try again', stop retrying for a while\n"
+        "     (retries can extend the cooldown), then try again later.\n"
+        "  2) Retry with a small batch:\n"
+        f"     instagram_likes_export --user {session_user} --content-type liked --max-posts 1\n"
+        "\n"
+        "Note: logging into Instagram in Chrome does not update Instaloader's session file.\n"
         "\n"
         f"Original error: {error_text}"
     )
@@ -798,6 +968,27 @@ def download_post_media_with_retry(
             )
             time.sleep(backoff_seconds)
         except instaloader.exceptions.ConnectionException as exc:
+            error_text = str(exc)
+            if is_login_required_error(error_text):
+                raise Instagram_login_required_error(
+                    render_instagram_login_required_hint(
+                        error_text, session_user=session_user
+                    )
+                ) from exc
+            if is_instagram_retry_later_error(error_text):
+                if attempt_index >= max_attempts:
+                    raise RuntimeError(
+                        render_instagram_retry_later_hint(
+                            error_text, session_user=session_user
+                        )
+                    ) from exc
+                log(
+                    "Instagram asked to wait before retrying downloads. "
+                    f"Sleeping {backoff_seconds}s (attempt {attempt_index} of {max_attempts}).",
+                    level="warn",
+                )
+                time.sleep(backoff_seconds)
+                continue
             if attempt_index >= max_attempts:
                 raise
             log(
@@ -861,6 +1052,30 @@ def export_posts(
     if checkpoint_data.get("processed_posts"):
         processed_posts.update(checkpoint_data["processed_posts"])
 
+    if not refresh:
+        per_post_output_path = output_paths.get("per_post")
+        checkpoint_has_posts = bool(checkpoint_data.get("processed_posts"))
+        has_existing_per_post = bool(
+            per_post_output_path
+            and output_has_data_rows(per_post_output_path, format_name)
+        )
+        if has_existing_per_post and not checkpoint_has_posts:
+            log(
+                "Checkpoint is missing or empty; inferring exported posts from existing per_post output.",
+                level="warn",
+            )
+            inferred_posts = load_processed_posts_from_per_post_output(
+                per_post_output_path, format_name
+            )
+            if inferred_posts:
+                processed_posts.update(inferred_posts)
+                if checkpoint_path and not dry_run:
+                    log(
+                        f"Writing rebuilt checkpoint: {checkpoint_path}",
+                        level="warn",
+                    )
+                    save_checkpoint(checkpoint_path, processed_posts)
+
     per_post_writer = None
     per_post_path = None
     per_post_handle = None
@@ -912,6 +1127,7 @@ def export_posts(
                         loader.context,
                         max_attempts=max_attempts,
                         backoff_seconds=backoff_seconds,
+                        session_user=session_user,
                     )
                 else:
                     raise RuntimeError(
@@ -923,6 +1139,8 @@ def export_posts(
                 )
                 continue
             except Exception as exc:
+                if isinstance(exc, Instagram_login_required_error):
+                    raise
                 warnings.append(
                     f"Failed to initialize content source '{content_type}': {exc}"
                 )
@@ -943,6 +1161,8 @@ def export_posts(
                 )
                 continue
             except Exception as exc:
+                if isinstance(exc, Instagram_login_required_error):
+                    raise
                 warnings.append(
                     f"Content source '{content_type}' failed for {profile.username}: {exc}"
                 )
@@ -994,6 +1214,8 @@ def export_posts(
                 )
                 downloaded_posts += 1
             except Exception as exc:
+                if isinstance(exc, Instagram_login_required_error):
+                    raise
                 warnings.append(f"Failed to download {post.shortcode}: {exc}")
 
         if not dry_run and "per_post" in modes and per_post_handle is None:
@@ -1073,23 +1295,13 @@ def export_posts(
                 str(mediaid),
                 max_attempts=max_attempts,
                 backoff_seconds=backoff_seconds,
+                session_user=session_user,
             )
 
         def iter_likers(source_name: str):
             if source_name == "iphone":
                 return yield_likers_via_iphone()
             return yield_likers_via_graphql()
-
-        def is_instagram_block_error(error_text: str) -> bool:
-            lowered = error_text.lower()
-            return any(
-                keyword in lowered
-                for keyword in (
-                    "feedback_required",
-                    "checkpoint_required",
-                    "challenge_required",
-                )
-            )
 
         sources: List[str] = []
         if likers_source_normalized == "graphql":
@@ -1142,7 +1354,9 @@ def export_posts(
                 last_like_error = exc
                 error_text = str(exc)
                 if source_name == "graphql" and likers_source_normalized == "auto":
-                    if is_instagram_block_error(error_text):
+                    if is_instagram_block_error(error_text) or is_instagram_retry_later_error(
+                        error_text
+                    ):
                         graphql_likers_blocked = True
                         warnings.append(
                             "GraphQL like list blocked by Instagram; switching to iPhone endpoint "
@@ -1164,6 +1378,16 @@ def export_posts(
             except instaloader.exceptions.QueryReturnedBadRequestException as exc:
                 last_like_error = exc
                 if source_name == "graphql" and likers_source_normalized == "auto":
+                    error_text = str(exc)
+                    if is_instagram_block_error(
+                        error_text
+                    ) or is_instagram_retry_later_error(error_text):
+                        graphql_likers_blocked = True
+                        warnings.append(
+                            "GraphQL like list blocked by Instagram; switching to iPhone endpoint "
+                            "(tip: rerun with --likers-source iphone)."
+                        )
+                        continue
                     warnings.append(
                         f"GraphQL like list failed for {post.shortcode}; trying iPhone endpoint: {exc}"
                     )
@@ -1173,6 +1397,16 @@ def export_posts(
             except instaloader.exceptions.ConnectionException as exc:
                 last_like_error = exc
                 if source_name == "graphql" and likers_source_normalized == "auto":
+                    error_text = str(exc)
+                    if is_instagram_block_error(
+                        error_text
+                    ) or is_instagram_retry_later_error(error_text):
+                        graphql_likers_blocked = True
+                        warnings.append(
+                            "GraphQL like list blocked by Instagram; switching to iPhone endpoint "
+                            "(tip: rerun with --likers-source iphone)."
+                        )
+                        continue
                     warnings.append(
                         f"GraphQL like list connection issue for {post.shortcode}; trying iPhone endpoint: {exc}"
                     )
@@ -1384,6 +1618,8 @@ def main():
         likers_source = config.get("likers_source") or "auto"
         on_block = config.get("on_block") or "abort"
         append_outputs = config.get("append_outputs") or {}
+        check_login = bool(config.get("check_login"))
+        extra_warnings: List[str] = []
 
         if not target_user or not session_user:
             raise RuntimeError("Both target_user and session_user are required.")
@@ -1437,9 +1673,7 @@ def main():
             loader, session_user=str(session_user), session_file=session_file
         )
 
-        should_check_login = debug_mode or debug_cookie or any(
-            value in ("saved", "liked") for value in content_types
-        )
+        should_check_login = check_login or debug_mode or debug_cookie
         if should_check_login:
             log("Testing Instaloader session login...", level="debug")
             login_username = None
@@ -1477,20 +1711,75 @@ def main():
                     f"Error: {login_test_error}",
                     level="warn",
                 )
-            elif str(login_username) != str(session_user):
+            elif login_username and str(login_username) != str(session_user):
+                python_executable = sys.executable or "python3"
                 log(
                     f"Session belongs to '{login_username}', expected '{session_user}'. "
-                    "Check your session file.",
+                    "Recreate your Instaloader session with:\n"
+                    f"  {python_executable} -m instaloader --login {session_user}",
                     level="warn",
                 )
 
-        log(f"Loading profile for {target_user}", level="debug")
-        profile = instaloader.Profile.from_username(loader.context, target_user)
-        log(
-            f"Profile loaded: username={profile.username} mediacount={getattr(profile, 'mediacount', None)} "
-            f"is_private={getattr(profile, 'is_private', None)}",
-            level="debug",
-        )
+        content_types_normalized = [
+            str(value or "").strip().lower() for value in content_types
+        ]
+        modes_normalized = [str(value or "").strip().lower() for value in modes]
+
+        profile = None
+        try:
+            log(f"Loading profile for {target_user}", level="debug")
+            profile = instaloader.Profile.from_username(loader.context, target_user)
+            log(
+                f"Profile loaded: username={profile.username} mediacount={getattr(profile, 'mediacount', None)} "
+                f"is_private={getattr(profile, 'is_private', None)}",
+                level="debug",
+            )
+        except Exception as exc:
+            error_text = str(exc)
+            liked_only = set(content_types_normalized) == {"liked"}
+            needs_followers = "ghost" in modes_normalized
+
+            if liked_only and not needs_followers:
+                if str(target_user) != str(session_user):
+                    raise RuntimeError(
+                        "Liked posts require target_user to match session_user."
+                    ) from exc
+
+                profile = SimpleNamespace(
+                    username=str(target_user),
+                    mediacount=None,
+                    is_private=None,
+                )
+                extra_warnings.append(
+                    "Unable to load profile metadata (GraphQL blocked); proceeding with iPhone endpoints for liked feed."
+                )
+                log(extra_warnings[-1] + f" Error: {error_text}", level="warn")
+
+                if str(likers_source).strip().lower() == "auto":
+                    likers_source = "iphone"
+                    extra_warnings.append(
+                        "Forcing likers_source=iphone because GraphQL requests are blocked."
+                    )
+            else:
+                if is_login_required_error(error_text):
+                    raise RuntimeError(
+                        render_instagram_login_required_hint(
+                            error_text, session_user=str(session_user)
+                        )
+                    ) from exc
+                if is_instagram_retry_later_error(error_text):
+                    raise RuntimeError(
+                        render_instagram_retry_later_hint(
+                            error_text, session_user=str(session_user)
+                        )
+                    ) from exc
+                if is_instagram_block_error(error_text):
+                    raise RuntimeError(
+                        render_instagram_blocked_hint(
+                            error_text, session_user=str(session_user)
+                        )
+                    ) from exc
+                raise
 
         summary = export_posts(
             loader=loader,
@@ -1525,6 +1814,13 @@ def main():
             max_attempts=int(config.get("max_attempts") or 3),
             backoff_seconds=int(config.get("backoff_seconds") or 120),
         )
+
+        if extra_warnings:
+            warnings = summary.get("warnings")
+            if isinstance(warnings, list):
+                warnings.extend(extra_warnings)
+            else:
+                summary["warnings"] = list(extra_warnings)
     finally:
         sys.stdout = original_stdout
 

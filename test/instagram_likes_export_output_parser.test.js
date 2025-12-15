@@ -128,7 +128,10 @@ describe("instagram_likes_export content type normalization", () => {
   });
 
   it("splits comma-separated values inside arrays", () => {
-    expect(normalize_content_types(["posts,reels"])).toEqual(["posts", "reels"]);
+    expect(normalize_content_types(["posts,reels"])).toEqual([
+      "posts",
+      "reels",
+    ]);
   });
 
   it("deduplicates repeat values", () => {
@@ -150,7 +153,10 @@ describe("instagram_likes_export mode normalization", () => {
   });
 
   it("splits comma-separated values inside arrays", () => {
-    expect(normalize_modes(["per_post,unique"])).toEqual(["per_post", "unique"]);
+    expect(normalize_modes(["per_post,unique"])).toEqual([
+      "per_post",
+      "unique",
+    ]);
   });
 
   it("deduplicates repeat values", () => {
@@ -194,7 +200,9 @@ describe("instagram_likes_export download filename format normalization", () => 
   });
 
   it("rejects unknown tokens", () => {
-    expect(() => normalize_download_file_name_format("nope")).toThrow(/format/i);
+    expect(() => normalize_download_file_name_format("nope")).toThrow(
+      /format/i,
+    );
   });
 });
 
@@ -238,13 +246,25 @@ describe("instagram_likes_export output strategy", () => {
     expect(result.append_outputs.per_post).toBe(true);
   });
 
-  it("aborts when per_post exists but checkpoint missing", () => {
+  it("appends when per_post exists but checkpoint missing", () => {
     const result = compute_output_strategy({
       modes: ["per_post"],
       refresh: false,
       dry_run: false,
       existing_outputs: { per_post: true, unique: false, ghost: false },
       checkpoint_exists: false,
+    });
+    expect(result.action).toBe("append");
+    expect(result.append_outputs.per_post).toBe(true);
+  });
+
+  it("aborts when per_post exists and unique output requested", () => {
+    const result = compute_output_strategy({
+      modes: ["per_post", "unique"],
+      refresh: false,
+      dry_run: false,
+      existing_outputs: { per_post: true, unique: false, ghost: false },
+      checkpoint_exists: true,
     });
     expect(result.action).toBe("abort");
   });

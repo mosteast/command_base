@@ -334,6 +334,7 @@ function build_help_text(command_name) {
     "  --quiet                        Print only warnings and errors (default: false).",
     "  --debug                        Verbose output and debug logs (default: false).",
     "  --debug-cookie                 Print a redacted session cookie snapshot (default: false).",
+    "  --check-login                  Validate session login with Instaloader test_login (default: false).",
     "  -v, --version                  Show version number and exit.",
     "  -h, --help                     Show this help message and exit.",
     "",
@@ -353,7 +354,7 @@ function build_help_text(command_name) {
     `  ${chalk.gray("# Export unique likers and ghost followers (refresh to overwrite outputs)")}`,
     `  ${command_name} my_account --mode unique --mode ghost --refresh`,
     "",
-    `  ${chalk.gray("# Resume a previous per-post export by appending new rows (requires checkpoint)")}`,
+    `  ${chalk.gray("# Resume a previous per-post export by appending new rows (checkpoint auto-created; output scan fallback)")}`,
     `  ${command_name} my_account --mode per_post --out-dir ./ig_exports`,
     "",
     `  ${chalk.gray("# Filter posts by shortcode pattern and stop after 50 posts")}`,
@@ -371,6 +372,8 @@ function build_help_text(command_name) {
     `${chalk.bold("Setup")}`,
     "  You need an Instaloader session before running:",
     "    instaloader --login <session-user>",
+    "  Tip: if Instaloader says 'Please wait a few minutes before you try again', stop retrying and wait before logging in again.",
+    "  Note: logging into Instagram in Chrome does not update Instaloader's session file.",
     "  If Instaloader is missing, install it:",
     "    python3 -m pip install instaloader==4.15",
   ].join("\n");
@@ -598,13 +601,6 @@ function compute_output_strategy({
 
   if (wants_per_post && existing.per_post) {
     const only_per_post = wants_per_post && !wants_unique && !wants_ghost;
-    if (!checkpoint_exists) {
-      return {
-        action: "abort",
-        reason:
-          "per_post output exists but checkpoint is missing (use --refresh or provide --checkpoint)",
-      };
-    }
     if (!only_per_post) {
       return {
         action: "abort",
@@ -851,6 +847,11 @@ function parse_cli_arguments(command_name) {
       default: false,
       describe: "Print a redacted session cookie snapshot.",
     })
+    .option("check-login", {
+      type: "boolean",
+      default: false,
+      describe: "Validate session login with Instaloader test_login (GraphQL).",
+    })
     .option("version", {
       alias: "v",
       type: "boolean",
@@ -932,6 +933,7 @@ function parse_cli_arguments(command_name) {
     quiet_mode: Boolean(argv.quiet),
     debug_mode: Boolean(argv.debug),
     debug_cookie: Boolean(argv["debug-cookie"]),
+    check_login: Boolean(argv["check-login"]),
   };
 }
 
@@ -1328,9 +1330,15 @@ async function main() {
   }
 
   if (strategy.action === "append") {
-    logger.warn(
-      "Detected existing per_post output + checkpoint; appending new rows.",
-    );
+    if (checkpoint_exists) {
+      logger.warn(
+        "Detected existing per_post output + checkpoint; appending new rows.",
+      );
+    } else {
+      logger.warn(
+        "Detected existing per_post output (checkpoint missing); appending new rows and inferring exported posts from the output file.",
+      );
+    }
   }
 
   logger.debug("Step: build exporter config");
@@ -1364,6 +1372,7 @@ async function main() {
     download_file_name_delimiter,
     debug: argv.debug_mode,
     debug_cookie: argv.debug_cookie,
+    check_login: argv.check_login,
     quiet: argv.quiet_mode,
   };
 
