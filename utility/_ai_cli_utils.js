@@ -190,6 +190,7 @@ async function run_ai_command(options) {
     temperature,
     max_tokens,
     extra_context,
+    postprocess_output,
     logger,
   } = options;
 
@@ -274,10 +275,61 @@ async function run_ai_command(options) {
     throw new Error("AI response was empty");
   }
 
-  await fs.mkdir(path.dirname(output_file), { recursive: true });
-  await fs.writeFile(output_file, `${ai_result.trim()}\n`, "utf8");
+  let final_output = ai_result.trim();
+  if (typeof postprocess_output === "function") {
+    final_output = postprocess_output(final_output, {
+      prompt_file,
+      input_file,
+      output_file,
+      platform: selected_platform,
+      model,
+    });
+  }
 
-  return { output: ai_result.trim() };
+  if (!final_output || String(final_output).trim().length === 0) {
+    throw new Error("AI response was empty after postprocessing");
+  }
+
+  await fs.mkdir(path.dirname(output_file), { recursive: true });
+  await fs.writeFile(output_file, `${String(final_output).trim()}\n`, "utf8");
+
+  return { output: String(final_output).trim() };
+}
+
+function unwrap_single_markdown_fence(text) {
+  if (typeof text !== "string") {
+    return text;
+  }
+
+  const trimmed_text = text.trim();
+  if (!trimmed_text.startsWith("```")) {
+    return trimmed_text;
+  }
+
+  const normalized_text = trimmed_text.replace(/\r\n/g, "\n");
+  const lines = normalized_text.split("\n");
+  if (lines.length < 2) {
+    return trimmed_text;
+  }
+
+  const opening_fence = lines[0].trim();
+  const closing_fence = lines[lines.length - 1].trim();
+
+  if (closing_fence !== "```") {
+    return trimmed_text;
+  }
+
+  if (!/^```(?:markdown|md)?$/u.test(opening_fence)) {
+    return trimmed_text;
+  }
+
+  for (let index = 1; index < lines.length - 1; index += 1) {
+    if (lines[index].trim().startsWith("```")) {
+      return trimmed_text;
+    }
+  }
+
+  return lines.slice(1, -1).join("\n").trim();
 }
 
 function build_fallback_user_prompt(user_prompt, input_content, context) {
@@ -603,6 +655,7 @@ module.exports = {
   run_ai_command,
   build_fallback_user_prompt,
   build_input_section,
+  unwrap_single_markdown_fence,
   // compatibility aliases
   DEFAULT_AI_PLATFORM: default_ai_platform,
   SUPPORTED_AI_PLATFORMS: supported_ai_platforms,

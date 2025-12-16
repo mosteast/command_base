@@ -8,6 +8,8 @@ const {
   run_text_prompt_batch_cli,
 } = require("../utility/text_prompt_batch_runner");
 
+const { unwrap_single_markdown_fence } = require("../utility/_ai_cli_utils");
+
 const command_name = path.basename(process.argv[1] || "text_summarize");
 const repo_root_path = path.resolve(__dirname, "..");
 const prompt_external_path =
@@ -35,6 +37,7 @@ const prompt_external_path =
     repo_root_path,
     default_batch_size: 5,
     default_retry_count: 3,
+    postprocess_output: unwrap_single_markdown_fence,
     examples: [
       {
         description:

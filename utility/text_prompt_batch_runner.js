@@ -185,6 +185,29 @@ async function run_text_prompt_batch_cli(raw_config) {
   let retry_attempt_count = 0;
   let simulated_count = 0;
 
+  const should_retry_error = (error) => {
+    const raw_message =
+      (error && typeof error.message === "string" && error.message.length > 0
+        ? error.message
+        : null) || String(error);
+
+    const message = raw_message.toLowerCase();
+
+    const non_retryable_markers = [
+      "insufficient_quota",
+      "invalid_api_key",
+      "incorrect_api_key",
+      "unauthorized",
+      "authentication",
+      "failed to deserialize overridden config",
+      "unknown variant",
+      "unexpected argument",
+      "unsupported ai platform",
+    ];
+
+    return !non_retryable_markers.some((marker) => message.includes(marker));
+  };
+
   const run_with_retries = async (operation, context_message) => {
     let attempt = 0;
     let last_error = null;
@@ -195,6 +218,14 @@ async function run_text_prompt_batch_cli(raw_config) {
         return await operation();
       } catch (error) {
         last_error = error;
+        if (!should_retry_error(error)) {
+          logger.warn(
+            `${context_message} attempt ${attempt} failed with a non-retryable error: ${
+              error.message || String(error)
+            }.`,
+          );
+          throw error;
+        }
         if (attempt < max_retry_count) {
           retry_attempt_count += 1;
           logger.warn(
@@ -241,6 +272,7 @@ async function run_text_prompt_batch_cli(raw_config) {
             temperature: argv["ai-temperature"],
             max_tokens: argv["ai-max-tokens"],
             extra_context: await build_extra_context(config, job, argv),
+            postprocess_output: config.postprocess_output,
             logger,
           }),
         `${config.job_title} for ${job.relative_input_path}`,
@@ -255,8 +287,16 @@ async function run_text_prompt_batch_cli(raw_config) {
       processed_count += 1;
     } catch (error) {
       failed_count += 1;
+      const error_message = error.message || String(error);
       console.error(chalk.red(`  ↳ Failed: ${job.relative_input_path}`));
-      console.error(chalk.red(error.message || String(error)));
+      console.error(chalk.red(error_message));
+      if (error_message.toLowerCase().includes("insufficient_quota")) {
+        console.error(
+          chalk.yellow(
+            "  ↳ Hint: API quota exceeded. Add billing/credits or switch provider via --ai-platform (codex|openrouter|gemini|openai).",
+          ),
+        );
+      }
     }
   };
 
@@ -396,6 +436,7 @@ function normalize_config(raw_config) {
     build_output_path,
     should_skip_job: raw_config.should_skip_job,
     create_extra_context: raw_config.create_extra_context,
+    postprocess_output: raw_config.postprocess_output,
     examples: Array.isArray(raw_config.examples) ? raw_config.examples : [],
   };
 }
