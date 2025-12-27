@@ -36,6 +36,8 @@ const default_download_file_name_format = [
   "index_or_empty",
 ];
 const default_download_file_name_delimiter = "__";
+const default_output_base_dir =
+  "/Users/hailang/Library/Mobile Documents/com~apple~CloudDocs/main/download/video/instagram";
 
 const palette = {
   headline: chalk.cyanBright.bold,
@@ -313,7 +315,7 @@ function build_help_text(command_name) {
     "                               abort: stop with fix instructions; skip_post: keep going but omit likers for blocked posts.",
     `  --mode <mode>                  Output modes (repeatable / comma-separated). Modes: ${modes_list} (default: per_post).`,
     `  --format <csv|jsonl>           Output format (default: csv).`,
-    "  -o, --out-dir <dir>            Output directory for default filenames (default: <target_user>_likes).",
+    `  -o, --out-dir <dir>            Output directory for default filenames (default: ${default_output_base_dir}/<target_user>_likes).`,
     "  --prefix <name>                Output filename prefix (default: instagram_likes.<target_user>).",
     "  --per-post-output <path>       Output path for per-post liker rows.",
     "  --unique-output <path>         Output path for unique liker rows.",
@@ -368,10 +370,10 @@ function build_help_text(command_name) {
     `  ${command_name} my_account --session-user my_account --debug-cookie --content-type liked --max-posts 5`,
     "",
     `  ${chalk.gray("# Use cookies exported from a browser (Netscape format) and save the session file")}`,
-    `  ${command_name} my_account --cookie-file ~/Downloads/instagram_cookies.txt --save-session --content-type liked --max-posts 5`,
+    `  ${command_name} my_account --cookie-file ~/Downloads/www.instagram.com_cookies.txt --save-session --content-type liked --max-posts 5`,
     "",
     `  ${chalk.gray("# Export liked posts using an Instagram-only cookie export")}`,
-    `  ${command_name} waveiron --cookie-file ~/Downloads/instagram_cookies.txt`,
+    `  ${command_name} waveiron --cookie-file ~/Downloads/www.instagram.com_cookies.txt`,
     "",
     `  ${chalk.gray("# Use a raw cookie string copied from DevTools (quote it)")}`,
     `  ${command_name} my_account --cookie-string "sessionid=...; csrftoken=...; ds_user_id=..." --content-type liked --max-posts 5`,
@@ -931,7 +933,10 @@ function parse_cli_arguments(command_name) {
   const out_dir = argv["out-dir"]
     ? String(argv["out-dir"])
     : target_user
-      ? `${sanitize_filename_component(target_user)}_likes`
+      ? path.join(
+        default_output_base_dir,
+        `${sanitize_filename_component(target_user)}_likes`,
+      )
       : ".";
 
   return {
@@ -1390,23 +1395,23 @@ async function main() {
 
   const per_post_output_path = modes.includes("per_post")
     ? path.resolve(
-        expand_user_path(argv.per_post_output || defaults.per_post_output_path),
-      )
+      expand_user_path(argv.per_post_output || defaults.per_post_output_path),
+    )
     : "";
   const unique_output_path = modes.includes("unique")
     ? path.resolve(
-        expand_user_path(argv.unique_output || defaults.unique_output_path),
-      )
+      expand_user_path(argv.unique_output || defaults.unique_output_path),
+    )
     : "";
   const ghost_output_path = modes.includes("ghost")
     ? path.resolve(
-        expand_user_path(argv.ghost_output || defaults.ghost_output_path),
-      )
+      expand_user_path(argv.ghost_output || defaults.ghost_output_path),
+    )
     : "";
   const checkpoint_path = modes.includes("per_post")
     ? path.resolve(
-        expand_user_path(argv.checkpoint || defaults.checkpoint_path),
-      )
+      expand_user_path(argv.checkpoint || defaults.checkpoint_path),
+    )
     : "";
 
   logger.debug("Step: detect existing outputs");
