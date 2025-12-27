@@ -302,6 +302,9 @@ function build_help_text(command_name) {
     "  -u, --user <name>              Target profile username (or positional <target_user>).",
     "  --session-user <name>          Username used for the Instaloader session (defaults to --user).",
     "  --session-file <path>          Optional session file path (defaults to Instaloader's standard location).",
+    "  --cookie-file <path>           Import cookies from a Netscape/JSON export file (default: disabled).",
+    '  --cookie-string <value>        Import cookies from a raw "key=value; key2=value2" string (default: disabled).',
+    "  --save-session                 Save imported cookies to the Instaloader session file (default: false).",
     `  --content-type <type>          Content sources to scan (repeatable / comma-separated). Types: ${content_type_list} (default: liked).`,
     "                               Note: content types 'saved' and 'liked' require --user == --session-user.",
     "  --likers-source <source>       How to fetch liker lists (default: auto). Sources: auto, graphql, iphone.",
@@ -327,6 +330,7 @@ function build_help_text(command_name) {
     "  --download-file-name-format <tokens>  Downloaded media filename tokens (default: timestamp,id,safe_title_or_desc,safe_author,index_or_empty).",
     "                               Tokens: timestamp, id, safe_title_or_desc, safe_author, index_or_empty.",
     `  --download-file-name-delimiter <text> Delimiter between downloaded filename components (default: ${default_download_file_name_delimiter}).`,
+    "  --login                        Run Instaloader login to create/update the session file (default: false).",
     "  -d, --dry-run                  Print what would be processed without writing outputs (default: false).",
     "  --refresh                      Reprocess and overwrite outputs even if they already exist (default: false).",
     "  --json                         Print JSON summary only (default: false).",
@@ -363,6 +367,18 @@ function build_help_text(command_name) {
     `  ${chalk.gray("# Debug session cookies (redacted; prints to stderr)")}`,
     `  ${command_name} my_account --session-user my_account --debug-cookie --content-type liked --max-posts 5`,
     "",
+    `  ${chalk.gray("# Use cookies exported from a browser (Netscape format) and save the session file")}`,
+    `  ${command_name} my_account --cookie-file ~/Downloads/instagram_cookies.txt --save-session --content-type liked --max-posts 5`,
+    "",
+    `  ${chalk.gray("# Export liked posts using an Instagram-only cookie export")}`,
+    `  ${command_name} waveiron --cookie-file ~/Downloads/instagram_cookies.txt`,
+    "",
+    `  ${chalk.gray("# Use a raw cookie string copied from DevTools (quote it)")}`,
+    `  ${command_name} my_account --cookie-string "sessionid=...; csrftoken=...; ds_user_id=..." --content-type liked --max-posts 5`,
+    "",
+    `  ${chalk.gray("# Create or refresh the Instaloader session (interactive login)")}`,
+    `  ${command_name} --login --session-user my_account`,
+    "",
     `  ${chalk.gray("# Work around GraphQL blocks by fetching likers via the iPhone endpoint")}`,
     `  ${command_name} my_account --content-type liked --likers-source iphone --max-posts 5`,
     "",
@@ -372,6 +388,13 @@ function build_help_text(command_name) {
     `${chalk.bold("Setup")}`,
     "  You need an Instaloader session before running:",
     "    instaloader --login <session-user>",
+    `  Or use the wrapper to log in with the same interpreter:`,
+    `    ${command_name} --login --session-user <session-user>`,
+    "",
+    "  Cookie file export (Chrome):",
+    "    1) Install extension 'Get cookies.txt LOCALLY' (cclelndahbckbenkjhflpdbgdldlbecc).",
+    "    2) Ensure export format is Netscape.",
+    "    3) Click Export (not 'Export All Cookies').",
     "  Tip: if Instaloader says 'Please wait a few minutes before you try again', stop retrying and wait before logging in again.",
     "  Note: logging into Instagram in Chrome does not update Instaloader's session file.",
     "  If Instaloader is missing, install it:",
@@ -706,6 +729,20 @@ function parse_cli_arguments(command_name) {
       describe:
         "Optional session file path (defaults to Instaloader standard).",
     })
+    .option("cookie-file", {
+      type: "string",
+      describe:
+        "Import cookies from a Netscape/JSON export file (used instead of session file).",
+    })
+    .option("cookie-string", {
+      type: "string",
+      describe: 'Import cookies from a raw "key=value; key2=value2" string.',
+    })
+    .option("save-session", {
+      type: "boolean",
+      default: false,
+      describe: "Save imported cookies to the Instaloader session file.",
+    })
     .option("content-type", {
       type: "array",
       describe:
@@ -811,6 +848,11 @@ function parse_cli_arguments(command_name) {
       default: default_download_file_name_delimiter,
       describe: "Delimiter between downloaded media filename components.",
     })
+    .option("login", {
+      type: "boolean",
+      default: false,
+      describe: "Run Instaloader login to create/update the session file.",
+    })
     .option("dry-run", {
       alias: "d",
       type: "boolean",
@@ -896,6 +938,9 @@ function parse_cli_arguments(command_name) {
     target_user,
     session_user,
     session_file: argv["session-file"] ? String(argv["session-file"]) : "",
+    cookie_file: argv["cookie-file"] ? String(argv["cookie-file"]) : "",
+    cookie_string: argv["cookie-string"] ? String(argv["cookie-string"]) : "",
+    save_session: Boolean(argv["save-session"]),
     raw_content_types: argv["content-type"],
     likers_source: argv["likers-source"]
       ? String(argv["likers-source"])
@@ -930,6 +975,7 @@ function parse_cli_arguments(command_name) {
     refresh: Boolean(argv.refresh),
     json_only: Boolean(argv.json),
     python_bin: String(argv.python || "python3"),
+    login_mode: Boolean(argv.login),
     quiet_mode: Boolean(argv.quiet),
     debug_mode: Boolean(argv.debug),
     debug_cookie: Boolean(argv["debug-cookie"]),
@@ -1114,6 +1160,40 @@ function run_python_exporter({
   });
 }
 
+function run_instaloader_login({ python_bin, session_user, logger }) {
+  return new Promise((resolve, reject) => {
+    const args = ["-m", "instaloader", "--login", session_user];
+
+    logger.debug(
+      `Spawning Instaloader login: ${python_bin} ${args
+        .map((value) => (value.includes(" ") ? JSON.stringify(value) : value))
+        .join(" ")}`,
+    );
+
+    const child = spawn(python_bin, args, {
+      stdio: "inherit",
+      env: process.env,
+    });
+
+    child.on("error", (error) => {
+      reject(error);
+    });
+
+    child.on("close", (code) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+
+      const error = new Error(
+        `Instaloader login failed with exit code ${code === null ? "unknown" : code}`,
+      );
+      error.exit_code = code;
+      reject(error);
+    });
+  });
+}
+
 async function main() {
   const command_name = path.basename(
     process.argv[1] || "instagram_likes_export",
@@ -1139,7 +1219,7 @@ async function main() {
 
   logger.debug("Step: validate and normalize inputs");
 
-  if (!argv.target_user) {
+  if (!argv.target_user && !argv.login_mode) {
     logger.error(
       "Missing <target_user>. Provide --user or a positional username.",
     );
@@ -1152,6 +1232,48 @@ async function main() {
     logger.error("Missing --session-user (or provide --user to default it).");
     console.log(build_help_text(command_name));
     process.exitCode = 1;
+    return;
+  }
+
+  const cookie_file = argv.cookie_file
+    ? expand_user_path(argv.cookie_file)
+    : "";
+  const cookie_string = argv.cookie_string ? String(argv.cookie_string) : "";
+
+  if (argv.login_mode && (cookie_file || cookie_string || argv.save_session)) {
+    logger.error(
+      "Invalid options: --login cannot be combined with --cookie-file/--cookie-string/--save-session.",
+    );
+    process.exitCode = 1;
+    return;
+  }
+
+  let python_bin = argv.python_bin;
+  try {
+    python_bin = resolve_python_bin({
+      requested_python_bin: argv.python_bin,
+      user_provided_python,
+      logger,
+    });
+  } catch (error) {
+    logger.error(error.message || String(error), error);
+    process.exitCode = 1;
+    return;
+  }
+
+  if (argv.login_mode) {
+    logger.debug("Step: run Instaloader login");
+    try {
+      await run_instaloader_login({
+        python_bin,
+        session_user: argv.session_user,
+        logger,
+      });
+      logger.info("Instaloader login finished. You can rerun exports now.");
+    } catch (error) {
+      logger.error(error.message || String(error), error);
+      process.exitCode = 1;
+    }
     return;
   }
 
@@ -1348,6 +1470,9 @@ async function main() {
     session_file: argv.session_file
       ? expand_user_path(argv.session_file)
       : null,
+    cookie_file: cookie_file || null,
+    cookie_string: cookie_string || null,
+    save_session: argv.save_session,
     refresh: argv.refresh,
     dry_run: argv.dry_run,
     format: format_name,
@@ -1380,19 +1505,6 @@ async function main() {
     __dirname,
     "../utility/instagram_likes_exporter.py",
   );
-
-  let python_bin = argv.python_bin;
-  try {
-    python_bin = resolve_python_bin({
-      requested_python_bin: argv.python_bin,
-      user_provided_python,
-      logger,
-    });
-  } catch (error) {
-    logger.error(error.message || String(error), error);
-    process.exitCode = 1;
-    return;
-  }
 
   logger.debug("Step: run python exporter");
   try {

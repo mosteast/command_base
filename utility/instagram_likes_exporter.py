@@ -201,6 +201,119 @@ def format_cookie_expires_utc(expires: Optional[int]) -> str:
         return str(expires)
 
 
+def parse_cookie_string(raw_value: Optional[str]) -> Dict[str, str]:
+    if not raw_value:
+        return {}
+    cookies: Dict[str, str] = {}
+    for chunk in str(raw_value).split(";"):
+        if not chunk.strip():
+            continue
+        if "=" not in chunk:
+            continue
+        name, value = chunk.split("=", 1)
+        name = name.strip()
+        value = value.strip()
+        if not name:
+            continue
+        cookies[name] = value
+    return cookies
+
+
+def parse_cookie_json_payload(payload: Any) -> Dict[str, str]:
+    cookies: Dict[str, str] = {}
+    if isinstance(payload, dict) and "cookies" in payload:
+        payload = payload.get("cookies")
+    if isinstance(payload, dict):
+        name = str(payload.get("name", "") or "").strip()
+        value = str(payload.get("value", "") or "").strip()
+        if name:
+            cookies[name] = value
+        return cookies
+    if not isinstance(payload, list):
+        return cookies
+    for entry in payload:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name", "") or "").strip()
+        value = str(entry.get("value", "") or "").strip()
+        if not name:
+            continue
+        cookies[name] = value
+    return cookies
+
+
+def parse_netscape_cookie_text(text: str) -> Dict[str, str]:
+    cookies: Dict[str, str] = {}
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        parts = stripped.split("\t")
+        if len(parts) < 7:
+            parts = re.split(r"\s+", stripped, maxsplit=6)
+        if len(parts) < 7:
+            continue
+        name = parts[5].strip()
+        value = parts[6].strip()
+        if not name:
+            continue
+        cookies[name] = value
+    return cookies
+
+
+def load_cookies_from_file(cookie_file: Optional[Path]) -> Dict[str, str]:
+    if not cookie_file:
+        return {}
+    if not cookie_file.exists():
+        raise FileNotFoundError(f"Cookie file not found: {cookie_file}")
+    log(f"Loading cookies from {cookie_file}", level="debug")
+    text = cookie_file.read_text(encoding="utf-8", errors="ignore")
+    stripped = text.lstrip()
+    if stripped.startswith("{") or stripped.startswith("["):
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"Cookie JSON parse failed ({cookie_file}): {exc}"
+            ) from exc
+        return parse_cookie_json_payload(payload)
+    return parse_netscape_cookie_text(text)
+
+
+def load_session_from_cookies(
+    loader,
+    session_user: str,
+    cookie_values: Dict[str, str],
+    session_file: Optional[str],
+    save_session: bool,
+) -> None:
+    if not cookie_values:
+        raise RuntimeError("Cookie import was requested but no cookies were found.")
+    log("Loading Instaloader session from imported cookies.", level="debug")
+    try:
+        loader.context.load_session(session_user, cookie_values)
+    except KeyError as exc:
+        raise RuntimeError(
+            "Cookie import failed: missing required cookie (expected at least 'csrftoken', "
+            "'sessionid', and 'ds_user_id')."
+        ) from exc
+    if not save_session:
+        return
+    try:
+        resolved_session_file = (
+            str(Path(session_file).expanduser())
+            if session_file
+            else None
+        )
+        loader.save_session_to_file(resolved_session_file)
+        log(
+            f"Saved Instaloader session to {resolved_session_file or 'default session file'}.",
+            level="debug",
+        )
+    except Exception as exc:
+        log(f"Failed to save session file from cookies: {exc}", level="warn")
+
+
 def resolve_session_file_path(
     session_user: str, session_file: Optional[str]
 ) -> Optional[Path]:
@@ -383,9 +496,21 @@ def load_session(
         else:
             loader.load_session_from_file(session_user)
     except FileNotFoundError as exc:
+        expected_path = resolve_session_file_path(session_user, session_file)
+        python_executable = sys.executable or "python3"
+        expected_hint = (
+            f"Expected session file at: {expected_path}\n\n"
+            if expected_path
+            else ""
+        )
         raise RuntimeError(
-            "Session file not found. Run `instaloader --login <username>` once "
-            "to generate a reusable session or provide --session-file."
+            "Session file not found.\n"
+            + expected_hint
+            + "Fix:\n"
+            + "  1) Create the session file with Instaloader (use the same interpreter):\n"
+            + f"     {python_executable} -m instaloader --login {session_user}\n"
+            + "  2) If your session file lives somewhere else, pass it explicitly:\n"
+            + "     instagram_likes_export --session-file /path/to/session-<user>\n"
         ) from exc
 
 
@@ -559,12 +684,6 @@ def iter_liked_posts(
                 time.sleep(backoff_seconds)
             except instaloader.exceptions.ConnectionException as exc:
                 error_text = str(exc)
-                if is_login_required_error(error_text):
-                    raise Instagram_login_required_error(
-                        render_instagram_login_required_hint(
-                            error_text, session_user=session_user
-                        )
-                    ) from exc
                 if is_instagram_retry_later_error(error_text):
                     attempt_index += 1
                     if attempt_index >= max_attempts:
@@ -580,6 +699,12 @@ def iter_liked_posts(
                     )
                     time.sleep(backoff_seconds)
                     continue
+                if is_login_required_error(error_text):
+                    raise Instagram_login_required_error(
+                        render_instagram_login_required_hint(
+                            error_text, session_user=session_user
+                        )
+                    ) from exc
                 attempt_index += 1
                 if attempt_index >= max_attempts:
                     raise
@@ -657,12 +782,6 @@ def iter_post_likers_via_iphone_endpoint(
                 time.sleep(backoff_seconds)
             except instaloader.exceptions.ConnectionException as exc:
                 error_text = str(exc)
-                if is_login_required_error(error_text):
-                    raise Instagram_login_required_error(
-                        render_instagram_login_required_hint(
-                            error_text, session_user=session_user
-                        )
-                    ) from exc
                 if is_instagram_retry_later_error(error_text):
                     attempt_index += 1
                     if attempt_index >= max_attempts:
@@ -678,6 +797,12 @@ def iter_post_likers_via_iphone_endpoint(
                     )
                     time.sleep(backoff_seconds)
                     continue
+                if is_login_required_error(error_text):
+                    raise Instagram_login_required_error(
+                        render_instagram_login_required_hint(
+                            error_text, session_user=session_user
+                        )
+                    ) from exc
                 attempt_index += 1
                 if attempt_index >= max_attempts:
                     raise
@@ -969,12 +1094,6 @@ def download_post_media_with_retry(
             time.sleep(backoff_seconds)
         except instaloader.exceptions.ConnectionException as exc:
             error_text = str(exc)
-            if is_login_required_error(error_text):
-                raise Instagram_login_required_error(
-                    render_instagram_login_required_hint(
-                        error_text, session_user=session_user
-                    )
-                ) from exc
             if is_instagram_retry_later_error(error_text):
                 if attempt_index >= max_attempts:
                     raise RuntimeError(
@@ -989,6 +1108,12 @@ def download_post_media_with_retry(
                 )
                 time.sleep(backoff_seconds)
                 continue
+            if is_login_required_error(error_text):
+                raise Instagram_login_required_error(
+                    render_instagram_login_required_hint(
+                        error_text, session_user=session_user
+                    )
+                ) from exc
             if attempt_index >= max_attempts:
                 raise
             log(
@@ -1619,6 +1744,9 @@ def main():
         on_block = config.get("on_block") or "abort"
         append_outputs = config.get("append_outputs") or {}
         check_login = bool(config.get("check_login"))
+        cookie_file = config.get("cookie_file")
+        cookie_string = config.get("cookie_string")
+        save_session = bool(config.get("save_session"))
         extra_warnings: List[str] = []
 
         if not target_user or not session_user:
@@ -1668,7 +1796,30 @@ def main():
         rate_controller = instaloader.RateController(loader.context)
         loader.context.rate_controller = rate_controller
 
-        load_session(loader, session_user, session_file)
+        cookie_values: Dict[str, str] = {}
+        cookie_file_path = (
+            Path(cookie_file).expanduser() if cookie_file else None
+        )
+        if cookie_file_path:
+            cookie_values.update(load_cookies_from_file(cookie_file_path))
+        if cookie_string:
+            if cookie_values:
+                log(
+                    "Cookie string overrides/extends cookies loaded from file.",
+                    level="warn",
+                )
+            cookie_values.update(parse_cookie_string(cookie_string))
+
+        if cookie_values:
+            load_session_from_cookies(
+                loader,
+                session_user=str(session_user),
+                cookie_values=cookie_values,
+                session_file=session_file,
+                save_session=save_session,
+            )
+        else:
+            load_session(loader, session_user, session_file)
         log_instaloader_cookie_snapshot(
             loader, session_user=str(session_user), session_file=session_file
         )
@@ -1761,15 +1912,15 @@ def main():
                         "Forcing likers_source=iphone because GraphQL requests are blocked."
                     )
             else:
-                if is_login_required_error(error_text):
-                    raise RuntimeError(
-                        render_instagram_login_required_hint(
-                            error_text, session_user=str(session_user)
-                        )
-                    ) from exc
                 if is_instagram_retry_later_error(error_text):
                     raise RuntimeError(
                         render_instagram_retry_later_hint(
+                            error_text, session_user=str(session_user)
+                        )
+                    ) from exc
+                if is_login_required_error(error_text):
+                    raise RuntimeError(
+                        render_instagram_login_required_hint(
                             error_text, session_user=str(session_user)
                         )
                     ) from exc
