@@ -708,8 +708,9 @@ def iter_liked_posts(
                 attempt_index += 1
                 if attempt_index >= max_attempts:
                     raise
+                ssl_hint = render_ssl_eof_hint(error_text)
                 log(
-                    f"Connection issue while fetching liked posts: {exc}. Sleeping {backoff_seconds}s "
+                    f"Connection issue while fetching liked posts{ssl_hint}: {exc}. Sleeping {backoff_seconds}s "
                     f"(attempt {attempt_index} of {max_attempts}).",
                     level="warn",
                 )
@@ -806,8 +807,9 @@ def iter_post_likers_via_iphone_endpoint(
                 attempt_index += 1
                 if attempt_index >= max_attempts:
                     raise
+                ssl_hint = render_ssl_eof_hint(error_text)
                 log(
-                    f"Connection issue while fetching likers (iPhone) for media {mediaid}: {exc}. "
+                    f"Connection issue while fetching likers (iPhone) for media {mediaid}{ssl_hint}: {exc}. "
                     f"Sleeping {backoff_seconds}s (attempt {attempt_index} of {max_attempts}).",
                     level="warn",
                 )
@@ -883,6 +885,21 @@ def is_instagram_block_error(error_text: str) -> bool:
 def is_instagram_retry_later_error(error_text: str) -> bool:
     normalized = str(error_text or "").lower()
     return "please wait a few minutes" in normalized
+
+
+def is_ssl_eof_error(error_text: str) -> bool:
+    normalized = str(error_text or "").lower()
+    return (
+        "ssleoferror" in normalized
+        or "unexpected_eof_while_reading" in normalized
+        or "eof occurred in violation of protocol" in normalized
+    )
+
+
+def render_ssl_eof_hint(error_text: str) -> str:
+    if is_ssl_eof_error(error_text):
+        return " (SSL EOF; check VPN/proxy/SSL inspection or retry later)"
+    return ""
 
 
 def render_instagram_retry_later_hint(error_text: str, session_user: str) -> str:
@@ -1116,8 +1133,9 @@ def download_post_media_with_retry(
                 ) from exc
             if attempt_index >= max_attempts:
                 raise
+            ssl_hint = render_ssl_eof_hint(error_text)
             log(
-                f"Connection issue while downloading {post.shortcode}: {exc}. Sleeping {backoff_seconds}s "
+                f"Connection issue while downloading {post.shortcode}{ssl_hint}: {exc}. Sleeping {backoff_seconds}s "
                 f"(attempt {attempt_index} of {max_attempts}).",
                 level="warn",
             )
