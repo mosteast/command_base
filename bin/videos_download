@@ -9,6 +9,7 @@ ONLY_AUDIO=false
 ONLY_SUBTITLE=false
 OVERWRITE=false
 REFRESH=false
+youtube_player_client="android"
 
 # Retry configuration
 retry_attempt_limit=3
@@ -54,6 +55,7 @@ show_usage() {
     printf "      --only-subtitle     Download only subtitle files\n"
     printf "      --overwrite         Force overwrite existing files\n"
     printf "      --refresh           Clear cached archive for the provided URLs before downloading\n"
+    printf "      --youtube-client    YouTube player clients for yt-dlp (default: %s)\n" "$youtube_player_client"
     printf "      --                   Pass additional options to yt-dlp\n"
     printf "\n"
     printf "%bExamples:%b\n" "$color_blue" "$color_reset"
@@ -171,6 +173,23 @@ while [[ $# -gt 0 ]]; do
             REFRESH=true
             shift
             ;;
+        --youtube-client=*)
+            youtube_player_client="${1#*=}"
+            if [ -z "$youtube_player_client" ]; then
+                log_error "YouTube player client list cannot be empty."
+                exit 1
+            fi
+            shift
+            ;;
+        --youtube-client)
+            if [ -n "$2" ]; then
+                youtube_player_client="$2"
+                shift 2
+            else
+                log_error "YouTube player client list is required after --youtube-client option."
+                exit 1
+            fi
+            ;;
         --)
             shift
             break
@@ -269,6 +288,8 @@ else
     WRITE_SUBS_OPTS="--write-subs --write-auto-subs"
 fi
 
+youtube_extractor_args=(--extractor-args "youtube:player_client=${youtube_player_client}")
+
 # Define match filter that allows Rumble videos to bypass subscription check
 # For Rumble videos - no filter, for other extractors - check for subscription requirement
 MATCH_FILTER="extractor!='Rumble' & extractor!='RumbleEmbed' & availability!='needs_subscription' | extractor='Rumble' | extractor='RumbleEmbed'"
@@ -314,6 +335,7 @@ if [ -n "$CHANNEL_URL" ]; then
         --file-access-retries 5 \
         --fragment-retries 5 \
         --exec after_move:"rm -f -- \"%(filepath)s.ytdl\"" \
+        "${youtube_extractor_args[@]}" \
         --add-header "Accept:text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" \
         --add-header "Accept-Language:en-us,en;q=0.5" \
         --add-header "Accept-Encoding:gzip, deflate" \
@@ -360,6 +382,7 @@ elif [ -n "$PLAYLIST_URL" ]; then
         --file-access-retries 5 \
         --fragment-retries 5 \
         --exec after_move:"rm -f -- \"%(filepath)s.ytdl\"" \
+        "${youtube_extractor_args[@]}" \
         --add-header "Accept:text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" \
         --add-header "Accept-Language:en-us,en;q=0.5" \
         --add-header "Accept-Encoding:gzip, deflate" \
@@ -412,6 +435,7 @@ else
             --file-access-retries 5 \
             --fragment-retries 5 \
             --exec after_move:"rm -f -- \"%(filepath)s.ytdl\"" \
+            "${youtube_extractor_args[@]}" \
             --add-header "Accept:text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" \
             --add-header "Accept-Language:en-us,en;q=0.5" \
             --add-header "Accept-Encoding:gzip, deflate" \
