@@ -16,7 +16,7 @@ fallback_player_client="android"
 debug_mode=false
 quiet_mode=false
 dry_run=false
-script_version="1.0.3"
+script_version="1.0.4"
 yt_dlp_color_policy="always"
 yt_dlp_color_opts=(--color "$yt_dlp_color_policy")
 
@@ -102,6 +102,8 @@ ${color_blue}Usage:${color_reset}
 ${color_blue}Description:${color_reset}
   Download videos with yt-dlp from YouTube, Bilibili, or Rumble channels, playlists, or
   individual video URLs. Additional yt-dlp options can be passed after "--".
+  Metadata sidecars (info JSON, comments, descriptions, thumbnails, playlist meta) are
+  written by default; disable any of them via "--" and yt-dlp's --no-write-* flags.
 
 ${color_blue}Options:${color_reset}
   -h, --help              Show this help message and exit
@@ -391,6 +393,7 @@ run_video_yt_dlp() {
         -N 5
         "${FORMAT_OPTS[@]}"
         "${WRITE_SUBS_OPTS[@]}"
+        "${WRITE_META_OPTS[@]}"
         --sub-langs "en,en-US,zh-Hans,zh-Hant,zh-CN,zh"
         --sleep-subtitles 1
         --continue
@@ -719,6 +722,13 @@ log_step "Configure format options"
 FORMAT_OPTS=()
 EMBED_SUBS_OPTS=()
 WRITE_SUBS_OPTS=()
+WRITE_META_OPTS=(
+    --write-info-json
+    --write-comments
+    --write-description
+    --write-playlist-metafiles
+    --write-link
+)
 
 if [ "$ONLY_AUDIO" = true ]; then
     FORMAT_OPTS=(-f ba)
@@ -813,6 +823,7 @@ if [ -n "$CHANNEL_URL" ]; then
         -i
         "${FORMAT_OPTS[@]}"
         "${WRITE_SUBS_OPTS[@]}"
+        "${WRITE_META_OPTS[@]}"
         --sub-langs "en,en-US,zh-Hans,zh-Hant,zh-CN,zh"
         --sleep-subtitles 1
         --continue
@@ -956,6 +967,7 @@ elif [ -n "$PLAYLIST_URL" ]; then
         -i
         "${FORMAT_OPTS[@]}"
         "${WRITE_SUBS_OPTS[@]}"
+        "${WRITE_META_OPTS[@]}"
         --sub-langs "en,en-US,en-GB,zh-Hans,zh-Hant,zh-CN,zh"
         --sleep-subtitles 1
         --continue

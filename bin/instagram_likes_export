@@ -934,9 +934,9 @@ function parse_cli_arguments(command_name) {
     ? String(argv["out-dir"])
     : target_user
       ? path.join(
-        default_output_base_dir,
-        `${sanitize_filename_component(target_user)}_likes`,
-      )
+          default_output_base_dir,
+          `${sanitize_filename_component(target_user)}_likes`,
+        )
       : ".";
 
   return {
@@ -1395,23 +1395,23 @@ async function main() {
 
   const per_post_output_path = modes.includes("per_post")
     ? path.resolve(
-      expand_user_path(argv.per_post_output || defaults.per_post_output_path),
-    )
+        expand_user_path(argv.per_post_output || defaults.per_post_output_path),
+      )
     : "";
   const unique_output_path = modes.includes("unique")
     ? path.resolve(
-      expand_user_path(argv.unique_output || defaults.unique_output_path),
-    )
+        expand_user_path(argv.unique_output || defaults.unique_output_path),
+      )
     : "";
   const ghost_output_path = modes.includes("ghost")
     ? path.resolve(
-      expand_user_path(argv.ghost_output || defaults.ghost_output_path),
-    )
+        expand_user_path(argv.ghost_output || defaults.ghost_output_path),
+      )
     : "";
   const checkpoint_path = modes.includes("per_post")
     ? path.resolve(
-      expand_user_path(argv.checkpoint || defaults.checkpoint_path),
-    )
+        expand_user_path(argv.checkpoint || defaults.checkpoint_path),
+      )
     : "";
 
   logger.debug("Step: detect existing outputs");

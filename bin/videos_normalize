@@ -351,8 +351,8 @@ function create_progress_tracker(state) {
     is_active: () =>
       Boolean(
         state.interactive &&
-          tracker_state.active &&
-          tracker_state.item_total > 0,
+        tracker_state.active &&
+        tracker_state.item_total > 0,
       ),
   };
 }

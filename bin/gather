@@ -12,8 +12,9 @@ const { spawn } = require("child_process");
 const package_json = require("../package.json");
 
 const DEFAULT_CONFIG_PATH =
-  "/Users/hailang/Library/Mobile Documents/com~apple~CloudDocs/main/download/config/gather.yaml";
-const DEFAULT_STATE_FILE = "~/.command_base/exporter/processed.json";
+  "/Users/hailang/Library/Mobile Documents/com~apple~CloudDocs/main/download/state/gather.config.yaml";
+const DEFAULT_STATE_FILE =
+  "/Users/hailang/Library/Mobile Documents/com~apple~CloudDocs/main/download/state/gather.state.json";
 const DEFAULT_CONFIG_LINES = [
   "# Gather config",
   "# Each source item requires a name and handle.",
@@ -63,6 +64,10 @@ const PLATFORM_HANDLE_BASE_URLS = {
   x: "https://x.com/",
   douyin: "https://www.douyin.com/user/",
 };
+
+const REFRESH_MODE_VALUES = ["media", "info", "all"];
+const DEFAULT_REFRESH_MODE = "info";
+const STATE_VERSION = 2;
 
 const palette = {
   headline: chalk.cyanBright.bold,
@@ -226,6 +231,7 @@ function build_help_text(script_name) {
     `${chalk.bold("Description")}`,
     "  Batch export channels/users across platforms by reading YAML configs and",
     "  running platform-specific export commands.",
+    "  Resumes from the last successful job using the state file pointer.",
     "",
     `${chalk.bold("Commands")}`,
     "  init                        Create a scaffold config file if empty.",
@@ -235,7 +241,7 @@ function build_help_text(script_name) {
     "  -p, --platform <name...>     Only run these platforms (youtube, douyin, x)",
     "      --exclude-platform <...> Skip these platforms (youtube, douyin, x)",
     "      --state-file <path>      State cache path (default: ~/.command_base/exporter/processed.json)",
-    "  -r, --refresh                Reprocess even if cached (default: false)",
+    "  -r, --refresh [mode]         Refresh YouTube output (media, info, all; default: info)",
     "      --stop-on-error          Stop on first failed export (default: false)",
     "  -d, --dry-run                Print commands without executing (default: false)",
     "      --quiet                  Print only warnings and errors (default: false)",
@@ -253,8 +259,11 @@ function build_help_text(script_name) {
     "  # Preview the commands without executing",
     `  ${example_cmd} --dry-run source/exporter.yaml`,
     "",
-    "  # Re-run exports even if already processed",
-    `  ${example_cmd} --refresh source/exporter.yaml`,
+    "  # Refresh metadata only (skip media downloads)",
+    `  ${example_cmd} --refresh info source/exporter.yaml`,
+    "",
+    "  # Refresh media only",
+    `  ${example_cmd} --refresh media source/exporter.yaml`,
     "",
     "  # Initialize the default config if empty",
     `  ${example_cmd} init`,
@@ -300,13 +309,13 @@ function build_init_help_text(script_name) {
     `  ${example_cmd} init`,
     "",
     "  # Initialize a specific config file",
-    `  ${example_cmd} init config/gather.yaml`,
+    `  ${example_cmd} init state/gather.config.yaml`,
     "",
     "  # Overwrite existing config content with scaffold",
-    `  ${example_cmd} init --refresh config/gather.yaml`,
+    `  ${example_cmd} init --refresh state/gather.config.yaml`,
     "",
     "  # Preview the scaffold action without writing",
-    `  ${example_cmd} init --dry-run config/gather.yaml`,
+    `  ${example_cmd} init --dry-run state/gather.config.yaml`,
     "",
     `${chalk.bold("Scaffold")}`,
     ...scaffold_lines,
@@ -334,6 +343,40 @@ function normalize_platform_key(value) {
     .toLowerCase();
   if (!text) return "";
   return PLATFORM_ALIASES[text] || text;
+}
+
+function normalize_refresh_mode(raw_value) {
+  if (raw_value === undefined || raw_value === null || raw_value === false) {
+    return { mode: "", explicit: false };
+  }
+
+  if (raw_value === true) {
+    return { mode: DEFAULT_REFRESH_MODE, explicit: true };
+  }
+
+  const text = String(raw_value || "").trim();
+  if (!text) {
+    return { mode: DEFAULT_REFRESH_MODE, explicit: true };
+  }
+
+  const normalized = text.toLowerCase();
+  if (!REFRESH_MODE_VALUES.includes(normalized)) {
+    return {
+      mode: "",
+      explicit: true,
+      error: `Invalid refresh mode: ${text}`,
+    };
+  }
+
+  return { mode: normalized, explicit: true };
+}
+
+function looks_like_config_path(raw_value) {
+  const text = String(raw_value || "").trim();
+  if (!text) return false;
+  if (hasMagic(text)) return true;
+  if (text.includes("/") || text.includes("\\")) return true;
+  return /\.(ya?ml)$/i.test(text);
 }
 
 function is_http_url(value) {
@@ -392,9 +435,8 @@ function parse_cli_arguments() {
     })
     .option("refresh", {
       alias: "r",
-      type: "boolean",
-      default: false,
-      describe: "Reprocess even if cached",
+      type: "string",
+      describe: "Refresh output (media, info, all; default: info)",
     })
     .option("stop-on-error", {
       type: "boolean",
@@ -443,10 +485,26 @@ function parse_cli_arguments() {
     process.exit(0);
   }
 
-  const config_patterns = [
+  let config_patterns = [
     ...normalize_list(argv.config),
     ...normalize_list(argv._ || []),
   ];
+
+  let refresh_result = normalize_refresh_mode(argv.refresh);
+  if (
+    refresh_result.error &&
+    typeof argv.refresh === "string" &&
+    looks_like_config_path(argv.refresh)
+  ) {
+    config_patterns = [argv.refresh, ...config_patterns];
+    refresh_result = { mode: DEFAULT_REFRESH_MODE, explicit: true };
+  }
+
+  if (refresh_result.error) {
+    console.error(chalk.red(refresh_result.error));
+    console.log(build_help_text(argv.$0 || "batch_exporter"));
+    process.exit(1);
+  }
 
   return {
     command_name: argv.$0 || "batch_exporter",
@@ -458,7 +516,8 @@ function parse_cli_arguments() {
       .map(normalize_platform_key)
       .filter(Boolean),
     state_file: argv["state-file"] ? String(argv["state-file"]) : "",
-    refresh: Boolean(argv.refresh),
+    refresh_mode: refresh_result.mode,
+    refresh_mode_explicit: refresh_result.explicit,
     stop_on_error: Boolean(argv["stop-on-error"]),
     dry_run: Boolean(argv["dry-run"]),
     quiet_mode: Boolean(argv.quiet),
@@ -800,12 +859,55 @@ function format_command(command, args) {
   return parts.join(" ");
 }
 
-function build_platform_command(platform_key, url) {
+function build_videos_download_refresh_args(refresh_mode) {
+  if (!refresh_mode) return [];
+
+  const base_args = ["--refresh", "--overwrite"];
+  let ytdlp_args = [];
+
+  switch (refresh_mode) {
+    case "info":
+      ytdlp_args = ["--skip-download"];
+      break;
+    case "media":
+      ytdlp_args = [
+        "--no-write-info-json",
+        "--no-write-comments",
+        "--no-write-description",
+        "--no-write-playlist-metafiles",
+        "--no-write-link",
+        "--no-write-thumbnail",
+        "--no-write-subs",
+        "--no-write-auto-subs",
+      ];
+      break;
+    case "all":
+      break;
+    default:
+      return [];
+  }
+
+  if (ytdlp_args.length === 0) {
+    return base_args;
+  }
+
+  return [...base_args, "--", ...ytdlp_args];
+}
+
+function build_refresh_args(platform_key, refresh_mode) {
+  if (!refresh_mode) return [];
+  if (platform_key !== "youtube") return [];
+  return build_videos_download_refresh_args(refresh_mode);
+}
+
+function build_platform_command(platform_key, url, refresh_mode) {
   const config = PLATFORM_COMMANDS[platform_key];
   if (!config) return null;
+  const base_args = config.build_args(url);
+  const refresh_args = build_refresh_args(platform_key, refresh_mode);
   return {
     command: config.command,
-    args: config.build_args(url),
+    args: [...base_args, ...refresh_args],
     label: config.label || platform_key,
   };
 }
@@ -814,27 +916,63 @@ function build_job_key(platform_key, url) {
   return `${platform_key}::${url}`;
 }
 
-async function load_state(state_file, logger, refresh_mode) {
-  if (refresh_mode) {
-    logger.debug("Step: refresh enabled, skipping state load.");
-    return { version: 1, processed: {} };
+function normalize_state_data(raw_state) {
+  const state_data =
+    raw_state && typeof raw_state === "object" ? raw_state : {};
+  if (!state_data.processed || typeof state_data.processed !== "object") {
+    state_data.processed = {};
   }
+  if (!state_data.pointer || typeof state_data.pointer !== "object") {
+    state_data.pointer = {};
+  }
+  state_data.version = STATE_VERSION;
+  return state_data;
+}
 
+function resolve_pointer_index(job_list, pointer_key) {
+  if (!pointer_key) return -1;
+  return job_list.findIndex(
+    (job) => build_job_key(job.platform_key, job.url) === pointer_key,
+  );
+}
+
+function resolve_effective_refresh_mode(
+  options,
+  pointer_found,
+  pointer_at_last,
+) {
+  if (options.refresh_mode_explicit) {
+    return options.refresh_mode || DEFAULT_REFRESH_MODE;
+  }
+  if (pointer_found && !pointer_at_last) {
+    return DEFAULT_REFRESH_MODE;
+  }
+  return "";
+}
+
+function update_pointer_state(state_data, job) {
+  const now_text = new Date().toISOString();
+  state_data.pointer = {
+    job_key: build_job_key(job.platform_key, job.url),
+    platform: job.platform_key,
+    url: job.url,
+    handle: job.handle,
+    name: job.name,
+    source_file: job.source_file,
+    updated_at: now_text,
+  };
+}
+
+async function load_state(state_file, logger) {
   try {
     logger.debug(`IO: read state file ${state_file}`);
     const raw_text = await fs.readFile(state_file, "utf8");
     const parsed = JSON.parse(raw_text);
-    if (!parsed || typeof parsed !== "object") {
-      return { version: 1, processed: {} };
-    }
-    if (!parsed.processed || typeof parsed.processed !== "object") {
-      parsed.processed = {};
-    }
-    return parsed;
+    return normalize_state_data(parsed);
   } catch (error) {
     if (error && error.code === "ENOENT") {
       logger.debug(`State file ${state_file} not found; starting fresh.`);
-      return { version: 1, processed: {} };
+      return normalize_state_data({});
     }
     logger.error(`Failed to read state file ${state_file}.`, error);
     throw error;
@@ -1089,20 +1227,61 @@ async function run_export_command() {
   const state_file = path.resolve(
     expand_user_path(options.state_file || DEFAULT_STATE_FILE),
   );
-  const state_data = await load_state(state_file, logger, options.refresh);
+  const state_data = await load_state(state_file, logger);
+
+  logger.debug("Step: resolve pointer");
+  const pointer_key =
+    state_data.pointer && typeof state_data.pointer.job_key === "string"
+      ? state_data.pointer.job_key
+      : "";
+  const pointer_index = resolve_pointer_index(filtered_jobs, pointer_key);
+  const pointer_found = pointer_index >= 0;
+  const last_index = filtered_jobs.length - 1;
+  const pointer_at_last = pointer_found && pointer_index === last_index;
+
+  let start_index = 0;
+  if (pointer_found && !pointer_at_last) {
+    start_index = pointer_index + 1;
+    const pointer_job = filtered_jobs[pointer_index];
+    const display_handle = format_handle_for_log(
+      pointer_job.handle,
+      pointer_job.url,
+    );
+    logger.info(
+      `Resume after pointer ${pointer_index + 1}/${filtered_jobs.length}: ${palette.path(display_handle)}`,
+    );
+  } else if (pointer_key && !pointer_found) {
+    logger.warn("Pointer not found in current job list; starting from first.");
+  } else if (pointer_at_last) {
+    logger.debug("Pointer at last record; starting full export.");
+  } else {
+    logger.debug("No pointer set; starting from first.");
+  }
+
+  const refresh_mode = resolve_effective_refresh_mode(
+    options,
+    pointer_found,
+    pointer_at_last,
+  );
+  if (refresh_mode) {
+    logger.info(`Refresh mode: ${refresh_mode}`);
+  }
 
   logger.debug("Step: execute export jobs");
-  let skipped_cached = 0;
+  let skipped_pointer = start_index;
   let skipped_unknown = 0;
   let executed = 0;
   let failed = 0;
   let dry_run_count = 0;
   let aborted = 0;
+  let pointer_locked = false;
 
-  for (let index = 0; index < filtered_jobs.length; index += 1) {
-    const job = filtered_jobs[index];
+  const jobs_to_process = filtered_jobs.slice(start_index);
+  for (let offset = 0; offset < jobs_to_process.length; offset += 1) {
+    const job = jobs_to_process[offset];
+    const job_index = start_index + offset;
     logger.debug(
-      `Step: job ${index + 1}/${filtered_jobs.length} ${job.platform_key}`,
+      `Step: job ${job_index + 1}/${filtered_jobs.length} ${job.platform_key}`,
     );
 
     if (shutdown_state.requested) {
@@ -1111,23 +1290,19 @@ async function run_export_command() {
       break;
     }
 
-    const command_config = build_platform_command(job.platform_key, job.url);
+    const command_config = build_platform_command(
+      job.platform_key,
+      job.url,
+      refresh_mode,
+    );
     if (!command_config) {
       skipped_unknown += 1;
       logger.warn(
         `Unsupported platform ${job.platform_key} in ${job.source_file}.`,
       );
-      continue;
-    }
-
-    const job_key = build_job_key(job.platform_key, job.url);
-    if (!options.refresh && state_data.processed[job_key]) {
-      skipped_cached += 1;
-      const name_suffix = job.name ? ` (${job.name})` : "";
-      const display_handle = format_handle_for_log(job.handle, job.url);
-      logger.info(
-        `Skip cached ${job.platform_key} handle: ${palette.path(display_handle)}${name_suffix}`,
-      );
+      if (!pointer_locked) {
+        update_pointer_state(state_data, job);
+      }
       continue;
     }
 
@@ -1143,8 +1318,12 @@ async function run_export_command() {
     executed += 1;
     if (result.ok) {
       record_processed(state_data, job, result.command_text);
+      if (!pointer_locked) {
+        update_pointer_state(state_data, job);
+      }
     } else {
       failed += 1;
+      pointer_locked = true;
       if (options.stop_on_error) {
         logger.warn("Stopping on first failure as requested.");
         break;
@@ -1162,7 +1341,7 @@ async function run_export_command() {
     `Total jobs: ${filtered_jobs.length}`,
     `Executed: ${executed}`,
     `Dry-run: ${dry_run_count}`,
-    `Skipped cached: ${skipped_cached}`,
+    `Skipped before pointer: ${skipped_pointer}`,
     `Skipped unknown platforms: ${skipped_unknown}`,
     `Failed: ${failed}`,
   ];

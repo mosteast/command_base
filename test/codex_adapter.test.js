@@ -8,12 +8,16 @@ const { create_codex_adapter } = require("../utility/ai_adapter/codex_adapter");
 
 function extract_output_last_message_path(args) {
   const double_dash_index = args.indexOf("--");
-  const search_limit = double_dash_index === -1 ? args.length : double_dash_index;
+  const search_limit =
+    double_dash_index === -1 ? args.length : double_dash_index;
   for (let index = 0; index < search_limit; index += 1) {
     if (args[index] === "--output-last-message") {
       return args[index + 1] || null;
     }
-    if (typeof args[index] === "string" && args[index].startsWith("--output-last-message=")) {
+    if (
+      typeof args[index] === "string" &&
+      args[index].startsWith("--output-last-message=")
+    ) {
       return args[index].slice("--output-last-message=".length) || null;
     }
   }
@@ -30,7 +34,9 @@ function create_support_context({ on_run_cli_command, logger }) {
       on_run_cli_command({ command, args, prompt_text });
       const output_last_message_path = extract_output_last_message_path(args);
       if (output_last_message_path) {
-        await mkdir(path.dirname(output_last_message_path), { recursive: true });
+        await mkdir(path.dirname(output_last_message_path), {
+          recursive: true,
+        });
         await writeFile(output_last_message_path, "ok\n", "utf8");
       }
       return "ok";
