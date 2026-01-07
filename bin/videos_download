@@ -9,7 +9,8 @@ ONLY_AUDIO=false
 ONLY_SUBTITLE=false
 OVERWRITE=false
 REFRESH=false
-youtube_player_client="android"
+youtube_player_client="web,web_safari,web_embedded"
+fallback_player_client="android"
 
 # Retry configuration
 retry_attempt_limit=3
@@ -55,7 +56,9 @@ show_usage() {
     printf "      --only-subtitle     Download only subtitle files\n"
     printf "      --overwrite         Force overwrite existing files\n"
     printf "      --refresh           Clear cached archive for the provided URLs before downloading\n"
-    printf "      --youtube-client    YouTube player clients for yt-dlp (default: %s)\n" "$youtube_player_client"
+    printf "      --youtube-client    YouTube player clients for yt-dlp (comma-separated, default: %s)\n" "$youtube_player_client"
+    printf "      --fallback-client   Fallback clients without cookies when formats are missing (default: %s)\n" "$fallback_player_client"
+    printf "                         Use 'none' to disable fallback.\n"
     printf "      --                   Pass additional options to yt-dlp\n"
     printf "\n"
     printf "%bExamples:%b\n" "$color_blue" "$color_reset"
@@ -93,6 +96,110 @@ retry_command() {
         log_info "Retrying ${description} (attempt ${attempt} of ${retry_attempt_limit}) after ${retry_delay_seconds}s..."
         sleep "$retry_delay_seconds"
     done
+}
+
+yt_dlp_last_format_error=false
+
+yt_dlp_output_has_format_error() {
+    local log_file="$1"
+    grep -Eqi "Requested format is not available|Only images are available|No video formats found" "$log_file"
+}
+
+run_yt_dlp_with_log() {
+    local log_file
+    if ! log_file=$(mktemp -t yt_dlp_log.XXXXXX); then
+        log_warn "Unable to create temp log file; running yt-dlp without format detection."
+        yt_dlp_last_format_error=false
+        "$@"
+        return $?
+    fi
+
+    "$@" 2>&1 | tee "$log_file"
+    local exit_code=${PIPESTATUS[0]}
+
+    if yt_dlp_output_has_format_error "$log_file"; then
+        yt_dlp_last_format_error=true
+        exit_code=1
+    else
+        yt_dlp_last_format_error=false
+    fi
+
+    rm -f "$log_file"
+    return "$exit_code"
+}
+
+run_video_yt_dlp() {
+    local url="$1"
+    local archive_file="$2"
+    local output_dir="$3"
+    local use_cookies="$4"
+    local player_client="$5"
+
+    local -a yt_dlp_args
+    yt_dlp_args=(
+        "${EMBED_SUBS_OPTS[@]}"
+        -o "$output_dir/%(uploader)s - Videos/%(title)s.%(ext)s"
+        -N 1
+        "${FORMAT_OPTS[@]}"
+        "${WRITE_SUBS_OPTS[@]}"
+        --sub-langs "en,en-US,zh-Hans,zh-Hant,zh-CN,zh"
+        --sleep-subtitles 1
+        --continue
+    )
+
+    if [ "$OVERWRITE" != true ]; then
+        yt_dlp_args+=(--download-archive "$archive_file" --no-overwrites)
+    else
+        yt_dlp_args+=(--force-overwrites)
+    fi
+
+    yt_dlp_args+=(
+        --sleep-interval 1
+        --max-sleep-interval 3
+        --retries 10
+        --file-access-retries 5
+        --fragment-retries 5
+        --exec after_move:"rm -f -- \"%(filepath)s.ytdl\""
+    )
+
+    if [ "$use_cookies" = true ]; then
+        yt_dlp_args+=(--cookies-from-browser chrome)
+    fi
+
+    if [ -n "$player_client" ]; then
+        yt_dlp_args+=(--extractor-args "youtube:player_client=${player_client}")
+    fi
+
+    yt_dlp_args+=(
+        --add-header "Accept:text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+        --add-header "Accept-Language:en-us,en;q=0.5"
+        --add-header "Accept-Encoding:gzip, deflate"
+        --add-header "Accept-Charset:ISO-8859-1,utf-8;q=0.7,*;q=0.7"
+        --add-header "User-Agent:Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+        "${EXTRA_OPTS[@]}"
+        "$url"
+    )
+
+    run_yt_dlp_with_log yt-dlp "${yt_dlp_args[@]}"
+}
+
+download_video_with_fallback() {
+    local url="$1"
+    local archive_file="$2"
+    local output_dir="$3"
+
+    if run_video_yt_dlp "$url" "$archive_file" "$output_dir" true "$youtube_player_client"; then
+        return 0
+    fi
+
+    local primary_exit_code=$?
+    if [ "$yt_dlp_last_format_error" = true ] && [ -n "$fallback_player_client" ]; then
+        log_warn "Primary download failed due to missing formats; retrying without cookies using '${fallback_player_client}'."
+        run_video_yt_dlp "$url" "$archive_file" "$output_dir" false "$fallback_player_client"
+        return $?
+    fi
+
+    return "$primary_exit_code"
 }
 
 # Parse command line arguments
@@ -190,6 +297,19 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             ;;
+        --fallback-client=*)
+            fallback_player_client="${1#*=}"
+            shift
+            ;;
+        --fallback-client)
+            if [ -n "$2" ]; then
+                fallback_player_client="$2"
+                shift 2
+            else
+                log_error "Fallback client list is required after --fallback-client option."
+                exit 1
+            fi
+            ;;
         --)
             shift
             break
@@ -238,6 +358,10 @@ if [ "$ONLY_AUDIO" = true ] && [ "$ONLY_SUBTITLE" = true ]; then
     exit 1
 fi
 
+if [ "$fallback_player_client" = "none" ] || [ "$fallback_player_client" = "off" ]; then
+    fallback_player_client=""
+fi
+
 # Count how many input types are provided
 INPUT_COUNT=0
 [ -n "$CHANNEL_URL" ] && ((INPUT_COUNT++))
@@ -267,28 +391,31 @@ elif [ $INPUT_COUNT -gt 1 ]; then
 fi
 
 # All remaining arguments will be passed to yt-dlp
-EXTRA_OPTS="$@"
+EXTRA_OPTS=("$@")
 
 # Create download archive directory if it doesn't exist
 ARCHIVE_DIR="${HOME}/.yt-dlp/archives"
 mkdir -p "$ARCHIVE_DIR"
 
 # Set format and additional options based on download type
+FORMAT_OPTS=()
+EMBED_SUBS_OPTS=()
+WRITE_SUBS_OPTS=()
+
 if [ "$ONLY_AUDIO" = true ]; then
-    FORMAT_OPTS="-f ba"
-    EMBED_SUBS_OPTS=""
-    WRITE_SUBS_OPTS=""
+    FORMAT_OPTS=(-f ba)
 elif [ "$ONLY_SUBTITLE" = true ]; then
-    FORMAT_OPTS="--skip-download"
-    EMBED_SUBS_OPTS=""
-    WRITE_SUBS_OPTS="--write-subs --write-auto-subs"
+    FORMAT_OPTS=(--skip-download)
+    WRITE_SUBS_OPTS=(--write-subs --write-auto-subs)
 else
-    FORMAT_OPTS=""
-    EMBED_SUBS_OPTS="--embed-subs"
-    WRITE_SUBS_OPTS="--write-subs --write-auto-subs"
+    EMBED_SUBS_OPTS=(--embed-subs)
+    WRITE_SUBS_OPTS=(--write-subs --write-auto-subs)
 fi
 
-youtube_extractor_args=(--extractor-args "youtube:player_client=${youtube_player_client}")
+youtube_extractor_args=()
+if [ -n "$youtube_player_client" ]; then
+    youtube_extractor_args=(--extractor-args "youtube:player_client=${youtube_player_client}")
+fi
 
 # Define match filter that allows Rumble videos to bypass subscription check
 # For Rumble videos - no filter, for other extractors - check for subscription requirement
@@ -315,13 +442,13 @@ if [ -n "$CHANNEL_URL" ]; then
 
     retry_command "Channel download: ${CHANNEL_URL}" yt-dlp \
         --playlist-reverse \
-        $EMBED_SUBS_OPTS \
+        "${EMBED_SUBS_OPTS[@]}" \
         -o "$OUTPUT_DIR/%(playlist)s/%(n_entries+1-playlist_index)d.%(title)s.%(ext)s" \
         --cookies-from-browser chrome \
         -N 1 \
         -i \
-        $FORMAT_OPTS \
-        $WRITE_SUBS_OPTS \
+        "${FORMAT_OPTS[@]}" \
+        "${WRITE_SUBS_OPTS[@]}" \
         --sub-langs "en,en-US,zh-Hans,zh-Hant,zh-CN,zh" \
         --sleep-subtitles 1 \
         --continue \
@@ -341,7 +468,7 @@ if [ -n "$CHANNEL_URL" ]; then
         --add-header "Accept-Encoding:gzip, deflate" \
         --add-header "Accept-Charset:ISO-8859-1,utf-8;q=0.7,*;q=0.7" \
         --add-header "User-Agent:Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36" \
-        $EXTRA_OPTS \
+        "${EXTRA_OPTS[@]}" \
         "$CHANNEL_URL"
 
     channel_status=$?
@@ -363,13 +490,13 @@ elif [ -n "$PLAYLIST_URL" ]; then
 
     retry_command "Playlist download: ${PLAYLIST_URL}" yt-dlp \
         --playlist-reverse \
-        $EMBED_SUBS_OPTS \
+        "${EMBED_SUBS_OPTS[@]}" \
         -o "$OUTPUT_DIR/%(playlist)s/%(playlist_index)s.%(title)s.%(ext)s" \
         --cookies-from-browser chrome \
         -N 1 \
         -i \
-        $FORMAT_OPTS \
-        $WRITE_SUBS_OPTS \
+        "${FORMAT_OPTS[@]}" \
+        "${WRITE_SUBS_OPTS[@]}" \
         --sub-langs "en,en-US,en-GB,zh-Hans,zh-Hant,zh-CN,zh" \
         --sleep-subtitles 1 \
         --continue \
@@ -388,7 +515,7 @@ elif [ -n "$PLAYLIST_URL" ]; then
         --add-header "Accept-Encoding:gzip, deflate" \
         --add-header "Accept-Charset:ISO-8859-1,utf-8;q=0.7,*;q=0.7" \
         --add-header "User-Agent:Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36" \
-        $EXTRA_OPTS \
+        "${EXTRA_OPTS[@]}" \
         "$PLAYLIST_URL"
 
     playlist_status=$?
@@ -416,33 +543,7 @@ else
 
     for url in "${VIDEO_URLS[@]}"; do
 
-        if retry_command "Video download: ${url}" yt-dlp \
-            $EMBED_SUBS_OPTS \
-            -o "$OUTPUT_DIR/%(uploader)s - Videos/%(title)s.%(ext)s" \
-            --cookies-from-browser chrome \
-            -N 1 \
-            -i \
-            $FORMAT_OPTS \
-            $WRITE_SUBS_OPTS \
-            --sub-langs "en,en-US,zh-Hans,zh-Hant,zh-CN,zh" \
-            --sleep-subtitles 1 \
-            --continue \
-            $( [ "$OVERWRITE" != true ] && echo "--download-archive $manual_archive_file --no-overwrites" ) \
-            $( [ "$OVERWRITE" = true ] && echo "--force-overwrites" ) \
-            --sleep-interval 1 \
-            --max-sleep-interval 3 \
-            --retries 10 \
-            --file-access-retries 5 \
-            --fragment-retries 5 \
-            --exec after_move:"rm -f -- \"%(filepath)s.ytdl\"" \
-            "${youtube_extractor_args[@]}" \
-            --add-header "Accept:text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" \
-            --add-header "Accept-Language:en-us,en;q=0.5" \
-            --add-header "Accept-Encoding:gzip, deflate" \
-            --add-header "Accept-Charset:ISO-8859-1,utf-8;q=0.7,*;q=0.7" \
-            --add-header "User-Agent:Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36" \
-            $EXTRA_OPTS \
-            "$url"
+        if retry_command "Video download: ${url}" download_video_with_fallback "$url" "$manual_archive_file" "$OUTPUT_DIR"
         then
             :
         else

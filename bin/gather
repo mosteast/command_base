@@ -1,0 +1,1088 @@
+#!/usr/bin/env node
+
+"use strict";
+
+const fs = require("fs/promises");
+const path = require("path");
+const { globSync, hasMagic } = require("glob");
+const chalk = require("chalk");
+const YAML = require("yaml");
+const { spawn } = require("child_process");
+
+const package_json = require("../package.json");
+
+const DEFAULT_CONFIG_PATH =
+  "/Users/hailang/Library/Mobile Documents/com~apple~CloudDocs/main/download/config/gather.yaml";
+const DEFAULT_STATE_FILE = "~/.command_base/exporter/processed.json";
+const DEFAULT_CONFIG_LINES = [
+  "# Gather config",
+  "# Each source item requires a name and url.",
+  "source:",
+  "  youtube:",
+  "    - name: Example YouTube channel",
+  "      url: https://www.youtube.com/@example",
+  "  x:",
+  "    - name: Example X user",
+  "      url: https://x.com/user1",
+  "  douyin:",
+  "    - name: Example Douyin user",
+  "      url: https://www.douyin.com/user/EXAMPLE_ID",
+];
+const DEFAULT_CONFIG_TEMPLATE = `${DEFAULT_CONFIG_LINES.join("\n")}\n`;
+
+const PLATFORM_ALIASES = {
+  dy: "douyin",
+  tiktok: "douyin",
+  twitter: "x",
+  tw: "x",
+  yt: "youtube",
+};
+
+const PLATFORM_COMMANDS = {
+  youtube: {
+    command: "videos_download",
+    build_args: (url) => ["-c", url],
+    label: "youtube",
+  },
+  douyin: {
+    command: "f2",
+    build_args: (url) => ["dy", "-M", "post", "-u", url],
+    label: "douyin",
+  },
+  x: {
+    command: "f2",
+    build_args: (url) => ["x", "-M", "post", "-u", url],
+    label: "x",
+  },
+};
+
+const palette = {
+  headline: chalk.cyanBright.bold,
+  info: chalk.cyanBright,
+  success: chalk.greenBright,
+  warn: chalk.yellowBright,
+  error: chalk.redBright,
+  detail: chalk.gray,
+  path: chalk.magentaBright,
+};
+
+function expand_user_path(raw_path) {
+  if (!raw_path) return raw_path;
+  const text = String(raw_path);
+  if (!text.startsWith("~")) return text;
+  const home_dir = process.env.HOME;
+  if (!home_dir) return text;
+  if (text === "~") return home_dir;
+  if (text.startsWith("~/")) return path.join(home_dir, text.slice(2));
+  return text;
+}
+
+function create_logger({ command_name, quiet_mode, debug_mode }) {
+  const prefix = chalk.dim(command_name);
+
+  function format_message(message) {
+    return `${prefix} ${message}`;
+  }
+
+  return {
+    info(message) {
+      if (quiet_mode) return;
+      console.log(format_message(palette.info(message)));
+    },
+    success(message) {
+      if (quiet_mode) return;
+      console.log(format_message(palette.success(message)));
+    },
+    warn(message) {
+      console.warn(format_message(palette.warn(message)));
+    },
+    error(message, error) {
+      console.error(format_message(palette.error(message)));
+      if (debug_mode && error) {
+        console.error(palette.detail(error.stack || String(error)));
+      }
+    },
+    debug(message) {
+      if (!debug_mode || quiet_mode) return;
+      console.log(format_message(palette.detail(`[debug] ${message}`)));
+    },
+  };
+}
+
+function build_help_text(script_name) {
+  const example_cmd = "$0";
+  return [
+    `${chalk.bold("Usage")}`,
+    `  ${script_name} [options] <config...>`,
+    `  ${script_name} --config "source/*.yaml"`,
+    `  ${script_name} init [options] [config...]`,
+    "",
+    `${chalk.bold("Description")}`,
+    "  Batch export channels/users across platforms by reading YAML configs and",
+    "  running platform-specific export commands.",
+    "",
+    `${chalk.bold("Commands")}`,
+    "  init                        Create a scaffold config file if empty.",
+    "",
+    `${chalk.bold("Options")}`,
+    `  -c, --config <path...>       YAML config path(s), supports glob patterns (default: ${chalk.gray(DEFAULT_CONFIG_PATH)})`,
+    "  -p, --platform <name...>     Only run these platforms (youtube, douyin, x)",
+    "      --exclude-platform <...> Skip these platforms (youtube, douyin, x)",
+    "      --state-file <path>      State cache path (default: ~/.command_base/exporter/processed.json)",
+    "  -r, --refresh                Reprocess even if cached (default: false)",
+    "      --stop-on-error          Stop on first failed export (default: false)",
+    "  -d, --dry-run                Print commands without executing (default: false)",
+    "      --quiet                  Print only warnings and errors (default: false)",
+    "      --debug                  Enable verbose debug output (default: false)",
+    "  -v, --version                Show version number and exit",
+    "  -h, --help                   Show this help message",
+    "",
+    `${chalk.bold("Examples")}`,
+    "  # Export all sources from one config file",
+    `  ${example_cmd} source/exporter.yaml`,
+    "",
+    "  # Export only YouTube entries from multiple configs",
+    `  ${example_cmd} --platform youtube "source/*.yaml"`,
+    "",
+    "  # Preview the commands without executing",
+    `  ${example_cmd} --dry-run source/exporter.yaml`,
+    "",
+    "  # Re-run exports even if already processed",
+    `  ${example_cmd} --refresh source/exporter.yaml`,
+    "",
+    "  # Initialize the default config if empty",
+    `  ${example_cmd} init`,
+    "",
+    `${chalk.bold("YAML format")}`,
+    "  # Each item must include name and url",
+    "  source:",
+    "    x:",
+    "      - name: Example X user",
+    "        url: https://x.com/user1",
+    "    douyin:",
+    "      - name: Example Douyin user",
+    "        url: https://www.douyin.com/user/MS4wLjABAA",
+    "    youtube:",
+    "      - name: Example YouTube channel",
+    "        url: https://www.youtube.com/@user1",
+  ].join("\n");
+}
+
+function build_init_help_text(script_name) {
+  const example_cmd = "$0";
+  const scaffold_lines = DEFAULT_CONFIG_LINES.map((line) => `  ${line}`);
+  return [
+    `${chalk.bold("Usage")}`,
+    `  ${script_name} init [options] [config...]`,
+    `  ${script_name} init --config "${DEFAULT_CONFIG_PATH}"`,
+    "",
+    `${chalk.bold("Description")}`,
+    "  Create a scaffold YAML config if the target file is missing or empty.",
+    "",
+    `${chalk.bold("Options")}`,
+    `  -c, --config <path...>       YAML config path(s), supports glob patterns (default: ${chalk.gray(DEFAULT_CONFIG_PATH)})`,
+    "  -r, --refresh                Overwrite existing config content (default: false)",
+    "  -d, --dry-run                Print actions without writing (default: false)",
+    "      --quiet                  Print only warnings and errors (default: false)",
+    "      --debug                  Enable verbose debug output (default: false)",
+    "  -v, --version                Show version number and exit",
+    "  -h, --help                   Show this help message",
+    "",
+    `${chalk.bold("Examples")}`,
+    "  # Initialize the default config if empty",
+    `  ${example_cmd} init`,
+    "",
+    "  # Initialize a specific config file",
+    `  ${example_cmd} init config/gather.yaml`,
+    "",
+    "  # Overwrite existing config content with scaffold",
+    `  ${example_cmd} init --refresh config/gather.yaml`,
+    "",
+    "  # Preview the scaffold action without writing",
+    `  ${example_cmd} init --dry-run config/gather.yaml`,
+    "",
+    `${chalk.bold("Scaffold")}`,
+    ...scaffold_lines,
+  ].join("\n");
+}
+
+function normalize_list(values) {
+  if (!values) return [];
+  const list = Array.isArray(values) ? values : [values];
+  const normalized = [];
+  for (const entry of list) {
+    const text = String(entry || "").trim();
+    if (!text) continue;
+    const parts = text.split(",").map((part) => part.trim());
+    for (const part of parts) {
+      if (part) normalized.push(part);
+    }
+  }
+  return normalized;
+}
+
+function normalize_platform_key(value) {
+  const text = String(value || "").trim().toLowerCase();
+  if (!text) return "";
+  return PLATFORM_ALIASES[text] || text;
+}
+
+function parse_cli_arguments() {
+  const yargs = require("yargs");
+
+  const parser = yargs(process.argv.slice(2))
+    .scriptName("batch_exporter")
+    .help(false)
+    .version(false)
+    .parserConfiguration({
+      "camel-case-expansion": false,
+      "strip-dashed": false,
+    })
+    .option("config", {
+      alias: "c",
+      type: "array",
+      describe: `YAML config path(s), supports glob patterns (default: ${DEFAULT_CONFIG_PATH})`,
+    })
+    .option("platform", {
+      alias: "p",
+      type: "array",
+      describe: "Only run these platforms (youtube, douyin, x)",
+    })
+    .option("exclude-platform", {
+      type: "array",
+      describe: "Skip these platforms (youtube, douyin, x)",
+    })
+    .option("state-file", {
+      type: "string",
+      describe:
+        "State cache path (default: ~/.command_base/exporter/processed.json)",
+    })
+    .option("refresh", {
+      alias: "r",
+      type: "boolean",
+      default: false,
+      describe: "Reprocess even if cached",
+    })
+    .option("stop-on-error", {
+      type: "boolean",
+      default: false,
+      describe: "Stop on first failed export",
+    })
+    .option("dry-run", {
+      alias: "d",
+      type: "boolean",
+      default: false,
+      describe: "Print commands without executing",
+    })
+    .option("quiet", {
+      type: "boolean",
+      default: false,
+      describe: "Print only warnings and errors",
+    })
+    .option("debug", {
+      type: "boolean",
+      default: false,
+      describe: "Enable verbose debug output",
+    })
+    .option("version", {
+      alias: "v",
+      type: "boolean",
+      describe: "Show version number and exit",
+    })
+    .option("help", {
+      alias: "h",
+      type: "boolean",
+      describe: "Show help message",
+    })
+    .strict(false)
+    .usage(build_help_text("batch_exporter"))
+    .wrap(Math.min(yargs.terminalWidth(), 110));
+
+  const argv = parser.parse();
+
+  if (argv.help) {
+    console.log(build_help_text(argv.$0 || "batch_exporter"));
+    process.exit(0);
+  }
+
+  if (argv.version) {
+    console.log(package_json.version);
+    process.exit(0);
+  }
+
+  const config_patterns = [
+    ...normalize_list(argv.config),
+    ...normalize_list(argv._ || []),
+  ];
+
+  return {
+    command_name: argv.$0 || "batch_exporter",
+    config_patterns,
+    include_platforms: normalize_list(argv.platform)
+      .map(normalize_platform_key)
+      .filter(Boolean),
+    exclude_platforms: normalize_list(argv["exclude-platform"])
+      .map(normalize_platform_key)
+      .filter(Boolean),
+    state_file: argv["state-file"] ? String(argv["state-file"]) : "",
+    refresh: Boolean(argv.refresh),
+    stop_on_error: Boolean(argv["stop-on-error"]),
+    dry_run: Boolean(argv["dry-run"]),
+    quiet_mode: Boolean(argv.quiet),
+    debug_mode: Boolean(argv.debug),
+  };
+}
+
+function parse_init_arguments() {
+  const yargs = require("yargs");
+
+  const parser = yargs(process.argv.slice(3))
+    .scriptName("batch_exporter")
+    .help(false)
+    .version(false)
+    .parserConfiguration({
+      "camel-case-expansion": false,
+      "strip-dashed": false,
+    })
+    .option("config", {
+      alias: "c",
+      type: "array",
+      describe: `YAML config path(s), supports glob patterns (default: ${DEFAULT_CONFIG_PATH})`,
+    })
+    .option("refresh", {
+      alias: "r",
+      type: "boolean",
+      default: false,
+      describe: "Overwrite existing config content",
+    })
+    .option("dry-run", {
+      alias: "d",
+      type: "boolean",
+      default: false,
+      describe: "Print actions without writing",
+    })
+    .option("quiet", {
+      type: "boolean",
+      default: false,
+      describe: "Print only warnings and errors",
+    })
+    .option("debug", {
+      type: "boolean",
+      default: false,
+      describe: "Enable verbose debug output",
+    })
+    .option("version", {
+      alias: "v",
+      type: "boolean",
+      describe: "Show version number and exit",
+    })
+    .option("help", {
+      alias: "h",
+      type: "boolean",
+      describe: "Show help message",
+    })
+    .strict(false)
+    .usage(build_init_help_text("batch_exporter"))
+    .wrap(Math.min(yargs.terminalWidth(), 110));
+
+  const argv = parser.parse();
+
+  if (argv.help) {
+    console.log(build_init_help_text(argv.$0 || "batch_exporter"));
+    process.exit(0);
+  }
+
+  if (argv.version) {
+    console.log(package_json.version);
+    process.exit(0);
+  }
+
+  const config_patterns = [
+    ...normalize_list(argv.config),
+    ...normalize_list(argv._ || []),
+  ];
+
+  return {
+    command_name: argv.$0 || "batch_exporter",
+    config_patterns,
+    refresh: Boolean(argv.refresh),
+    dry_run: Boolean(argv["dry-run"]),
+    quiet_mode: Boolean(argv.quiet),
+    debug_mode: Boolean(argv.debug),
+  };
+}
+
+function expand_patterns(patterns, logger) {
+  const resolved_paths = new Set();
+
+  for (const pattern of patterns) {
+    const expanded_pattern = expand_user_path(pattern);
+    const matches = globSync(expanded_pattern, {
+      nodir: true,
+      absolute: true,
+      windowsPathsNoEscape: true,
+    });
+
+    if (matches.length === 0) {
+      logger.debug(
+        `Pattern ${expanded_pattern} matched no files; treating as literal path.`,
+      );
+      resolved_paths.add(path.resolve(expanded_pattern));
+      continue;
+    }
+
+    for (const match of matches) {
+      resolved_paths.add(path.resolve(match));
+    }
+  }
+
+  return Array.from(resolved_paths);
+}
+
+function expand_init_patterns(patterns, logger) {
+  const resolved_paths = new Set();
+
+  for (const pattern of patterns) {
+    const expanded_pattern = expand_user_path(pattern);
+    const matches = globSync(expanded_pattern, {
+      nodir: true,
+      absolute: true,
+      windowsPathsNoEscape: true,
+    });
+
+    if (matches.length === 0) {
+      if (hasMagic(expanded_pattern)) {
+        logger.warn(
+          `Pattern ${expanded_pattern} matched no files; skipping.`,
+        );
+        continue;
+      }
+      resolved_paths.add(path.resolve(expanded_pattern));
+      continue;
+    }
+
+    for (const match of matches) {
+      resolved_paths.add(path.resolve(match));
+    }
+  }
+
+  return Array.from(resolved_paths);
+}
+
+async function read_yaml_file(file_path, logger) {
+  logger.debug(`IO: read config file ${file_path}`);
+  const raw_text = await fs.readFile(file_path, "utf8");
+  try {
+    return YAML.parse(raw_text);
+  } catch (error) {
+    logger.error(`Failed to parse YAML in ${file_path}.`, error);
+    throw error;
+  }
+}
+
+function is_text_empty(raw_text) {
+  if (raw_text === undefined || raw_text === null) return true;
+  return String(raw_text).trim().length === 0;
+}
+
+async function read_text_file(file_path, logger) {
+  logger.debug(`IO: read file ${file_path}`);
+  return fs.readFile(file_path, "utf8");
+}
+
+async function init_config_file(file_path, options, logger) {
+  const resolved_path = path.resolve(expand_user_path(file_path));
+  const scaffold_text = DEFAULT_CONFIG_TEMPLATE;
+  const scaffold_trimmed = scaffold_text.trim();
+  let existing_text = "";
+  let exists = false;
+
+  try {
+    logger.debug(`IO: stat config file ${resolved_path}`);
+    const stat = await fs.stat(resolved_path);
+    if (!stat.isFile()) {
+      logger.error(`Config path is not a file: ${resolved_path}`);
+      return { status: "invalid" };
+    }
+    exists = true;
+    existing_text = await read_text_file(resolved_path, logger);
+  } catch (error) {
+    if (error && error.code === "ENOENT") {
+      exists = false;
+    } else {
+      logger.error(`Unable to access config path ${resolved_path}.`, error);
+      return { status: "failed" };
+    }
+  }
+
+  const existing_trimmed = String(existing_text || "").trim();
+  if (!is_text_empty(existing_trimmed) && existing_trimmed === scaffold_trimmed) {
+    logger.info(`Config already scaffolded: ${palette.path(resolved_path)}`);
+    return { status: "skipped" };
+  }
+
+  const is_empty = is_text_empty(existing_trimmed);
+  if (!is_empty && !options.refresh) {
+    logger.info(`Skip non-empty config: ${palette.path(resolved_path)}`);
+    return { status: "skipped" };
+  }
+
+  if (options.dry_run) {
+    logger.info(
+      `Dry-run: would write scaffold to ${palette.path(resolved_path)}`,
+    );
+    return { status: "dry_run", existed: exists, refreshed: !is_empty };
+  }
+
+  const target_dir = path.dirname(resolved_path);
+  try {
+    logger.debug(`IO: ensure config directory ${target_dir}`);
+    await fs.mkdir(target_dir, { recursive: true });
+
+    logger.debug(`IO: write config file ${resolved_path}`);
+    await fs.writeFile(resolved_path, scaffold_text, "utf8");
+  } catch (error) {
+    logger.error(`Failed to write scaffold config ${resolved_path}.`, error);
+    return { status: "failed" };
+  }
+
+  if (!exists) {
+    logger.success(`Created scaffold config: ${palette.path(resolved_path)}`);
+    return { status: "created" };
+  }
+
+  if (options.refresh && !is_empty) {
+    logger.success(`Overwrote scaffold config: ${palette.path(resolved_path)}`);
+    return { status: "overwritten" };
+  }
+
+  logger.success(`Initialized scaffold config: ${palette.path(resolved_path)}`);
+  return { status: "initialized" };
+}
+
+function normalize_source_map(raw_config, logger, source_label) {
+  if (!raw_config || typeof raw_config !== "object") {
+    logger.warn(`Config ${source_label} is empty or not an object.`);
+    return {};
+  }
+
+  const source = raw_config.source || raw_config.sources || raw_config;
+  if (!source || typeof source !== "object" || Array.isArray(source)) {
+    logger.warn(`Config ${source_label} has no "source" map to process.`);
+    return {};
+  }
+
+  const normalized = {};
+
+  for (const [platform_key, raw_value] of Object.entries(source)) {
+    const normalized_platform = normalize_platform_key(platform_key);
+    if (!normalized_platform) continue;
+
+    const items = normalize_source_items(
+      raw_value,
+      logger,
+      source_label,
+      normalized_platform,
+    );
+
+    if (items.length === 0) continue;
+
+    if (!normalized[normalized_platform]) {
+      normalized[normalized_platform] = [];
+    }
+    normalized[normalized_platform].push(...items);
+  }
+
+  return normalized;
+}
+
+function normalize_source_items(raw_value, logger, source_label, platform_key) {
+  const items = [];
+
+  function add_item(entry, entry_label) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      logger.warn(
+        `Config ${source_label} platform ${platform_key} ${entry_label} must be an object with name and url.`,
+      );
+      return;
+    }
+
+    const name_text = String(entry.name || "").trim();
+    const url_text = String(entry.url || "").trim();
+
+    if (!name_text || !url_text) {
+      logger.warn(
+        `Config ${source_label} platform ${platform_key} ${entry_label} requires name and url.`,
+      );
+      return;
+    }
+
+    items.push({ name: name_text, url: url_text });
+  }
+
+  if (Array.isArray(raw_value)) {
+    raw_value.forEach((entry, index) => {
+      add_item(entry, `entry ${index + 1}`);
+    });
+    return items;
+  }
+
+  if (raw_value && typeof raw_value === "object") {
+    add_item(raw_value, "entry");
+    return items;
+  }
+
+  if (raw_value !== undefined && raw_value !== null) {
+    logger.warn(
+      `Config ${source_label} platform ${platform_key} must be a list of items.`,
+    );
+  }
+
+  return items;
+}
+
+function has_valid_source_items(source_map) {
+  if (!source_map || typeof source_map !== "object") return false;
+  return Object.values(source_map).some(
+    (items) => Array.isArray(items) && items.length > 0,
+  );
+}
+
+function print_config_sample(logger) {
+  const sample_text = DEFAULT_CONFIG_TEMPLATE.trimEnd();
+  logger.error("Sample config:");
+  console.error(palette.detail(sample_text));
+}
+
+function format_command(command, args) {
+  const parts = [command, ...args].map((value) => {
+    const text = String(value);
+    if (text === "") return '""';
+    if (/[\s"'\\]/.test(text)) {
+      return `"${text.replace(/["\\]/g, "\\$&")}"`;
+    }
+    return text;
+  });
+  return parts.join(" ");
+}
+
+function build_platform_command(platform_key, url) {
+  const config = PLATFORM_COMMANDS[platform_key];
+  if (!config) return null;
+  return {
+    command: config.command,
+    args: config.build_args(url),
+    label: config.label || platform_key,
+  };
+}
+
+function build_job_key(platform_key, url) {
+  return `${platform_key}::${url}`;
+}
+
+async function load_state(state_file, logger, refresh_mode) {
+  if (refresh_mode) {
+    logger.debug("Step: refresh enabled, skipping state load.");
+    return { version: 1, processed: {} };
+  }
+
+  try {
+    logger.debug(`IO: read state file ${state_file}`);
+    const raw_text = await fs.readFile(state_file, "utf8");
+    const parsed = JSON.parse(raw_text);
+    if (!parsed || typeof parsed !== "object") {
+      return { version: 1, processed: {} };
+    }
+    if (!parsed.processed || typeof parsed.processed !== "object") {
+      parsed.processed = {};
+    }
+    return parsed;
+  } catch (error) {
+    if (error && error.code === "ENOENT") {
+      logger.debug(`State file ${state_file} not found; starting fresh.`);
+      return { version: 1, processed: {} };
+    }
+    logger.error(`Failed to read state file ${state_file}.`, error);
+    throw error;
+  }
+}
+
+async function save_state(state_file, state_data, logger) {
+  const state_dir = path.dirname(state_file);
+  logger.debug(`IO: ensure state directory ${state_dir}`);
+  await fs.mkdir(state_dir, { recursive: true });
+
+  logger.debug(`IO: write state file ${state_file}`);
+  await fs.writeFile(
+    state_file,
+    JSON.stringify(state_data, null, 2),
+    "utf8",
+  );
+}
+
+function record_processed(state_data, job, command_text) {
+  const now_text = new Date().toISOString();
+  const key = build_job_key(job.platform_key, job.url);
+  state_data.processed[key] = {
+    platform: job.platform_key,
+    url: job.url,
+    name: job.name,
+    source_file: job.source_file,
+    command: command_text,
+    last_run: now_text,
+  };
+}
+
+function filter_jobs(job_list, options) {
+  let filtered = job_list;
+  if (options.include_platforms.length > 0) {
+    filtered = filtered.filter((job) =>
+      options.include_platforms.includes(job.platform_key),
+    );
+  }
+  if (options.exclude_platforms.length > 0) {
+    filtered = filtered.filter(
+      (job) => !options.exclude_platforms.includes(job.platform_key),
+    );
+  }
+  return filtered;
+}
+
+function build_jobs_from_sources(source_maps, logger) {
+  const job_list = [];
+  const seen_keys = new Set();
+  let duplicate_count = 0;
+
+  for (const source of source_maps) {
+    const source_file = source.source_file;
+    const source_map = source.source_map;
+
+    for (const [platform_key, items] of Object.entries(source_map)) {
+      for (const item of items) {
+        const trimmed_name = String(item.name || "").trim();
+        const trimmed_url = String(item.url || "").trim();
+        if (!trimmed_url) continue;
+        const job_key = build_job_key(platform_key, trimmed_url);
+        if (seen_keys.has(job_key)) {
+          duplicate_count += 1;
+          const name_suffix = trimmed_name
+            ? ` (${trimmed_name})`
+            : "";
+          logger.warn(
+            `Skipping duplicate ${platform_key} URL from ${source_file}: ${trimmed_url}${name_suffix}`,
+          );
+          continue;
+        }
+        seen_keys.add(job_key);
+        job_list.push({
+          platform_key,
+          url: trimmed_url,
+          name: trimmed_name,
+          source_file,
+        });
+      }
+    }
+  }
+
+  return { job_list, duplicate_count };
+}
+
+async function run_export_job(job, command_config, options, logger) {
+  const command_text = format_command(command_config.command, command_config.args);
+  const name_suffix = job.name ? ` (${job.name})` : "";
+  logger.info(
+    `Run ${palette.path(command_config.label)}${name_suffix}: ${palette.detail(command_text)}`,
+  );
+
+  if (options.dry_run) {
+    logger.success("Dry-run mode: command not executed.");
+    return { ok: true, command_text, exit_code: 0, dry_run: true };
+  }
+
+  logger.debug(`IO: spawn ${command_text}`);
+
+  return new Promise((resolve) => {
+    const stdio_mode = options.quiet_mode ? ["ignore", "ignore", "inherit"] : "inherit";
+    const child = spawn(command_config.command, command_config.args, {
+      stdio: stdio_mode,
+    });
+
+    child.on("error", (error) => {
+      logger.error(`Failed to launch ${command_config.command}.`, error);
+      resolve({ ok: false, command_text, exit_code: 1 });
+    });
+
+    child.on("close", (code, signal) => {
+      if (signal) {
+        logger.error(
+          `Command terminated by signal ${signal}: ${command_text}`,
+        );
+        resolve({ ok: false, command_text, exit_code: 1 });
+        return;
+      }
+      const exit_code = typeof code === "number" ? code : 1;
+      if (exit_code === 0) {
+        logger.success(`Success: ${command_text}`);
+        resolve({ ok: true, command_text, exit_code });
+      } else {
+        logger.error(`Failed (exit ${exit_code}): ${command_text}`);
+        resolve({ ok: false, command_text, exit_code });
+      }
+    });
+  });
+}
+
+async function run_export_command() {
+  const options = parse_cli_arguments();
+  const logger = create_logger({
+    command_name: options.command_name,
+    quiet_mode: options.quiet_mode,
+    debug_mode: options.debug_mode,
+  });
+
+  logger.debug("Step: prepare config patterns");
+  const default_config_path = path.resolve(DEFAULT_CONFIG_PATH);
+  let config_patterns = options.config_patterns;
+  if (config_patterns.length === 0) {
+    try {
+      logger.debug(`IO: check default config path ${default_config_path}`);
+      await fs.stat(default_config_path);
+      config_patterns = [default_config_path];
+      logger.debug(`Using default config path ${default_config_path}`);
+    } catch (error) {
+      if (error && error.code !== "ENOENT") {
+        logger.error(
+          `Unable to access default config path ${default_config_path}.`,
+          error,
+        );
+      }
+    }
+  }
+
+  logger.debug("Step: expand config patterns");
+  const config_files = expand_patterns(config_patterns, logger);
+
+  if (config_files.length === 0) {
+    logger.error("No config files provided.");
+    console.log(build_help_text(options.command_name));
+    process.exit(1);
+  }
+
+  logger.debug("Step: load config files");
+  const source_maps = [];
+  for (const file_path of config_files) {
+    const resolved_path = path.resolve(expand_user_path(file_path));
+    try {
+      const raw_config = await read_yaml_file(resolved_path, logger);
+      logger.debug(`Step: validate config content ${resolved_path}`);
+      const source_map = normalize_source_map(
+        raw_config || {},
+        logger,
+        resolved_path,
+      );
+      if (!has_valid_source_items(source_map)) {
+        logger.error(
+          `Config ${palette.path(resolved_path)} has no valid source entries.`,
+        );
+        print_config_sample(logger);
+        process.exit(1);
+      }
+      source_maps.push({ source_file: resolved_path, source_map });
+    } catch (error) {
+      logger.error(`Unable to process config ${resolved_path}.`, error);
+      print_config_sample(logger);
+      process.exit(1);
+    }
+  }
+
+  logger.debug("Step: build job list");
+  const { job_list: all_jobs, duplicate_count } = build_jobs_from_sources(
+    source_maps,
+    logger,
+  );
+
+  if (duplicate_count > 0) {
+    logger.info(`Skipped ${duplicate_count} duplicate URL entries.`);
+  }
+
+  logger.debug("Step: filter jobs by platform");
+  const filtered_jobs = filter_jobs(all_jobs, options);
+
+  if (filtered_jobs.length === 0) {
+    logger.warn("No jobs matched the provided config and filters.");
+    console.log(build_help_text(options.command_name));
+    process.exit(0);
+  }
+
+  logger.debug("Step: prepare state cache");
+  const state_file = path.resolve(
+    expand_user_path(options.state_file || DEFAULT_STATE_FILE),
+  );
+  const state_data = await load_state(state_file, logger, options.refresh);
+
+  logger.debug("Step: execute export jobs");
+  let skipped_cached = 0;
+  let skipped_unknown = 0;
+  let executed = 0;
+  let failed = 0;
+  let dry_run_count = 0;
+
+  for (let index = 0; index < filtered_jobs.length; index += 1) {
+    const job = filtered_jobs[index];
+    logger.debug(
+      `Step: job ${index + 1}/${filtered_jobs.length} ${job.platform_key}`,
+    );
+
+    const command_config = build_platform_command(job.platform_key, job.url);
+    if (!command_config) {
+      skipped_unknown += 1;
+      logger.warn(
+        `Unsupported platform ${job.platform_key} in ${job.source_file}.`,
+      );
+      continue;
+    }
+
+    const job_key = build_job_key(job.platform_key, job.url);
+    if (!options.refresh && state_data.processed[job_key]) {
+      skipped_cached += 1;
+      const name_suffix = job.name ? ` (${job.name})` : "";
+      logger.info(
+        `Skip cached ${job.platform_key} URL: ${palette.path(job.url)}${name_suffix}`,
+      );
+      continue;
+    }
+
+    const result = await run_export_job(job, command_config, options, logger);
+    if (result.dry_run) {
+      dry_run_count += 1;
+      continue;
+    }
+    executed += 1;
+    if (result.ok) {
+      record_processed(state_data, job, result.command_text);
+    } else {
+      failed += 1;
+      if (options.stop_on_error) {
+        logger.warn("Stopping on first failure as requested.");
+        break;
+      }
+    }
+  }
+
+  if (!options.dry_run) {
+    logger.debug("Step: save state cache");
+    await save_state(state_file, state_data, logger);
+  }
+
+  logger.debug("Step: print summary");
+  const summary_lines = [
+    `Total jobs: ${filtered_jobs.length}`,
+    `Executed: ${executed}`,
+    `Dry-run: ${dry_run_count}`,
+    `Skipped cached: ${skipped_cached}`,
+    `Skipped unknown platforms: ${skipped_unknown}`,
+    `Failed: ${failed}`,
+  ];
+
+  logger.info(summary_lines.join(" | "));
+
+  if (failed > 0) {
+    process.exit(1);
+  }
+}
+
+async function run_init_command() {
+  const options = parse_init_arguments();
+  const logger = create_logger({
+    command_name: options.command_name,
+    quiet_mode: options.quiet_mode,
+    debug_mode: options.debug_mode,
+  });
+
+  logger.debug("Step: prepare init config patterns");
+  const default_config_path = path.resolve(DEFAULT_CONFIG_PATH);
+  let config_patterns = options.config_patterns;
+
+  if (config_patterns.length === 0) {
+    config_patterns = [default_config_path];
+    logger.debug(`Using default config path ${default_config_path}`);
+  }
+
+  logger.debug("Step: expand init config patterns");
+  const config_files = expand_init_patterns(config_patterns, logger);
+
+  if (config_files.length === 0) {
+    logger.error("No config files provided.");
+    console.log(build_init_help_text(options.command_name));
+    process.exit(1);
+  }
+
+  logger.debug("Step: initialize config files");
+  let created = 0;
+  let initialized = 0;
+  let overwritten = 0;
+  let skipped = 0;
+  let failed = 0;
+  let dry_run_count = 0;
+
+  for (let index = 0; index < config_files.length; index += 1) {
+    const file_path = config_files[index];
+    logger.debug(`Step: init config ${index + 1}/${config_files.length}`);
+
+    const result = await init_config_file(file_path, options, logger);
+    if (!result || !result.status) {
+      failed += 1;
+      continue;
+    }
+
+    switch (result.status) {
+      case "created":
+        created += 1;
+        break;
+      case "initialized":
+        initialized += 1;
+        break;
+      case "overwritten":
+        overwritten += 1;
+        break;
+      case "dry_run":
+        dry_run_count += 1;
+        break;
+      case "skipped":
+        skipped += 1;
+        break;
+      default:
+        failed += 1;
+        break;
+    }
+  }
+
+  logger.debug("Step: print init summary");
+  const summary_lines = [
+    `Created: ${created}`,
+    `Initialized: ${initialized}`,
+    `Overwritten: ${overwritten}`,
+    `Dry-run: ${dry_run_count}`,
+    `Skipped: ${skipped}`,
+    `Failed: ${failed}`,
+  ];
+  logger.info(summary_lines.join(" | "));
+
+  if (failed > 0) {
+    process.exit(1);
+  }
+}
+
+async function main() {
+  const [command_name] = process.argv.slice(2);
+  if (command_name === "init") {
+    await run_init_command();
+    return;
+  }
+  await run_export_command();
+}
+
+main().catch((error) => {
+  console.error(chalk.red(`batch_exporter failed: ${error.message}`));
+  process.exit(1);
+});
