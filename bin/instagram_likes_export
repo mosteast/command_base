@@ -37,7 +37,7 @@ const default_download_file_name_format = [
 ];
 const default_download_file_name_delimiter = "__";
 const default_output_base_dir =
-  "/Users/hailang/Library/Mobile Documents/com~apple~CloudDocs/main/download/video/instagram";
+  "/Users/hailang/Library/Mobile Documents/com~apple~CloudDocs/main/saved/video/instagram";
 
 const palette = {
   headline: chalk.cyanBright.bold,

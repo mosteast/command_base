@@ -12,9 +12,9 @@ const { spawn } = require("child_process");
 const package_json = require("../package.json");
 
 const DEFAULT_CONFIG_PATH =
-  "/Users/hailang/Library/Mobile Documents/com~apple~CloudDocs/main/download/state/gather.config.yaml";
+  "/Users/hailang/Library/Mobile Documents/com~apple~CloudDocs/main/saved/state/gather.config.yaml";
 const DEFAULT_STATE_FILE =
-  "/Users/hailang/Library/Mobile Documents/com~apple~CloudDocs/main/download/state/gather.state.json";
+  "/Users/hailang/Library/Mobile Documents/com~apple~CloudDocs/main/saved/state/gather.state.json";
 const DEFAULT_CONFIG_LINES = [
   "# Gather config",
   "# Each source item requires a name and handle.",

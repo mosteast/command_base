@@ -14,7 +14,7 @@ const command_name = path.basename(process.argv[1] || "text_summarize");
 const repo_root_path = path.resolve(__dirname, "..");
 const prompt_external_path =
   process.env.TEXT_SUMMARIZE_PROMPT ||
-  "/Users/hailang/Library/Mobile Documents/com~apple~CloudDocs/main/download/tool/prompt/summarize_text.build.md";
+  "/Users/hailang/Library/Mobile Documents/com~apple~CloudDocs/main/saved/tool/prompt/summarize_text.build.md";
 
 (async () => {
   await run_text_prompt_batch_cli({

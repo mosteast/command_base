@@ -27,7 +27,7 @@ const palette = {
 };
 
 const default_output_root =
-  "/Users/hailang/Library/Mobile Documents/com~apple~CloudDocs/main/download/text/article";
+  "/Users/hailang/Library/Mobile Documents/com~apple~CloudDocs/main/saved/text/article";
 const summarizer_command = path.resolve(__dirname, "text_summarize");
 const default_render_mode = "browser";
 

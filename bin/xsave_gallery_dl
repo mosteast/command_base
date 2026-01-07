@@ -1,11 +1,11 @@
 #!/bin/bash
 
 # Initialize variables
-default_output_dir="/Users/hailang/Library/Mobile Documents/com~apple~CloudDocs/main/download/gallery-dl"
+default_output_dir="$HOME/Library/Mobile Documents/com~apple~CloudDocs/main/saved/gallery-dl"
 output_dir="$default_output_dir"
 output_dir_provided=false
 
-default_cookies_file="~/Downloads/x.com_cookies.txt"
+default_cookies_file="$HOME/Downloads/cookies.txt"
 cookies_file="$default_cookies_file"
 cookies_file_provided=false
 use_cookies=true
@@ -14,6 +14,7 @@ write_info_json=true
 write_metadata=true
 write_tags=true
 enable_twitter_conversations=true
+enable_twitter_replies=true
 enable_twitter_quoted=true
 
 use_archive=true
@@ -25,7 +26,7 @@ refresh=false
 debug_mode=false
 quiet_mode=false
 dry_run=false
-script_version="1.0.0"
+script_version="1.0.1"
 
 # Color codes for output readability
 color_reset=$'\033[0m'
@@ -183,6 +184,7 @@ ${color_blue}Options:${color_reset}
       --no-write-tags         Disable tags output (default: false)
       --no-twitter-conversations
                               Disable Twitter conversations (default: false)
+      --no-twitter-replies    Disable Twitter replies (default: false)
       --no-twitter-quoted     Disable Twitter quoted tweets (default: false)
       --                      Pass remaining arguments to gallery-dl
 
@@ -351,6 +353,10 @@ while [[ $# -gt 0 ]]; do
             enable_twitter_conversations=false
             shift
             ;;
+        --no-twitter-replies)
+            enable_twitter_replies=false
+            shift
+            ;;
         --no-twitter-quoted)
             enable_twitter_quoted=false
             shift
@@ -493,6 +499,11 @@ fi
 
 if [ "$enable_twitter_conversations" = true ]; then
     gallery_dl_args+=(-o "extractor.twitter.conversations=true")
+fi
+if [ "$enable_twitter_replies" = true ]; then
+    gallery_dl_args+=(-o "extractor.twitter.replies=true")
+else
+    gallery_dl_args+=(-o "extractor.twitter.replies=false")
 fi
 if [ "$enable_twitter_quoted" = true ]; then
     gallery_dl_args+=(-o "extractor.twitter.quoted=true")
