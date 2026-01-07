@@ -23,35 +23,59 @@ retry_attempt_limit=3
 retry_delay_seconds=2
 
 # Color codes for output readability
-color_reset="\033[0m"
-color_green="\033[32m"
-color_yellow="\033[33m"
-color_red="\033[31m"
-color_blue="\033[34m"
+color_reset=$'\033[0m'
+color_bold=$'\033[1m'
+color_dim=$'\033[2m'
+color_green=$'\033[32m'
+color_yellow=$'\033[33m'
+color_red=$'\033[31m'
+color_blue=$'\033[34m'
+color_cyan=$'\033[36m'
+color_magenta=$'\033[35m'
+color_gray=$'\033[90m'
+
+log_with_tag() {
+    local tag="$1"
+    local tag_color="$2"
+    local message_color="$3"
+    shift 3
+    local message="$*"
+    printf "%b[%s]%b %b%s%b\n" "$tag_color" "$tag" "$color_reset" "$message_color" "$message" "$color_reset"
+}
 
 log_info() {
     if [ "$quiet_mode" = true ]; then
         return 0
     fi
-    printf "%b%s%b\n" "$color_blue" "$1" "$color_reset"
+    log_with_tag "INFO" "${color_bold}${color_blue}" "$color_blue" "$*"
 }
 log_success() {
     if [ "$quiet_mode" = true ]; then
         return 0
     fi
-    printf "%b%s%b\n" "$color_green" "$1" "$color_reset"
+    log_with_tag "OK" "${color_bold}${color_green}" "$color_green" "$*"
 }
-log_warn() { printf "%b%s%b\n" "$color_yellow" "$1" "$color_reset"; }
-log_error() { printf "%b%s%b\n" "$color_red" "$1" "$color_reset" >&2; }
+log_warn() { log_with_tag "WARN" "${color_bold}${color_yellow}" "$color_yellow" "$*"; }
+log_error() { log_with_tag "ERROR" "${color_bold}${color_red}" "$color_red" "$*" >&2; }
 log_debug() {
     if [ "$debug_mode" != true ] || [ "$quiet_mode" = true ]; then
         return 0
     fi
-    printf "%b%s%b\n" "$color_blue" "$1" "$color_reset"
+    log_with_tag "DEBUG" "${color_bold}${color_magenta}" "${color_dim}${color_magenta}" "$*"
 }
 
-log_step() { log_debug "Step: $*"; }
-log_io() { log_debug "IO: $*"; }
+log_step() {
+    if [ "$debug_mode" != true ] || [ "$quiet_mode" = true ]; then
+        return 0
+    fi
+    log_with_tag "STEP" "${color_bold}${color_cyan}" "$color_cyan" "$*"
+}
+log_io() {
+    if [ "$debug_mode" != true ] || [ "$quiet_mode" = true ]; then
+        return 0
+    fi
+    log_with_tag "IO" "${color_bold}${color_gray}" "${color_dim}${color_gray}" "$*"
+}
 
 format_command() {
     local formatted=""
@@ -251,8 +275,8 @@ retry_command() {
 
     while true; do
         if [ "$debug_mode" = true ] && [ "$quiet_mode" != true ]; then
-            log_debug "Step: ${description} (attempt ${attempt})"
-            log_debug "IO: $(format_command "$@")"
+            log_step "${description} (attempt ${attempt})"
+            log_io "$(format_command "$@")"
         fi
         if "$@"; then
             if [ $attempt -gt 1 ]; then
@@ -309,14 +333,14 @@ run_yt_dlp_with_log_internal() {
         yt_dlp_last_format_error=false
         yt_dlp_last_player_error=false
         if [ "$debug_mode" = true ] && [ "$quiet_mode" != true ]; then
-            log_debug "IO: $(format_command "$@")"
+            log_io "$(format_command "$@")"
         fi
         "$@"
         return $?
     fi
 
     if [ "$debug_mode" = true ] && [ "$quiet_mode" != true ]; then
-        log_debug "IO: $(format_command "$@")"
+        log_io "$(format_command "$@")"
     fi
     "$@" 2>&1 | tee "$log_file"
     local exit_code=${PIPESTATUS[0]}
@@ -655,18 +679,18 @@ INPUT_COUNT=0
 # Validate input
 if [ $INPUT_COUNT -eq 0 ]; then
     log_error "No input provided. Please provide one of:"
-    echo "  - Channel URL (-c|--channel)"
-    echo "  - Playlist URL (-l|--list)"
-    echo "  - One or more video URLs"
-    echo ""
+    log_info "  - Channel URL (-c|--channel)"
+    log_info "  - Playlist URL (-l|--list)"
+    log_info "  - One or more video URLs"
+    log_info ""
     show_usage
     exit 1
 elif [ $INPUT_COUNT -gt 1 ]; then
     log_error "Multiple input types provided. Please use only one of:"
-    echo "  - Channel URL (-c|--channel)"
-    echo "  - Playlist URL (-l|--list)"
-    echo "  - One or more video URLs"
-    echo ""
+    log_info "  - Channel URL (-c|--channel)"
+    log_info "  - Playlist URL (-l|--list)"
+    log_info "  - One or more video URLs"
+    log_info ""
     log_info "Current inputs:"
     [ -n "$CHANNEL_URL" ] && log_info "  Channel URL: '$CHANNEL_URL'"
     [ -n "$PLAYLIST_URL" ] && log_info "  Playlist URL: '$PLAYLIST_URL'"

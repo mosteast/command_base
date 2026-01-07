@@ -74,6 +74,104 @@ const palette = {
   path: chalk.magentaBright,
 };
 
+let active_child_process = null;
+const shutdown_state = {
+  requested: false,
+  signal: "",
+  exit_code: 0,
+  kill_timeout_id: null,
+};
+let signal_handlers_registered = false;
+let shutdown_logger = null;
+
+function register_signal_handlers(logger) {
+  shutdown_logger = logger;
+  if (signal_handlers_registered) return;
+  signal_handlers_registered = true;
+
+  const handle_signal = (signal) => {
+    const active_logger = shutdown_logger || logger;
+    request_shutdown(signal, active_logger);
+  };
+
+  ["SIGINT", "SIGTERM", "SIGHUP"].forEach((signal) => {
+    process.on(signal, () => handle_signal(signal));
+  });
+}
+
+function request_shutdown(signal, logger) {
+  if (shutdown_state.requested) return;
+  shutdown_state.requested = true;
+  shutdown_state.signal = signal;
+  shutdown_state.exit_code = signal === "SIGINT" ? 130 : 143;
+
+  if (logger && typeof logger.warn === "function") {
+    logger.warn(`Received ${signal}, stopping after current task.`);
+  } else {
+    console.warn(`Received ${signal}, stopping after current task.`);
+  }
+
+  if (active_child_process) {
+    terminate_child_process(active_child_process, signal, logger);
+  }
+}
+
+function terminate_child_process(child, signal, logger) {
+  if (!child) return;
+  const target_signal = signal || "SIGTERM";
+  const active_logger = logger || shutdown_logger;
+
+  if (active_logger && typeof active_logger.debug === "function") {
+    active_logger.debug(`IO: send ${target_signal} to pid ${child.pid}`);
+  }
+
+  try {
+    child.kill(target_signal);
+  } catch (error) {
+    if (active_logger && typeof active_logger.error === "function") {
+      active_logger.error(
+        `Failed to send ${target_signal} to pid ${child.pid}.`,
+        error,
+      );
+    } else {
+      console.error(`Failed to send ${target_signal} to pid ${child.pid}.`);
+    }
+  }
+
+  if (shutdown_state.kill_timeout_id) return;
+  shutdown_state.kill_timeout_id = setTimeout(() => {
+    if (active_child_process !== child) return;
+    if (child.exitCode !== null || child.signalCode !== null) return;
+
+    if (active_logger && typeof active_logger.warn === "function") {
+      active_logger.warn(`Force stop pid ${child.pid}.`);
+    } else {
+      console.warn(`Force stop pid ${child.pid}.`);
+    }
+
+    try {
+      if (active_logger && typeof active_logger.debug === "function") {
+        active_logger.debug(`IO: send SIGKILL to pid ${child.pid}`);
+      }
+      child.kill("SIGKILL");
+    } catch (error) {
+      if (active_logger && typeof active_logger.error === "function") {
+        active_logger.error(`Failed to force stop pid ${child.pid}.`, error);
+      } else {
+        console.error(`Failed to force stop pid ${child.pid}.`);
+      }
+    }
+  }, 5000);
+}
+
+function clear_active_child() {
+  active_child_process = null;
+  if (shutdown_state.kill_timeout_id) {
+    clearTimeout(shutdown_state.kill_timeout_id);
+    shutdown_state.kill_timeout_id = null;
+  }
+}
+
 function expand_user_path(raw_path) {
   if (!raw_path) return raw_path;
   const text = String(raw_path);
@@ -231,7 +329,9 @@ function normalize_list(values) {
 }
 
 function normalize_platform_key(value) {
-  const text = String(value || "").trim().toLowerCase();
+  const text = String(value || "")
+    .trim()
+    .toLowerCase();
   if (!text) return "";
   return PLATFORM_ALIASES[text] || text;
 }
@@ -485,9 +585,7 @@ function expand_init_patterns(patterns, logger) {
 
     if (matches.length === 0) {
       if (hasMagic(expanded_pattern)) {
-        logger.warn(
-          `Pattern ${expanded_pattern} matched no files; skipping.`,
-        );
+        logger.warn(`Pattern ${expanded_pattern} matched no files; skipping.`);
         continue;
       }
       resolved_paths.add(path.resolve(expanded_pattern));
@@ -549,7 +647,10 @@ async function init_config_file(file_path, options, logger) {
   }
 
   const existing_trimmed = String(existing_text || "").trim();
-  if (!is_text_empty(existing_trimmed) && existing_trimmed === scaffold_trimmed) {
+  if (
+    !is_text_empty(existing_trimmed) &&
+    existing_trimmed === scaffold_trimmed
+  ) {
     logger.info(`Config already scaffolded: ${palette.path(resolved_path)}`);
     return { status: "skipped" };
   }
@@ -746,11 +847,7 @@ async function save_state(state_file, state_data, logger) {
   await fs.mkdir(state_dir, { recursive: true });
 
   logger.debug(`IO: write state file ${state_file}`);
-  await fs.writeFile(
-    state_file,
-    JSON.stringify(state_data, null, 2),
-    "utf8",
-  );
+  await fs.writeFile(state_file, JSON.stringify(state_data, null, 2), "utf8");
 }
 
 function record_processed(state_data, job, command_text) {
@@ -804,9 +901,7 @@ function build_jobs_from_sources(source_maps, logger) {
         const job_key = build_job_key(platform_key, resolved_url);
         if (seen_keys.has(job_key)) {
           duplicate_count += 1;
-          const name_suffix = trimmed_name
-            ? ` (${trimmed_name})`
-            : "";
+          const name_suffix = trimmed_name ? ` (${trimmed_name})` : "";
           const display_handle = format_handle_for_log(
             trimmed_handle,
             resolved_url,
@@ -832,11 +927,26 @@ function build_jobs_from_sources(source_maps, logger) {
 }
 
 async function run_export_job(job, command_config, options, logger) {
-  const command_text = format_command(command_config.command, command_config.args);
+  const command_text = format_command(
+    command_config.command,
+    command_config.args,
+  );
   const name_suffix = job.name ? ` (${job.name})` : "";
   logger.info(
     `Run ${palette.path(command_config.label)}${name_suffix}: ${palette.detail(command_text)}`,
   );
+
+  if (shutdown_state.requested) {
+    logger.warn(
+      `Skip command due to stop request: ${palette.detail(command_text)}`,
+    );
+    return {
+      ok: false,
+      command_text,
+      exit_code: shutdown_state.exit_code || 130,
+      aborted: true,
+    };
+  }
 
   if (options.dry_run) {
     logger.success("Dry-run mode: command not executed.");
@@ -846,25 +956,40 @@ async function run_export_job(job, command_config, options, logger) {
   logger.debug(`IO: spawn ${command_text}`);
 
   return new Promise((resolve) => {
-    const stdio_mode = options.quiet_mode ? ["ignore", "ignore", "inherit"] : "inherit";
+    const stdio_mode = options.quiet_mode
+      ? ["ignore", "ignore", "inherit"]
+      : "inherit";
     const child = spawn(command_config.command, command_config.args, {
       stdio: stdio_mode,
     });
+    active_child_process = child;
 
     child.on("error", (error) => {
+      clear_active_child();
       logger.error(`Failed to launch ${command_config.command}.`, error);
       resolve({ ok: false, command_text, exit_code: 1 });
     });
 
     child.on("close", (code, signal) => {
+      clear_active_child();
       if (signal) {
-        logger.error(
-          `Command terminated by signal ${signal}: ${command_text}`,
-        );
-        resolve({ ok: false, command_text, exit_code: 1 });
+        if (shutdown_state.requested) {
+          logger.warn(`Stopped by ${signal}: ${command_text}`);
+          resolve({ ok: false, command_text, exit_code: 1, aborted: true });
+        } else {
+          logger.error(
+            `Command terminated by signal ${signal}: ${command_text}`,
+          );
+          resolve({ ok: false, command_text, exit_code: 1 });
+        }
         return;
       }
       const exit_code = typeof code === "number" ? code : 1;
+      if (shutdown_state.requested) {
+        logger.warn(`Stopped: ${command_text}`);
+        resolve({ ok: false, command_text, exit_code, aborted: true });
+        return;
+      }
       if (exit_code === 0) {
         logger.success(`Success: ${command_text}`);
         resolve({ ok: true, command_text, exit_code });
@@ -883,6 +1008,8 @@ async function run_export_command() {
     quiet_mode: options.quiet_mode,
     debug_mode: options.debug_mode,
   });
+  logger.debug("Step: register signal handlers");
+  register_signal_handlers(logger);
 
   logger.debug("Step: prepare config patterns");
   const default_config_path = path.resolve(DEFAULT_CONFIG_PATH);
@@ -970,12 +1097,19 @@ async function run_export_command() {
   let executed = 0;
   let failed = 0;
   let dry_run_count = 0;
+  let aborted = 0;
 
   for (let index = 0; index < filtered_jobs.length; index += 1) {
     const job = filtered_jobs[index];
     logger.debug(
       `Step: job ${index + 1}/${filtered_jobs.length} ${job.platform_key}`,
     );
+
+    if (shutdown_state.requested) {
+      aborted += 1;
+      logger.warn("Stop requested; skipping remaining jobs.");
+      break;
+    }
 
     const command_config = build_platform_command(job.platform_key, job.url);
     if (!command_config) {
@@ -998,6 +1132,10 @@ async function run_export_command() {
     }
 
     const result = await run_export_job(job, command_config, options, logger);
+    if (result.aborted) {
+      aborted += 1;
+      break;
+    }
     if (result.dry_run) {
       dry_run_count += 1;
       continue;
@@ -1028,8 +1166,16 @@ async function run_export_command() {
     `Skipped unknown platforms: ${skipped_unknown}`,
     `Failed: ${failed}`,
   ];
+  if (aborted > 0) {
+    summary_lines.push(`Aborted: ${aborted}`);
+  }
 
   logger.info(summary_lines.join(" | "));
+
+  if (shutdown_state.requested) {
+    logger.warn(`Stopped by ${shutdown_state.signal}.`);
+    process.exit(shutdown_state.exit_code || 130);
+  }
 
   if (failed > 0) {
     process.exit(1);
@@ -1043,6 +1189,8 @@ async function run_init_command() {
     quiet_mode: options.quiet_mode,
     debug_mode: options.debug_mode,
   });
+  logger.debug("Step: register signal handlers");
+  register_signal_handlers(logger);
 
   logger.debug("Step: prepare init config patterns");
   const default_config_path = path.resolve(DEFAULT_CONFIG_PATH);
@@ -1073,6 +1221,11 @@ async function run_init_command() {
   for (let index = 0; index < config_files.length; index += 1) {
     const file_path = config_files[index];
     logger.debug(`Step: init config ${index + 1}/${config_files.length}`);
+
+    if (shutdown_state.requested) {
+      logger.warn("Stop requested; skipping remaining init files.");
+      break;
+    }
 
     const result = await init_config_file(file_path, options, logger);
     if (!result || !result.status) {
@@ -1112,6 +1265,11 @@ async function run_init_command() {
     `Failed: ${failed}`,
   ];
   logger.info(summary_lines.join(" | "));
+
+  if (shutdown_state.requested) {
+    logger.warn(`Stopped by ${shutdown_state.signal}.`);
+    process.exit(shutdown_state.exit_code || 130);
+  }
 
   if (failed > 0) {
     process.exit(1);
