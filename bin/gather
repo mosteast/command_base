@@ -16,17 +16,18 @@ const DEFAULT_CONFIG_PATH =
 const DEFAULT_STATE_FILE = "~/.command_base/exporter/processed.json";
 const DEFAULT_CONFIG_LINES = [
   "# Gather config",
-  "# Each source item requires a name and url.",
+  "# Each source item requires a name and handle.",
+  "# handle supports full URLs or usernames.",
   "source:",
   "  youtube:",
   "    - name: Example YouTube channel",
-  "      url: https://www.youtube.com/@example",
+  "      handle: https://www.youtube.com/@example",
   "  x:",
   "    - name: Example X user",
-  "      url: https://x.com/user1",
+  "      handle: https://x.com/user1",
   "  douyin:",
   "    - name: Example Douyin user",
-  "      url: https://www.douyin.com/user/EXAMPLE_ID",
+  "      handle: https://www.douyin.com/user/EXAMPLE_ID",
 ];
 const DEFAULT_CONFIG_TEMPLATE = `${DEFAULT_CONFIG_LINES.join("\n")}\n`;
 
@@ -54,6 +55,13 @@ const PLATFORM_COMMANDS = {
     build_args: (url) => ["x", "-M", "post", "-u", url],
     label: "x",
   },
+};
+
+const PLATFORM_HANDLE_BASE_URLS = {
+  // Keep aligned with DEFAULT_CONFIG_LINES examples.
+  youtube: "https://www.youtube.com/@",
+  x: "https://x.com/",
+  douyin: "https://www.douyin.com/user/",
 };
 
 const palette = {
@@ -154,17 +162,18 @@ function build_help_text(script_name) {
     `  ${example_cmd} init`,
     "",
     `${chalk.bold("YAML format")}`,
-    "  # Each item must include name and url",
+    "  # Each item must include name and handle",
+    "  # handle supports full URLs or usernames (e.g. youtube handle: user1)",
     "  source:",
     "    x:",
     "      - name: Example X user",
-    "        url: https://x.com/user1",
+    "        handle: https://x.com/user1",
     "    douyin:",
     "      - name: Example Douyin user",
-    "        url: https://www.douyin.com/user/MS4wLjABAA",
+    "        handle: https://www.douyin.com/user/MS4wLjABAA",
     "    youtube:",
     "      - name: Example YouTube channel",
-    "        url: https://www.youtube.com/@user1",
+    "        handle: https://www.youtube.com/@user1",
   ].join("\n");
 }
 
@@ -225,6 +234,30 @@ function normalize_platform_key(value) {
   const text = String(value || "").trim().toLowerCase();
   if (!text) return "";
   return PLATFORM_ALIASES[text] || text;
+}
+
+function is_http_url(value) {
+  return /^https?:\/\//i.test(String(value || "").trim());
+}
+
+function normalize_handle_to_url(raw_handle, platform_key) {
+  const handle_text = String(raw_handle || "").trim();
+  if (!handle_text) return "";
+  if (is_http_url(handle_text)) return handle_text;
+
+  const base_url = PLATFORM_HANDLE_BASE_URLS[platform_key];
+  if (!base_url) return handle_text;
+
+  const normalized_handle = handle_text.replace(/^@+/, "").replace(/^\/+/, "");
+  return `${base_url}${normalized_handle}`;
+}
+
+function format_handle_for_log(handle_text, url_text) {
+  const trimmed_handle = String(handle_text || "").trim();
+  const trimmed_url = String(url_text || "").trim();
+  if (!trimmed_handle) return trimmed_url;
+  if (!trimmed_url || trimmed_handle === trimmed_url) return trimmed_handle;
+  return `${trimmed_handle} (${trimmed_url})`;
 }
 
 function parse_cli_arguments() {
@@ -602,22 +635,22 @@ function normalize_source_items(raw_value, logger, source_label, platform_key) {
   function add_item(entry, entry_label) {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
       logger.warn(
-        `Config ${source_label} platform ${platform_key} ${entry_label} must be an object with name and url.`,
+        `Config ${source_label} platform ${platform_key} ${entry_label} must be an object with name and handle.`,
       );
       return;
     }
 
     const name_text = String(entry.name || "").trim();
-    const url_text = String(entry.url || "").trim();
+    const handle_text = String(entry.handle || entry.url || "").trim();
 
-    if (!name_text || !url_text) {
+    if (!name_text || !handle_text) {
       logger.warn(
-        `Config ${source_label} platform ${platform_key} ${entry_label} requires name and url.`,
+        `Config ${source_label} platform ${platform_key} ${entry_label} requires name and handle.`,
       );
       return;
     }
 
-    items.push({ name: name_text, url: url_text });
+    items.push({ name: name_text, handle: handle_text });
   }
 
   if (Array.isArray(raw_value)) {
@@ -726,6 +759,7 @@ function record_processed(state_data, job, command_text) {
   state_data.processed[key] = {
     platform: job.platform_key,
     url: job.url,
+    handle: job.handle,
     name: job.name,
     source_file: job.source_file,
     command: command_text,
@@ -760,23 +794,33 @@ function build_jobs_from_sources(source_maps, logger) {
     for (const [platform_key, items] of Object.entries(source_map)) {
       for (const item of items) {
         const trimmed_name = String(item.name || "").trim();
-        const trimmed_url = String(item.url || "").trim();
-        if (!trimmed_url) continue;
-        const job_key = build_job_key(platform_key, trimmed_url);
+        const trimmed_handle = String(item.handle || "").trim();
+        if (!trimmed_handle) continue;
+        const resolved_url = normalize_handle_to_url(
+          trimmed_handle,
+          platform_key,
+        );
+        if (!resolved_url) continue;
+        const job_key = build_job_key(platform_key, resolved_url);
         if (seen_keys.has(job_key)) {
           duplicate_count += 1;
           const name_suffix = trimmed_name
             ? ` (${trimmed_name})`
             : "";
+          const display_handle = format_handle_for_log(
+            trimmed_handle,
+            resolved_url,
+          );
           logger.warn(
-            `Skipping duplicate ${platform_key} URL from ${source_file}: ${trimmed_url}${name_suffix}`,
+            `Skipping duplicate ${platform_key} handle from ${source_file}: ${display_handle}${name_suffix}`,
           );
           continue;
         }
         seen_keys.add(job_key);
         job_list.push({
           platform_key,
-          url: trimmed_url,
+          url: resolved_url,
+          handle: trimmed_handle,
           name: trimmed_name,
           source_file,
         });
@@ -902,7 +946,7 @@ async function run_export_command() {
   );
 
   if (duplicate_count > 0) {
-    logger.info(`Skipped ${duplicate_count} duplicate URL entries.`);
+    logger.info(`Skipped ${duplicate_count} duplicate handle entries.`);
   }
 
   logger.debug("Step: filter jobs by platform");
@@ -946,8 +990,9 @@ async function run_export_command() {
     if (!options.refresh && state_data.processed[job_key]) {
       skipped_cached += 1;
       const name_suffix = job.name ? ` (${job.name})` : "";
+      const display_handle = format_handle_for_log(job.handle, job.url);
       logger.info(
-        `Skip cached ${job.platform_key} URL: ${palette.path(job.url)}${name_suffix}`,
+        `Skip cached ${job.platform_key} handle: ${palette.path(display_handle)}${name_suffix}`,
       );
       continue;
     }
