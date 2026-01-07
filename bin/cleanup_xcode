@@ -1,0 +1,564 @@
+#!/bin/bash
+set -euo pipefail
+
+# cleanup_xcode: reclaim disk space used by Xcode caches/artifacts
+# macOS /bin/bash is usually 3.2 - script is compatible.
+
+command_name=$(basename "$0")
+script_version="1.1.0"
+
+color_green=$'\033[32m'
+color_yellow=$'\033[33m'
+color_blue=$'\033[34m'
+color_red=$'\033[31m'
+color_reset=$'\033[0m'
+
+level_error=0
+level_warn=1
+level_info=2
+level_debug=3
+
+log_threshold=$level_info
+
+debug_mode=false
+quiet_mode=false
+dry_run=false
+yes=false
+
+do_derived=false
+do_archives=false
+do_device_support=false
+do_sim_unavailable=false
+do_sim_wipe=false
+do_spm=false
+do_all=false
+
+keep_device_support=1
+archives_older_than_days=""
+
+xcode_dev_dir="$HOME/Library/Developer/Xcode"
+derived_data_dir="$xcode_dev_dir/DerivedData"
+archives_dir="$xcode_dev_dir/Archives"
+device_support_dir="$xcode_dev_dir/iOS DeviceSupport"
+sourcepackages_dir="$xcode_dev_dir/SourcePackages"
+
+coresim_dir="$HOME/Library/Developer/CoreSimulator"
+swiftpm_cache_dir="$HOME/Library/Caches/org.swift.swiftpm"
+
+handle_error() {
+  local exit_code=$?
+  if [ "$exit_code" -ne 0 ]; then
+    log_error "Execution failed with exit code ${exit_code}."
+  fi
+  exit "$exit_code"
+}
+trap handle_error ERR
+
+print_version() {
+  echo "${script_version}"
+}
+
+usage() {
+  cat <<EOF
+${command_name} - report and clean Xcode disk usage
+
+Usage:
+  \$0 report [options]
+  \$0 clean [options]
+
+Description:
+  Report sizes for common Xcode storage locations and delete selected caches or artifacts.
+
+Options:
+  -h, --help                     Show this help message and exit.
+  -v, --version                  Show the version number and exit.
+  --debug                        Print verbose debug logs (default: false).
+  --quiet                        Print only warnings and errors (default: false).
+  -d, --dry-run                  Print planned actions without executing them (default: false).
+  --no-dry-run                   Explicitly disable dry-run mode (overrides --dry-run).
+  --yes                          Skip confirmation prompts (default: false).
+
+Clean options:
+  --all                          Clean derived data, archives, device support, unavailable simulators, and SPM caches.
+  --derived                      Clean DerivedData.
+  --archives                     Clean Archives.
+  --archives-older-than-days N   Only delete Archives older than N days (requires --archives).
+  --device-support               Clean iOS DeviceSupport.
+  --keep-device-support N        Keep latest N iOS DeviceSupport folders (default: 1).
+  --simulators-unavailable       Delete "unavailable" simulators via simctl.
+  --simulators-wipe              Wipe all simulator data (destructive).
+  --spm                          Clean SwiftPM caches (Xcode SourcePackages + org.swift.swiftpm).
+
+Examples:
+  # Show sizes for common Xcode paths
+  \$0 report
+
+  # Preview deleting DerivedData and SwiftPM caches
+  \$0 clean --derived --spm --dry-run
+
+  # Delete everything except simulator wipe, skipping confirmation
+  \$0 clean --all --yes
+
+  # Delete Archives older than 30 days
+  \$0 clean --archives --archives-older-than-days 30
+EOF
+}
+
+log_emit() {
+  local level=$1
+  local color=$2
+  local label=$3
+  shift 3
+  local message="$*"
+
+  if [ "$log_threshold" -lt "$level" ]; then
+    return 0
+  fi
+
+  if [ "$level" -le "$level_warn" ]; then
+    >&2 printf "%b[%s]%b %s\n" "$color" "$label" "$color_reset" "$message"
+  elif [ "$level" -eq "$level_info" ]; then
+    printf "%s\n" "$message"
+  else
+    printf "%b[%s]%b %s\n" "$color" "$label" "$color_reset" "$message"
+  fi
+}
+
+log_error() {
+  log_emit "$level_error" "$color_red" "ERROR" "$*"
+}
+
+log_warn() {
+  log_emit "$level_warn" "$color_yellow" "WARN" "$*"
+}
+
+log_info() {
+  log_emit "$level_info" "$color_green" "INFO" "$*"
+}
+
+log_debug() {
+  log_emit "$level_debug" "$color_blue" "DEBUG" "$*"
+}
+
+format_command() {
+  local formatted=""
+  local arg
+  for arg in "$@"; do
+    formatted+=$(printf '%q ' "$arg")
+  done
+  printf "%s" "${formatted% }"
+}
+
+apply_log_threshold() {
+  if [ "$quiet_mode" = true ]; then
+    log_threshold=$level_warn
+  elif [ "$debug_mode" = true ]; then
+    log_threshold=$level_debug
+  else
+    log_threshold=$level_info
+  fi
+}
+
+dir_exists() {
+  local path=$1
+  log_debug "IO: check directory ${path}"
+  [ -d "$path" ]
+}
+
+require_number() {
+  local value=$1
+  local flag_name=$2
+  if ! [[ "$value" =~ ^[0-9]+$ ]]; then
+    die "${flag_name} requires a non-negative integer"
+  fi
+}
+
+run_cmd() {
+  local command_str=""
+  if [ "$dry_run" = true ] || [ "$log_threshold" -ge "$level_debug" ]; then
+    command_str=$(format_command "$@")
+  fi
+  if [ "$log_threshold" -ge "$level_debug" ]; then
+    log_debug "IO: ${command_str}"
+  fi
+
+  if [ "$dry_run" = true ]; then
+    log_info "Dry run: ${command_str}"
+    return 0
+  fi
+
+  "$@"
+}
+
+section() {
+  log_debug "Step: $*"
+  printf "\n"
+  log_info "== $* =="
+}
+
+die() {
+  log_error "$*"
+  exit 1
+}
+
+parse_global_option() {
+  case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    -v|--version)
+      print_version
+      exit 0
+      ;;
+    --debug)
+      debug_mode=true
+      return 0
+      ;;
+    --quiet)
+      quiet_mode=true
+      return 0
+      ;;
+    -d|--dry-run)
+      dry_run=true
+      return 0
+      ;;
+    --no-dry-run)
+      dry_run=false
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+collect_clean_targets() {
+  local targets=()
+
+  if [ "$do_derived" = true ]; then
+    targets+=("DerivedData: ${derived_data_dir}")
+  fi
+
+  if [ "$do_archives" = true ]; then
+    if [ -n "$archives_older_than_days" ]; then
+      targets+=("Archives: ${archives_dir} (older than ${archives_older_than_days} days)")
+    else
+      targets+=("Archives: ${archives_dir} (all)")
+    fi
+  fi
+
+  if [ "$do_device_support" = true ]; then
+    targets+=("iOS DeviceSupport: ${device_support_dir} (keep latest ${keep_device_support})")
+  fi
+
+  if [ "$do_sim_unavailable" = true ]; then
+    targets+=("Simulators: delete unavailable (xcrun simctl delete unavailable)")
+  fi
+
+  if [ "$do_sim_wipe" = true ]; then
+    targets+=("Simulators: wipe all (${coresim_dir})")
+  fi
+
+  if [ "$do_spm" = true ]; then
+    targets+=("SwiftPM: ${sourcepackages_dir}, ${swiftpm_cache_dir}")
+  fi
+
+  printf "%s\n" "${targets[@]}"
+}
+
+confirm_or_die() {
+  if [ "$yes" = true ]; then
+    log_debug "Confirmation skipped (--yes)."
+    return 0
+  fi
+
+  log_debug "Step: confirmation prompt"
+  log_warn "This will delete files and may require Xcode to rebuild caches later."
+  log_warn "You may see slower first builds or simulator launches after cleanup."
+
+  if [ "$dry_run" = true ]; then
+    log_info "Dry run enabled: no files will be deleted."
+  else
+    log_warn "Dry run disabled: files will be deleted."
+  fi
+
+  log_info "Targets:"
+  local target
+  while IFS= read -r target; do
+    [ -n "$target" ] && log_info "  - ${target}"
+  done <<<"$(collect_clean_targets)"
+
+  log_info "Tip: run '${command_name} report' to review sizes before cleanup."
+  printf "Proceed? (y/N) "
+  local confirm_answer=""
+  IFS= read -r confirm_answer
+  case "${confirm_answer:-N}" in
+    y|Y|yes|YES) ;;
+    *) die "Aborted." ;;
+  esac
+}
+
+report_path_size() {
+  local label=$1
+  local path=$2
+
+  if ! dir_exists "$path"; then
+    log_warn "${label}: not found (${path})"
+    return 0
+  fi
+
+  log_debug "IO: du -sh ${path}"
+  local size
+  size=$(du -sh "$path" 2>/dev/null | awk '{print $1}' || true)
+  if [ -z "$size" ]; then
+    log_warn "${label}: size unavailable (${path})"
+    return 0
+  fi
+
+  log_info "${label}: ${size} (${path})"
+}
+
+do_report() {
+  section "Xcode storage report"
+  log_info "Version: ${script_version}"
+  printf "\n"
+  log_info "Paths (may not all exist):"
+  log_info "  DerivedData:           ${derived_data_dir}"
+  log_info "  Archives:              ${archives_dir}"
+  log_info "  iOS DeviceSupport:     ${device_support_dir}"
+  log_info "  CoreSimulator:         ${coresim_dir}"
+  log_info "  Xcode SourcePackages:  ${sourcepackages_dir}"
+  log_info "  SwiftPM cache:         ${swiftpm_cache_dir}"
+
+  printf "\n"
+  log_info "Sizes:"
+  report_path_size "DerivedData" "$derived_data_dir"
+  report_path_size "Archives" "$archives_dir"
+  report_path_size "iOS DeviceSupport" "$device_support_dir"
+  report_path_size "CoreSimulator" "$coresim_dir"
+  report_path_size "Xcode SourcePackages" "$sourcepackages_dir"
+  report_path_size "SwiftPM cache" "$swiftpm_cache_dir"
+}
+
+clean_derived() {
+  section "Cleaning DerivedData"
+  if dir_exists "$derived_data_dir"; then
+    run_cmd rm -rf "${derived_data_dir}"/*
+  else
+    log_warn "DerivedData not found."
+  fi
+}
+
+clean_archives() {
+  section "Cleaning Archives"
+  if ! dir_exists "$archives_dir"; then
+    log_warn "Archives not found."
+    return 0
+  fi
+
+  if [ -n "$archives_older_than_days" ]; then
+    run_cmd find "$archives_dir" -mindepth 1 -maxdepth 1 -type d -name "*.xcarchive" -mtime "+${archives_older_than_days}" -print -exec rm -rf {} +
+  else
+    run_cmd rm -rf "${archives_dir}"/*
+  fi
+}
+
+list_device_support_dirs() {
+  log_debug "IO: ls -1dt ${device_support_dir}/*"
+  ls -1dt "$device_support_dir"/* 2>/dev/null || true
+}
+
+clean_device_support() {
+  section "Cleaning iOS DeviceSupport (keep latest ${keep_device_support})"
+  if ! dir_exists "$device_support_dir"; then
+    log_warn "iOS DeviceSupport not found."
+    return 0
+  fi
+
+  local to_delete=""
+  to_delete=$(list_device_support_dirs | tail -n +"$((keep_device_support + 1))" || true)
+
+  if [ -z "$to_delete" ]; then
+    log_info "Nothing to delete (keep count not exceeded)."
+    return 0
+  fi
+
+  while IFS= read -r path; do
+    [ -z "$path" ] && continue
+    run_cmd rm -rf "$path"
+  done <<<"$to_delete"
+}
+
+clean_simulators_unavailable() {
+  section "Cleaning unavailable simulators"
+  log_debug "IO: check for xcrun"
+  if command -v xcrun >/dev/null 2>&1; then
+    run_cmd xcrun simctl delete unavailable
+  else
+    log_warn "xcrun not found; skipping."
+  fi
+}
+
+clean_simulators_wipe() {
+  section "Wiping all simulator data (CoreSimulator)"
+  if dir_exists "$coresim_dir"; then
+    run_cmd rm -rf "${coresim_dir}"/*
+  else
+    log_warn "CoreSimulator directory not found."
+  fi
+}
+
+clean_spm() {
+  section "Cleaning SwiftPM caches"
+  if dir_exists "$sourcepackages_dir"; then
+    run_cmd rm -rf "${sourcepackages_dir}"/*
+  else
+    log_warn "Xcode SourcePackages not found."
+  fi
+
+  if dir_exists "$swiftpm_cache_dir"; then
+    run_cmd rm -rf "${swiftpm_cache_dir}"/*
+  else
+    log_warn "SwiftPM cache directory not found."
+  fi
+}
+
+if [ "$#" -lt 1 ]; then
+  usage
+  exit 1
+fi
+
+cmd=""
+while [ "$#" -gt 0 ]; do
+  if parse_global_option "$1"; then
+    shift
+    continue
+  fi
+
+  case "$1" in
+    report|clean)
+      cmd=$1
+      shift
+      break
+      ;;
+    *)
+      die "Unknown command: $1"
+      ;;
+  esac
+done
+
+if [ -z "$cmd" ]; then
+  usage
+  exit 1
+fi
+
+case "$cmd" in
+  report)
+    while [ "$#" -gt 0 ]; do
+      if parse_global_option "$1"; then
+        shift
+        continue
+      fi
+      die "Unknown option for report: $1"
+    done
+    apply_log_threshold
+    do_report
+    ;;
+  clean)
+    while [ "$#" -gt 0 ]; do
+      if parse_global_option "$1"; then
+        shift
+        continue
+      fi
+
+      case "$1" in
+        --all) do_all=true ;;
+        --derived) do_derived=true ;;
+        --archives) do_archives=true ;;
+        --archives-older-than-days)
+          shift
+          [ "$#" -gt 0 ] || die "--archives-older-than-days requires a number"
+          require_number "$1" "--archives-older-than-days"
+          archives_older_than_days=$1
+          ;;
+        --device-support) do_device_support=true ;;
+        --keep-device-support)
+          shift
+          [ "$#" -gt 0 ] || die "--keep-device-support requires a number"
+          require_number "$1" "--keep-device-support"
+          keep_device_support=$1
+          ;;
+        --simulators-unavailable) do_sim_unavailable=true ;;
+        --simulators-wipe) do_sim_wipe=true ;;
+        --spm) do_spm=true ;;
+        --yes) yes=true ;;
+        *)
+          die "Unknown option: $1"
+          ;;
+      esac
+      shift
+    done
+
+    if [ "$do_all" = true ]; then
+      do_derived=true
+      do_archives=true
+      do_device_support=true
+      do_sim_unavailable=true
+      do_spm=true
+    fi
+
+    if [ -n "$archives_older_than_days" ] && [ "$do_archives" = false ]; then
+      die "--archives-older-than-days requires --archives or --all."
+    fi
+
+    if [ "$keep_device_support" -ne 1 ] && [ "$do_device_support" = false ]; then
+      die "--keep-device-support requires --device-support or --all."
+    fi
+
+    if [ "$do_all" = false ] && [ "$do_derived" = false ] && [ "$do_archives" = false ] && \
+      [ "$do_device_support" = false ] && [ "$do_sim_unavailable" = false ] && \
+      [ "$do_sim_wipe" = false ] && [ "$do_spm" = false ]; then
+      usage
+      exit 1
+    fi
+
+    apply_log_threshold
+    confirm_or_die
+
+    section "Pre-clean sizes"
+    do_report
+
+    if [ "$do_derived" = true ]; then
+      clean_derived
+    fi
+    if [ "$do_archives" = true ]; then
+      clean_archives
+    fi
+    if [ "$do_device_support" = true ]; then
+      clean_device_support
+    fi
+    if [ "$do_sim_unavailable" = true ]; then
+      clean_simulators_unavailable
+    fi
+    if [ "$do_sim_wipe" = true ]; then
+      clean_simulators_wipe
+    fi
+    if [ "$do_spm" = true ]; then
+      clean_spm
+    fi
+
+    section "Post-clean sizes"
+    do_report
+
+    printf "\n"
+    if [ "$dry_run" = true ]; then
+      log_warn "Dry run only. Re-run without --dry-run to delete files."
+    else
+      log_info "Done."
+    fi
+    ;;
+  *)
+    die "Unknown command: $cmd"
+    ;;
+esac
