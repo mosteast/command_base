@@ -1,0 +1,531 @@
+#!/bin/bash
+
+# Initialize variables
+default_output_dir="/Users/hailang/Library/Mobile Documents/com~apple~CloudDocs/main/download/gallery-dl"
+output_dir="$default_output_dir"
+output_dir_provided=false
+
+default_cookies_file="~/Downloads/x.com_cookies.txt"
+cookies_file="$default_cookies_file"
+cookies_file_provided=false
+use_cookies=true
+
+write_info_json=true
+write_metadata=true
+write_tags=true
+enable_twitter_conversations=true
+enable_twitter_quoted=true
+
+use_archive=true
+archive_dir="${HOME}/.gallery-dl/archives"
+archive_file=""
+archive_file_provided=false
+refresh=false
+
+debug_mode=false
+quiet_mode=false
+dry_run=false
+script_version="1.0.0"
+
+# Color codes for output readability
+color_reset=$'\033[0m'
+color_bold=$'\033[1m'
+color_dim=$'\033[2m'
+color_green=$'\033[32m'
+color_yellow=$'\033[33m'
+color_red=$'\033[31m'
+color_blue=$'\033[34m'
+color_cyan=$'\033[36m'
+color_magenta=$'\033[35m'
+color_gray=$'\033[90m'
+
+log_with_tag() {
+    local tag="$1"
+    local tag_color="$2"
+    local message_color="$3"
+    shift 3
+    local message="$*"
+    printf "%b[%s]%b %b%s%b\n" "$tag_color" "$tag" "$color_reset" "$message_color" "$message" "$color_reset"
+}
+
+log_info() {
+    if [ "$quiet_mode" = true ]; then
+        return 0
+    fi
+    log_with_tag "INFO" "${color_bold}${color_blue}" "$color_blue" "$*"
+}
+
+log_success() {
+    if [ "$quiet_mode" = true ]; then
+        return 0
+    fi
+    log_with_tag "OK" "${color_bold}${color_green}" "$color_green" "$*"
+}
+
+log_warn() { log_with_tag "WARN" "${color_bold}${color_yellow}" "$color_yellow" "$*"; }
+log_error() { log_with_tag "ERROR" "${color_bold}${color_red}" "$color_red" "$*" >&2; }
+
+log_debug() {
+    if [ "$debug_mode" != true ] || [ "$quiet_mode" = true ]; then
+        return 0
+    fi
+    log_with_tag "DEBUG" "${color_bold}${color_magenta}" "${color_dim}${color_magenta}" "$*"
+}
+
+log_step() {
+    if [ "$debug_mode" != true ] || [ "$quiet_mode" = true ]; then
+        return 0
+    fi
+    log_with_tag "STEP" "${color_bold}${color_cyan}" "$color_cyan" "$*"
+}
+
+log_io() {
+    if [ "$debug_mode" != true ] || [ "$quiet_mode" = true ]; then
+        return 0
+    fi
+    log_with_tag "IO" "${color_bold}${color_gray}" "${color_dim}${color_gray}" "$*"
+}
+
+format_command() {
+    local formatted=""
+    local arg
+    for arg in "$@"; do
+        formatted+=$(printf '%q ' "$arg")
+    done
+    printf "%s" "${formatted% }"
+}
+
+expand_tilde_path() {
+    local path="$1"
+    if [[ "$path" == "~/"* ]]; then
+        printf "%s" "${HOME}/${path#~/}"
+        return 0
+    fi
+    if [ "$path" = "~" ]; then
+        printf "%s" "$HOME"
+        return 0
+    fi
+    printf "%s" "$path"
+}
+
+hash_string() {
+    local input_text="$1"
+    if command -v md5sum >/dev/null 2>&1; then
+        printf "%s" "$input_text" | md5sum | awk '{print $1}'
+        return 0
+    fi
+    if command -v md5 >/dev/null 2>&1; then
+        printf "%s" "$input_text" | md5 -q
+        return 0
+    fi
+    if command -v shasum >/dev/null 2>&1; then
+        printf "%s" "$input_text" | shasum | awk '{print $1}'
+        return 0
+    fi
+    printf "%s" "archive"
+}
+
+ensure_directory() {
+    local dir_path="$1"
+    if [ "$dry_run" = true ]; then
+        log_info "Dry-run: would ensure directory '${dir_path}'."
+        return 0
+    fi
+    log_io "ensure directory ${dir_path}"
+    mkdir -p "$dir_path"
+}
+
+remove_file() {
+    local file_path="$1"
+    if [ "$dry_run" = true ]; then
+        log_info "Dry-run: would remove '${file_path}'."
+        return 0
+    fi
+    log_io "remove file ${file_path}"
+    rm -f "$file_path"
+}
+
+show_usage() {
+    local script_name
+    script_name=$(basename "$0")
+
+    cat <<EOF
+${color_blue}Usage:${color_reset}
+  ${script_name} [options] <url_or_file...> [-- gallery-dl options]
+
+${color_blue}Description:${color_reset}
+  Download galleries with gallery-dl using opinionated defaults and readable logs.
+  Defaults:
+    - Output base directory: ${default_output_dir}
+    - Cookies file: ${default_cookies_file} (if present)
+    - Write info JSON, metadata, and tags
+    - Enable Twitter conversations and quoted tweets
+    - Use a download archive to skip already processed files
+
+  Pass any gallery-dl options after "--" to keep full compatibility.
+
+${color_blue}Options:${color_reset}
+  -h, --help                  Show this help message and exit
+  -v, --version               Show version number and exit
+      --debug                 Print verbose debug output (default: false)
+      --quiet                 Print only warnings and errors (default: false)
+  -d, --dry-run               Print actions without executing (default: false)
+      --output-dir <dir>      Output base directory (default: ${default_output_dir})
+      --cookies <file>        Cookies file to load (default: ${default_cookies_file})
+  -C <file>                   Alias for --cookies
+      --no-cookies            Disable cookies (default: false)
+      --refresh               Clear archive cache for this run (default: false)
+      --archive-dir <dir>     Archive directory (default: ${archive_dir})
+      --archive-file <file>   Use a specific archive file
+      --no-archive            Disable download archive (default: false)
+      --no-write-info-json    Disable info.json output (default: false)
+      --no-write-metadata     Disable metadata output (default: false)
+      --no-write-tags         Disable tags output (default: false)
+      --no-twitter-conversations
+                              Disable Twitter conversations (default: false)
+      --no-twitter-quoted     Disable Twitter quoted tweets (default: false)
+      --                      Pass remaining arguments to gallery-dl
+
+${color_blue}Examples:${color_reset}
+  # Download a tweet thread with defaults
+  \$0 https://x.com/user/status/123456
+
+  # Use a custom output directory
+  \$0 --output-dir "\$HOME/Downloads/gallery-dl" https://x.com/user/media
+
+  # Pass extra gallery-dl options (sleep + retries)
+  \$0 https://x.com/user -- --sleep 1.5 --retries 6
+
+  # Use a custom cookies file and disable tags
+  \$0 --cookies "\$HOME/Downloads/cookies.txt" --no-write-tags https://x.com/user
+
+  # Use gallery-dl input file support
+  \$0 -- --input-file urls.txt
+
+${color_yellow}Note:${color_reset} This wrapper uses -d for dry-run. Use "-- -d <PATH>" to pass
+gallery-dl's destination option.
+EOF
+}
+
+# Pre-parse debug/quiet for early logging
+for arg in "$@"; do
+    if [ "$arg" = "--" ]; then
+        break
+    fi
+    case "$arg" in
+        --debug)
+            debug_mode=true
+            ;;
+        --quiet)
+            quiet_mode=true
+            ;;
+    esac
+done
+
+log_step "Parse command line arguments"
+input_targets=()
+extra_opts=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -h|--help)
+            show_usage
+            exit 0
+            ;;
+        -v|--version)
+            printf "%s\n" "$script_version"
+            exit 0
+            ;;
+        --debug)
+            debug_mode=true
+            shift
+            ;;
+        --quiet)
+            quiet_mode=true
+            shift
+            ;;
+        -d|--dry-run)
+            dry_run=true
+            shift
+            ;;
+        --output-dir=*)
+            output_dir="${1#*=}"
+            if [ -z "$output_dir" ]; then
+                log_error "--output-dir cannot be empty."
+                exit 1
+            fi
+            output_dir_provided=true
+            shift
+            ;;
+        --output-dir)
+            if [ -n "$2" ]; then
+                output_dir="$2"
+                output_dir_provided=true
+                shift 2
+            else
+                log_error "Output directory is required after --output-dir."
+                exit 1
+            fi
+            ;;
+        --cookies=*)
+            cookies_file="${1#*=}"
+            if [ -z "$cookies_file" ]; then
+                log_error "--cookies cannot be empty."
+                exit 1
+            fi
+            cookies_file_provided=true
+            use_cookies=true
+            shift
+            ;;
+        --cookies|-C)
+            if [ -n "$2" ]; then
+                cookies_file="$2"
+                cookies_file_provided=true
+                use_cookies=true
+                shift 2
+            else
+                log_error "Cookies file is required after --cookies."
+                exit 1
+            fi
+            ;;
+        --no-cookies)
+            use_cookies=false
+            shift
+            ;;
+        --refresh)
+            refresh=true
+            shift
+            ;;
+        --archive-dir=*)
+            archive_dir="${1#*=}"
+            if [ -z "$archive_dir" ]; then
+                log_error "--archive-dir cannot be empty."
+                exit 1
+            fi
+            shift
+            ;;
+        --archive-dir)
+            if [ -n "$2" ]; then
+                archive_dir="$2"
+                shift 2
+            else
+                log_error "Archive directory is required after --archive-dir."
+                exit 1
+            fi
+            ;;
+        --archive-file=*)
+            archive_file="${1#*=}"
+            if [ -z "$archive_file" ]; then
+                log_error "--archive-file cannot be empty."
+                exit 1
+            fi
+            archive_file_provided=true
+            shift
+            ;;
+        --archive-file)
+            if [ -n "$2" ]; then
+                archive_file="$2"
+                archive_file_provided=true
+                shift 2
+            else
+                log_error "Archive file is required after --archive-file."
+                exit 1
+            fi
+            ;;
+        --no-archive)
+            use_archive=false
+            shift
+            ;;
+        --no-write-info-json)
+            write_info_json=false
+            shift
+            ;;
+        --no-write-metadata)
+            write_metadata=false
+            shift
+            ;;
+        --no-write-tags)
+            write_tags=false
+            shift
+            ;;
+        --no-twitter-conversations)
+            enable_twitter_conversations=false
+            shift
+            ;;
+        --no-twitter-quoted)
+            enable_twitter_quoted=false
+            shift
+            ;;
+        --)
+            shift
+            extra_opts=("$@")
+            break
+            ;;
+        -*)
+            log_error "Unknown option: $1"
+            log_info "Use '--' to pass gallery-dl options."
+            show_usage
+            exit 1
+            ;;
+        *)
+            input_targets+=("$1")
+            shift
+            ;;
+    esac
+done
+
+log_step "Validate inputs"
+if [ ${#input_targets[@]} -eq 0 ] && [ ${#extra_opts[@]} -eq 0 ]; then
+    log_error "No input URLs or files provided."
+    show_usage
+    exit 1
+fi
+
+if [ ${#input_targets[@]} -eq 0 ] && [ ${#extra_opts[@]} -gt 0 ]; then
+    log_warn "No explicit inputs before '--'; ensure gallery-dl options include URLs or input files."
+fi
+
+log_step "Resolve paths"
+output_dir=$(expand_tilde_path "$output_dir")
+cookies_file=$(expand_tilde_path "$cookies_file")
+archive_dir=$(expand_tilde_path "$archive_dir")
+if [ "$archive_file_provided" = true ]; then
+    archive_file=$(expand_tilde_path "$archive_file")
+fi
+
+log_step "Check gallery-dl availability"
+if ! command -v gallery-dl >/dev/null 2>&1; then
+    log_error "gallery-dl not found in PATH."
+    exit 1
+fi
+
+skip_default_output_dir=false
+for opt in "${extra_opts[@]}"; do
+    case "$opt" in
+        -d|-D|--destination|--directory|--destination=*|--directory=*)
+            skip_default_output_dir=true
+            break
+            ;;
+    esac
+done
+
+if [ "$skip_default_output_dir" = true ] && [ "$output_dir_provided" = true ]; then
+    log_warn "--output-dir ignored because gallery-dl output options were provided after '--'."
+fi
+
+if [ "$skip_default_output_dir" != true ]; then
+    log_step "Prepare output directory"
+    ensure_directory "$output_dir"
+fi
+
+log_step "Prepare cookies"
+cookie_opts=()
+if [ "$use_cookies" = true ]; then
+    if [ -n "$cookies_file" ]; then
+        log_io "check cookies file ${cookies_file}"
+        if [ -f "$cookies_file" ]; then
+            cookie_opts=(--cookies "$cookies_file")
+        else
+            if [ "$cookies_file_provided" = true ]; then
+                log_error "Cookies file not found: ${cookies_file}"
+                exit 1
+            fi
+            log_warn "Default cookies file not found; continuing without cookies."
+            use_cookies=false
+        fi
+    fi
+fi
+
+log_step "Configure archive handling"
+archive_opts=()
+if [ "$use_archive" = true ]; then
+    if [ "$archive_file_provided" != true ]; then
+        if [ ${#input_targets[@]} -gt 0 ]; then
+            archive_key=$(printf '%s\n' "${input_targets[@]}")
+        else
+            archive_key=$(printf '%s\n' "${extra_opts[@]}")
+        fi
+        if [ -z "$archive_key" ]; then
+            archive_key="gallery-dl"
+        fi
+        archive_file="${archive_dir}/$(hash_string "$archive_key").txt"
+    fi
+
+    if [ -z "$archive_file" ]; then
+        log_error "Archive file could not be determined."
+        exit 1
+    fi
+
+    archive_file=$(expand_tilde_path "$archive_file")
+    archive_parent_dir=$(dirname "$archive_file")
+    ensure_directory "$archive_parent_dir"
+
+    if [ "$refresh" = true ]; then
+        log_io "check archive file ${archive_file}"
+        if [ -f "$archive_file" ]; then
+            remove_file "$archive_file"
+        else
+            log_warn "Refresh requested but archive file not found: '${archive_file}'."
+        fi
+    fi
+
+    archive_opts=(--download-archive "$archive_file")
+else
+    if [ "$refresh" = true ]; then
+        log_warn "Refresh requested but archive is disabled; ignoring."
+    fi
+fi
+
+log_step "Build gallery-dl arguments"
+gallery_dl_args=()
+if [ "$skip_default_output_dir" != true ]; then
+    gallery_dl_args+=(--destination "$output_dir")
+fi
+
+if [ "$write_info_json" = true ]; then
+    gallery_dl_args+=(--write-info-json)
+fi
+if [ "$write_metadata" = true ]; then
+    gallery_dl_args+=(--write-metadata)
+fi
+if [ "$write_tags" = true ]; then
+    gallery_dl_args+=(--write-tags)
+fi
+
+if [ "$enable_twitter_conversations" = true ]; then
+    gallery_dl_args+=(-o "extractor.twitter.conversations=true")
+fi
+if [ "$enable_twitter_quoted" = true ]; then
+    gallery_dl_args+=(-o "extractor.twitter.quoted=true")
+fi
+
+if [ ${#cookie_opts[@]} -gt 0 ]; then
+    gallery_dl_args+=("${cookie_opts[@]}")
+fi
+if [ ${#archive_opts[@]} -gt 0 ]; then
+    gallery_dl_args+=("${archive_opts[@]}")
+fi
+
+if [ "$quiet_mode" = true ]; then
+    gallery_dl_args+=(--warning)
+elif [ "$debug_mode" = true ]; then
+    gallery_dl_args+=(--verbose)
+fi
+
+gallery_dl_command=(gallery-dl "${gallery_dl_args[@]}" "${extra_opts[@]}" "${input_targets[@]}")
+
+log_step "Run gallery-dl"
+if [ "$dry_run" = true ]; then
+    log_info "Dry-run: would run gallery-dl."
+    log_info "Dry-run command: $(format_command "${gallery_dl_command[@]}")"
+    exit 0
+fi
+
+log_io "$(format_command "${gallery_dl_command[@]}")"
+"${gallery_dl_command[@]}"
+exit_code=$?
+if [ "$exit_code" -eq 0 ]; then
+    log_success "gallery-dl completed successfully."
+else
+    log_error "gallery-dl failed with exit code ${exit_code}."
+fi
+exit "$exit_code"
