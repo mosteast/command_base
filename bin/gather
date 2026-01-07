@@ -42,7 +42,7 @@ const PLATFORM_ALIASES = {
 
 const PLATFORM_COMMANDS = {
   youtube: {
-    command: "content_save",
+    command: "xsave_yt_dlp",
     build_args: (url) => ["-c", url],
     label: "youtube",
   },
@@ -859,7 +859,7 @@ function format_command(command, args) {
   return parts.join(" ");
 }
 
-function build_content_save_refresh_args(refresh_mode) {
+function build_xsave_yt_dlp_refresh_args(refresh_mode) {
   if (!refresh_mode) return [];
 
   const base_args = ["--refresh", "--overwrite"];
@@ -897,7 +897,7 @@ function build_content_save_refresh_args(refresh_mode) {
 function build_refresh_args(platform_key, refresh_mode) {
   if (!refresh_mode) return [];
   if (platform_key !== "youtube") return [];
-  return build_content_save_refresh_args(refresh_mode);
+  return build_xsave_yt_dlp_refresh_args(refresh_mode);
 }
 
 function build_platform_command(platform_key, url, refresh_mode) {
