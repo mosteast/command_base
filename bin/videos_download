@@ -17,6 +17,8 @@ debug_mode=false
 quiet_mode=false
 dry_run=false
 script_version="1.0.3"
+yt_dlp_color_policy="always"
+yt_dlp_color_opts=(--color "$yt_dlp_color_policy")
 
 # Retry configuration
 retry_attempt_limit=3
@@ -383,6 +385,7 @@ run_video_yt_dlp() {
 
     local -a yt_dlp_args
     yt_dlp_args=(
+        "${yt_dlp_color_opts[@]}"
         "${EMBED_SUBS_OPTS[@]}"
         -o "$output_dir/%(uploader)s - Videos/%(title)s.%(ext)s"
         -N 5
@@ -803,6 +806,7 @@ if [ -n "$CHANNEL_URL" ]; then
 
     channel_base_args=(
         --playlist-reverse
+        "${yt_dlp_color_opts[@]}"
         "${EMBED_SUBS_OPTS[@]}"
         -o "$channel_output_template"
         -N 1
@@ -945,6 +949,7 @@ elif [ -n "$PLAYLIST_URL" ]; then
 
     playlist_base_args=(
         --playlist-reverse
+        "${yt_dlp_color_opts[@]}"
         "${EMBED_SUBS_OPTS[@]}"
         -o "$playlist_output_template"
         -N 1
