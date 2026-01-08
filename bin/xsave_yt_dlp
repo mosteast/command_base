@@ -11,7 +11,7 @@ ONLY_AUDIO=false
 ONLY_SUBTITLE=false
 OVERWRITE=false
 REFRESH=false
-youtube_player_client="web,web_safari,web_embedded,ios,android"
+youtube_player_client="web,web_safari,web_embedded"
 fallback_player_client="android"
 debug_mode=false
 quiet_mode=false
@@ -23,6 +23,11 @@ yt_dlp_color_opts=(--color "$yt_dlp_color_policy")
 # Retry configuration
 retry_attempt_limit=3
 retry_delay_seconds=2
+
+# Throttle settings
+sleep_subtitles_seconds=2
+sleep_interval_seconds=2
+max_sleep_interval_seconds=4
 
 # Color codes for output readability
 color_reset=$'\033[0m'
@@ -86,6 +91,52 @@ format_command() {
         formatted+=$(printf '%q ' "$arg")
     done
     printf "%s" "${formatted% }"
+}
+
+filter_cookie_incompatible_clients() {
+    local raw_clients="$1"
+    local -a clients=()
+    local -a filtered=()
+    local client
+
+    IFS=',' read -r -a clients <<< "$raw_clients"
+    for client in "${clients[@]}"; do
+        client="${client//[[:space:]]/}"
+        if [ -z "$client" ]; then
+            continue
+        fi
+        case "$client" in
+            ios|android)
+                continue
+                ;;
+        esac
+        filtered+=("$client")
+    done
+
+    if [ ${#filtered[@]} -eq 0 ]; then
+        printf "%s" ""
+        return 0
+    fi
+    printf "%s" "$(IFS=','; printf "%s" "${filtered[*]}")"
+}
+
+resolve_youtube_player_client_for_cookies() {
+    local raw_clients="$1"
+    local context_label="$2"
+    if [ -z "$raw_clients" ]; then
+        printf "%s" ""
+        return 0
+    fi
+    local filtered_clients
+    filtered_clients=$(filter_cookie_incompatible_clients "$raw_clients")
+    if [ "$filtered_clients" != "$raw_clients" ]; then
+        if [ -n "$context_label" ]; then
+            log_debug "YouTube cookies ${context_label}: drop clients ${raw_clients} -> ${filtered_clients}"
+        else
+            log_debug "YouTube cookies: drop clients ${raw_clients} -> ${filtered_clients}"
+        fi
+    fi
+    printf "%s" "$filtered_clients"
 }
 
 # Function to show usage
@@ -395,7 +446,7 @@ run_video_yt_dlp() {
         "${WRITE_SUBS_OPTS[@]}"
         "${WRITE_META_OPTS[@]}"
         --sub-langs "en,en-US,zh-Hans,zh-Hant,zh-CN,zh"
-        --sleep-subtitles 1
+        --sleep-subtitles "$sleep_subtitles_seconds"
         --continue
     )
 
@@ -406,8 +457,8 @@ run_video_yt_dlp() {
     fi
 
     yt_dlp_args+=(
-        --sleep-interval 1
-        --max-sleep-interval 3
+        --sleep-interval "$sleep_interval_seconds"
+        --max-sleep-interval "$max_sleep_interval_seconds"
         --retries 10
         --file-access-retries 5
         --fragment-retries 5
@@ -449,7 +500,7 @@ download_video_with_fallback() {
 
     if [ "$platform" = "youtube" ]; then
         use_cookies=true
-        player_client="$youtube_player_client"
+        player_client="$youtube_cookie_player_client"
     fi
 
     if run_video_yt_dlp "$url" "$archive_file" "$output_dir" "$use_cookies" "$player_client"; then
@@ -459,12 +510,13 @@ download_video_with_fallback() {
     local primary_exit_code=$?
     if [ "$platform" = "youtube" ] && [ -n "$fallback_player_client" ]; then
         if [ "$yt_dlp_last_player_error" = true ]; then
-            log_warn "Primary download failed due to YouTube player configuration; retrying with '${fallback_player_client}'."
-            log_step "Fallback download with cookies using ${fallback_player_client}"
-            if run_video_yt_dlp "$url" "$archive_file" "$output_dir" true "$fallback_player_client"; then
+            local cookie_fallback_label="${youtube_cookie_fallback_client:-default}"
+            log_warn "Primary download failed due to YouTube player configuration; retrying with '${cookie_fallback_label}'."
+            log_step "Fallback download with cookies using ${cookie_fallback_label}"
+            if run_video_yt_dlp "$url" "$archive_file" "$output_dir" true "$youtube_cookie_fallback_client"; then
                 return 0
             fi
-            log_warn "Fallback client '${fallback_player_client}' failed with cookies; retrying without cookies."
+            log_warn "Fallback client '${cookie_fallback_label}' failed with cookies; retrying without cookies."
             log_step "Fallback download without cookies using ${fallback_player_client}"
             run_video_yt_dlp "$url" "$archive_file" "$output_dir" false "$fallback_player_client"
             return $?
@@ -740,13 +792,16 @@ else
     WRITE_SUBS_OPTS=(--write-subs --write-auto-subs)
 fi
 
+log_step "Normalize YouTube player clients for cookies"
+youtube_cookie_player_client=$(resolve_youtube_player_client_for_cookies "$youtube_player_client" "primary")
+youtube_cookie_fallback_client=$(resolve_youtube_player_client_for_cookies "$fallback_player_client" "fallback")
 youtube_extractor_args=()
-if [ -n "$youtube_player_client" ]; then
-    youtube_extractor_args=(--extractor-args "youtube:player_client=${youtube_player_client}")
+if [ -n "$youtube_cookie_player_client" ]; then
+    youtube_extractor_args=(--extractor-args "youtube:player_client=${youtube_cookie_player_client}")
 fi
 youtube_fallback_extractor_args=()
-if [ -n "$fallback_player_client" ]; then
-    youtube_fallback_extractor_args=(--extractor-args "youtube:player_client=${fallback_player_client}")
+if [ -n "$youtube_cookie_fallback_client" ]; then
+    youtube_fallback_extractor_args=(--extractor-args "youtube:player_client=${youtube_cookie_fallback_client}")
 fi
 
 # Define match filter that allows Rumble videos to bypass subscription check
@@ -825,7 +880,7 @@ if [ -n "$CHANNEL_URL" ]; then
         "${WRITE_SUBS_OPTS[@]}"
         "${WRITE_META_OPTS[@]}"
         --sub-langs "en,en-US,zh-Hans,zh-Hant,zh-CN,zh"
-        --sleep-subtitles 1
+        --sleep-subtitles "$sleep_subtitles_seconds"
         --continue
     )
     if [ "$OVERWRITE" != true ]; then
@@ -834,8 +889,8 @@ if [ -n "$CHANNEL_URL" ]; then
         channel_base_args+=(--force-overwrites)
     fi
     channel_tail_args=(
-        --sleep-interval 1
-        --max-sleep-interval 3
+        --sleep-interval "$sleep_interval_seconds"
+        --max-sleep-interval "$max_sleep_interval_seconds"
         --retries 10
         --file-access-retries 5
         --fragment-retries 5
@@ -862,9 +917,10 @@ if [ -n "$CHANNEL_URL" ]; then
     channel_primary_format_error=$yt_dlp_last_format_error
 
     if [ "$channel_platform" = "youtube" ] && [ -n "$fallback_player_client" ]; then
+        channel_cookie_fallback_label="${youtube_cookie_fallback_client:-default}"
         if [ "$channel_primary_player_error" = true ]; then
-            log_warn "YouTube player errors detected; retrying failed items with '${fallback_player_client}'."
-            log_step "Channel fallback download with cookies using ${fallback_player_client}"
+            log_warn "YouTube player errors detected; retrying failed items with '${channel_cookie_fallback_label}'."
+            log_step "Channel fallback download with cookies using ${channel_cookie_fallback_label}"
             retry_command "Channel fallback download: ${CHANNEL_URL}" run_yt_dlp_with_log_capture yt-dlp \
                 "${channel_base_args[@]}" \
                 "${channel_cookie_opts[@]}" \
@@ -877,7 +933,7 @@ if [ -n "$CHANNEL_URL" ]; then
                 channel_status=$fallback_status
             fi
             if [ "$yt_dlp_last_player_error" = true ]; then
-                log_warn "Fallback client '${fallback_player_client}' still hit player errors; retrying without cookies."
+                log_warn "Fallback client '${channel_cookie_fallback_label}' still hit player errors; retrying without cookies."
                 log_step "Channel fallback download without cookies using ${fallback_player_client}"
                 retry_command "Channel fallback download without cookies: ${CHANNEL_URL}" run_yt_dlp_with_log_capture yt-dlp \
                     "${channel_base_args[@]}" \
@@ -969,7 +1025,7 @@ elif [ -n "$PLAYLIST_URL" ]; then
         "${WRITE_SUBS_OPTS[@]}"
         "${WRITE_META_OPTS[@]}"
         --sub-langs "en,en-US,en-GB,zh-Hans,zh-Hant,zh-CN,zh"
-        --sleep-subtitles 1
+        --sleep-subtitles "$sleep_subtitles_seconds"
         --continue
     )
     if [ "$OVERWRITE" != true ]; then
@@ -979,8 +1035,8 @@ elif [ -n "$PLAYLIST_URL" ]; then
     fi
     playlist_tail_args=(
         --yes-playlist
-        --sleep-interval 1
-        --max-sleep-interval 3
+        --sleep-interval "$sleep_interval_seconds"
+        --max-sleep-interval "$max_sleep_interval_seconds"
         --retries 10
         --file-access-retries 5
         --fragment-retries 5
@@ -1006,9 +1062,10 @@ elif [ -n "$PLAYLIST_URL" ]; then
     playlist_primary_format_error=$yt_dlp_last_format_error
 
     if [ "$playlist_platform" = "youtube" ] && [ -n "$fallback_player_client" ]; then
+        playlist_cookie_fallback_label="${youtube_cookie_fallback_client:-default}"
         if [ "$playlist_primary_player_error" = true ]; then
-            log_warn "YouTube player errors detected; retrying failed items with '${fallback_player_client}'."
-            log_step "Playlist fallback download with cookies using ${fallback_player_client}"
+            log_warn "YouTube player errors detected; retrying failed items with '${playlist_cookie_fallback_label}'."
+            log_step "Playlist fallback download with cookies using ${playlist_cookie_fallback_label}"
             retry_command "Playlist fallback download: ${PLAYLIST_URL}" run_yt_dlp_with_log_capture yt-dlp \
                 "${playlist_base_args[@]}" \
                 "${playlist_cookie_opts[@]}" \
@@ -1020,7 +1077,7 @@ elif [ -n "$PLAYLIST_URL" ]; then
                 playlist_status=$fallback_status
             fi
             if [ "$yt_dlp_last_player_error" = true ]; then
-                log_warn "Fallback client '${fallback_player_client}' still hit player errors; retrying without cookies."
+                log_warn "Fallback client '${playlist_cookie_fallback_label}' still hit player errors; retrying without cookies."
                 log_step "Playlist fallback download without cookies using ${fallback_player_client}"
                 retry_command "Playlist fallback download without cookies: ${PLAYLIST_URL}" run_yt_dlp_with_log_capture yt-dlp \
                     "${playlist_base_args[@]}" \

@@ -23,8 +23,11 @@ const DEFAULT_CONFIG_LINES = [
   "  youtube:",
   "    - name: Example YouTube channel",
   "      handle: https://www.youtube.com/@example",
-  "  x:",
-  "    - name: Example X user",
+  "  x_f2:",
+  "    - name: Example X user (f2)",
+  "      handle: https://x.com/user1",
+  "  x_gallery_dl:",
+  "    - name: Example X user (gallery-dl)",
   "      handle: https://x.com/user1",
   "  douyin:",
   "    - name: Example Douyin user",
@@ -35,8 +38,9 @@ const DEFAULT_CONFIG_TEMPLATE = `${DEFAULT_CONFIG_LINES.join("\n")}\n`;
 const PLATFORM_ALIASES = {
   dy: "douyin",
   tiktok: "douyin",
-  twitter: "x",
-  tw: "x",
+  twitter: "x_f2",
+  tw: "x_f2",
+  x: "x_f2",
   yt: "youtube",
 };
 
@@ -51,17 +55,23 @@ const PLATFORM_COMMANDS = {
     build_args: (url) => ["dy", "-M", "post", "-u", url],
     label: "douyin",
   },
-  x: {
+  x_f2: {
     command: "f2",
     build_args: (url) => ["x", "-M", "post", "-u", url],
-    label: "x",
+    label: "x_f2",
+  },
+  x_gallery_dl: {
+    command: "xsave_gallery_dl",
+    build_args: (url) => [url],
+    label: "x_gallery_dl",
   },
 };
 
 const PLATFORM_HANDLE_BASE_URLS = {
   // Keep aligned with DEFAULT_CONFIG_LINES examples.
   youtube: "https://www.youtube.com/@",
-  x: "https://x.com/",
+  x_f2: "https://x.com/",
+  x_gallery_dl: "https://x.com/",
   douyin: "https://www.douyin.com/user/",
 };
 
@@ -232,16 +242,17 @@ function build_help_text(script_name) {
     "  Batch export channels/users across platforms by reading YAML configs and",
     "  running platform-specific export commands.",
     "  Resumes from the last successful job using the state file pointer.",
+    "  X export options: x_f2 uses f2, x_gallery_dl uses xsave_gallery_dl.",
     "",
     `${chalk.bold("Commands")}`,
     "  init                        Create a scaffold config file if empty.",
     "",
     `${chalk.bold("Options")}`,
     `  -c, --config <path...>       YAML config path(s), supports glob patterns (default: ${chalk.gray(DEFAULT_CONFIG_PATH)})`,
-    "  -p, --platform <name...>     Only run these platforms (youtube, douyin, x)",
-    "      --exclude-platform <...> Skip these platforms (youtube, douyin, x)",
+    "  -p, --platform <name...>     Only run these platforms (youtube, douyin, x_f2, x_gallery_dl)",
+    "      --exclude-platform <...> Skip these platforms (youtube, douyin, x_f2, x_gallery_dl)",
     "      --state-file <path>      State cache path (default: ~/.command_base/exporter/processed.json)",
-    "  -r, --refresh [mode]         Refresh YouTube output (media, info, all; default: info)",
+    "  -r, --refresh [mode]         Refresh YouTube output (media, info, all; info skips subs/comments)",
     "      --stop-on-error          Stop on first failed export (default: false)",
     "  -d, --dry-run                Print commands without executing (default: false)",
     "      --quiet                  Print only warnings and errors (default: false)",
@@ -272,8 +283,11 @@ function build_help_text(script_name) {
     "  # Each item must include name and handle",
     "  # handle supports full URLs or usernames (e.g. youtube handle: user1)",
     "  source:",
-    "    x:",
-    "      - name: Example X user",
+    "    x_f2:",
+    "      - name: Example X user (f2)",
+    "        handle: https://x.com/user1",
+    "    x_gallery_dl:",
+    "      - name: Example X user (gallery-dl)",
     "        handle: https://x.com/user1",
     "    douyin:",
     "      - name: Example Douyin user",
@@ -422,11 +436,11 @@ function parse_cli_arguments() {
     .option("platform", {
       alias: "p",
       type: "array",
-      describe: "Only run these platforms (youtube, douyin, x)",
+      describe: "Only run these platforms (youtube, douyin, x_f2, x_gallery_dl)",
     })
     .option("exclude-platform", {
       type: "array",
-      describe: "Skip these platforms (youtube, douyin, x)",
+      describe: "Skip these platforms (youtube, douyin, x_f2, x_gallery_dl)",
     })
     .option("state-file", {
       type: "string",
@@ -867,7 +881,12 @@ function build_xsave_yt_dlp_refresh_args(refresh_mode) {
 
   switch (refresh_mode) {
     case "info":
-      ytdlp_args = ["--skip-download"];
+      ytdlp_args = [
+        "--skip-download",
+        "--no-write-comments",
+        "--no-write-subs",
+        "--no-write-auto-subs",
+      ];
       break;
     case "media":
       ytdlp_args = [
@@ -916,6 +935,41 @@ function build_job_key(platform_key, url) {
   return `${platform_key}::${url}`;
 }
 
+function normalize_state_pointer(pointer) {
+  if (!pointer || typeof pointer !== "object") return;
+
+  const job_key =
+    typeof pointer.job_key === "string" ? pointer.job_key.trim() : "";
+  const job_key_parts = job_key ? job_key.split("::") : [];
+  const job_key_platform =
+    job_key_parts.length > 1 ? job_key_parts[0].trim() : "";
+  const job_key_url =
+    job_key_parts.length > 1 ? job_key_parts.slice(1).join("::").trim() : "";
+
+  let platform_text = String(pointer.platform || "").trim();
+  let resolved_url = String(pointer.url || "").trim();
+
+  if (!platform_text && job_key_platform) {
+    platform_text = job_key_platform;
+  }
+
+  if (!resolved_url && job_key_url) {
+    resolved_url = job_key_url;
+  }
+
+  const normalized_platform = platform_text
+    ? normalize_platform_key(platform_text)
+    : "";
+
+  if (!normalized_platform) return;
+
+  pointer.platform = normalized_platform;
+  if (resolved_url) {
+    pointer.url = resolved_url;
+    pointer.job_key = build_job_key(normalized_platform, resolved_url);
+  }
+}
+
 function normalize_state_data(raw_state) {
   const state_data =
     raw_state && typeof raw_state === "object" ? raw_state : {};
@@ -925,6 +979,7 @@ function normalize_state_data(raw_state) {
   if (!state_data.pointer || typeof state_data.pointer !== "object") {
     state_data.pointer = {};
   }
+  normalize_state_pointer(state_data.pointer);
   state_data.version = STATE_VERSION;
   return state_data;
 }
