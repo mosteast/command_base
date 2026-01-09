@@ -20,6 +20,9 @@ script_version="1.0.4"
 yt_dlp_color_policy="always"
 yt_dlp_color_opts=(--color "$yt_dlp_color_policy")
 
+cleanup_ready=false
+cleanup_target_dir=""
+
 # Retry configuration
 retry_attempt_limit=3
 retry_delay_seconds=2
@@ -92,6 +95,84 @@ format_command() {
     done
     printf "%s" "${formatted% }"
 }
+
+expand_tilde_path() {
+    local path="$1"
+    if [[ "$path" == "~/"* ]]; then
+        printf "%s" "${HOME}/${path#~/}"
+        return 0
+    fi
+    if [ "$path" = "~" ]; then
+        printf "%s" "$HOME"
+        return 0
+    fi
+    printf "%s" "$path"
+}
+
+resolve_cleanup_root() {
+    local raw_dir="$1"
+    if [ -z "$raw_dir" ]; then
+        printf "%s" ""
+        return 0
+    fi
+    local expanded_dir
+    expanded_dir=$(expand_tilde_path "$raw_dir")
+    local cleanup_root="$expanded_dir"
+    while [[ "$cleanup_root" == *"%("* ]]; do
+        cleanup_root=$(dirname "$cleanup_root")
+    done
+    printf "%s" "$cleanup_root"
+}
+
+cleanup_zero_byte_files() {
+    local target_dir="$1"
+    if [ -z "$target_dir" ]; then
+        log_warn "Zero-byte cleanup skipped: no target directory."
+        return 0
+    fi
+    if [ "$target_dir" = "/" ] || [ "$target_dir" = "." ]; then
+        log_warn "Zero-byte cleanup skipped: unsafe target directory '${target_dir}'."
+        return 0
+    fi
+    if [ ! -d "$target_dir" ]; then
+        log_warn "Zero-byte cleanup skipped: directory not found '${target_dir}'."
+        return 0
+    fi
+
+    log_step "Cleanup zero-byte files"
+    log_io "scan zero-byte files in ${target_dir}"
+    local removed_count=0
+    while IFS= read -r -d '' file_path; do
+        removed_count=$((removed_count + 1))
+        if [ "$dry_run" = true ]; then
+            log_io "dry-run: would remove zero-byte file ${file_path}"
+            continue
+        fi
+        log_io "remove zero-byte file ${file_path}"
+        rm -f -- "$file_path"
+    done < <(find "$target_dir" -type f -size 0 -print0 2>/dev/null)
+
+    if [ "$removed_count" -eq 0 ]; then
+        log_info "No zero-byte files found in '${target_dir}'."
+        return 0
+    fi
+
+    if [ "$dry_run" = true ]; then
+        log_info "Dry-run: would remove ${removed_count} zero-byte file(s) in '${target_dir}'."
+        return 0
+    fi
+
+    log_success "Removed ${removed_count} zero-byte file(s) from '${target_dir}'."
+}
+
+maybe_cleanup_zero_byte_files() {
+    if [ "$cleanup_ready" != true ]; then
+        return 0
+    fi
+    cleanup_zero_byte_files "$cleanup_target_dir"
+}
+
+trap maybe_cleanup_zero_byte_files EXIT
 
 filter_cookie_incompatible_clients() {
     local raw_clients="$1"
@@ -819,6 +900,8 @@ if [ -n "$CHANNEL_URL" ]; then
     if [ "$output_dir_provided" != true ]; then
         OUTPUT_DIR=$(resolve_default_output_dir "$channel_platform")
     fi
+    cleanup_target_dir=$(resolve_cleanup_root "$OUTPUT_DIR")
+    cleanup_ready=true
     log_step "Normalize channel URL"
     CHANNEL_URL=$(normalize_channel_url "$CHANNEL_URL" "$channel_platform")
     channel_referer_opts=()
@@ -971,6 +1054,8 @@ elif [ -n "$PLAYLIST_URL" ]; then
     if [ "$output_dir_provided" != true ]; then
         OUTPUT_DIR=$(resolve_default_output_dir "$playlist_platform")
     fi
+    cleanup_target_dir=$(resolve_cleanup_root "$OUTPUT_DIR")
+    cleanup_ready=true
     log_step "Normalize playlist URL"
     if contains_non_ascii "$PLAYLIST_URL"; then
         log_warn "Playlist URL contains non-ASCII characters; encoding for HTTP requests."
@@ -1109,6 +1194,8 @@ elif [ -n "$PLAYLIST_URL" ]; then
 # Handle individual video URLs mode
 else
     log_step "Manual video download"
+    cleanup_target_dir=$(resolve_cleanup_root "$OUTPUT_DIR")
+    cleanup_ready=true
     log_step "Normalize manual video URLs"
     normalized_video_urls=()
     for url in "${VIDEO_URLS[@]}"; do

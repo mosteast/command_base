@@ -146,6 +146,47 @@ remove_file() {
     rm -f "$file_path"
 }
 
+cleanup_zero_byte_files() {
+    local target_dir="$1"
+    if [ -z "$target_dir" ]; then
+        log_warn "Zero-byte cleanup skipped: no target directory."
+        return 0
+    fi
+    if [ "$target_dir" = "/" ] || [ "$target_dir" = "." ]; then
+        log_warn "Zero-byte cleanup skipped: unsafe target directory '${target_dir}'."
+        return 0
+    fi
+    if [ ! -d "$target_dir" ]; then
+        log_warn "Zero-byte cleanup skipped: directory not found '${target_dir}'."
+        return 0
+    fi
+
+    log_step "Cleanup zero-byte files"
+    log_io "scan zero-byte files in ${target_dir}"
+    local removed_count=0
+    while IFS= read -r -d '' file_path; do
+        removed_count=$((removed_count + 1))
+        if [ "$dry_run" = true ]; then
+            log_io "dry-run: would remove zero-byte file ${file_path}"
+            continue
+        fi
+        log_io "remove zero-byte file ${file_path}"
+        rm -f -- "$file_path"
+    done < <(find "$target_dir" -type f -size 0 -print0 2>/dev/null)
+
+    if [ "$removed_count" -eq 0 ]; then
+        log_info "No zero-byte files found in '${target_dir}'."
+        return 0
+    fi
+
+    if [ "$dry_run" = true ]; then
+        log_info "Dry-run: would remove ${removed_count} zero-byte file(s) in '${target_dir}'."
+        return 0
+    fi
+
+    log_success "Removed ${removed_count} zero-byte file(s) from '${target_dir}'."
+}
+
 show_usage() {
     local script_name
     script_name=$(basename "$0")
@@ -539,4 +580,11 @@ if [ "$exit_code" -eq 0 ]; then
 else
     log_error "gallery-dl failed with exit code ${exit_code}."
 fi
+
+if [ "$skip_default_output_dir" = true ]; then
+    log_warn "Zero-byte cleanup skipped because gallery-dl destination options were provided after '--'."
+else
+    cleanup_zero_byte_files "$output_dir"
+fi
+
 exit "$exit_code"
