@@ -16,6 +16,11 @@ fallback_player_client="android"
 debug_mode=false
 quiet_mode=false
 dry_run=false
+use_youtube_cookies=true
+youtube_cookie_browser="chrome"
+youtube_cookie_browser_provided=false
+youtube_cookie_file=""
+youtube_cookie_file_provided=false
 script_version="1.0.4"
 yt_dlp_color_policy="always"
 yt_dlp_color_opts=(--color "$yt_dlp_color_policy")
@@ -254,6 +259,10 @@ ${color_blue}Options:${color_reset}
       --youtube-client    YouTube player clients for yt-dlp (comma-separated, default: ${youtube_player_client})
       --fallback-client   Fallback clients for YouTube format/player errors (default: ${fallback_player_client})
                          Use 'none' to disable fallback.
+      --cookies-from-browser <value>
+                          Load YouTube cookies from a browser profile (default: ${youtube_cookie_browser})
+      --cookies <file>    Load YouTube cookies from a Netscape cookie file (default: disabled)
+      --no-cookies        Disable YouTube cookies (default: false)
       --                 Pass additional options to yt-dlp
 
 ${color_blue}Examples:${color_reset}
@@ -268,6 +277,12 @@ ${color_blue}Examples:${color_reset}
 
   # Download a playlist with extra yt-dlp options
   \$0 -l https://www.youtube.com/playlist?list=xxx -- --dateafter 20240101
+
+  # Use Safari cookies for YouTube downloads
+  \$0 -c https://www.youtube.com/@user1 --cookies-from-browser safari
+
+  # Use a cookies.txt export for YouTube
+  \$0 -l https://www.youtube.com/playlist?list=xxx --cookies ~/Downloads/youtube_cookies.txt
 
   # Download multiple videos into a custom folder
   \$0 https://youtu.be/xxx https://youtu.be/yyy ~/Downloads/YouTube
@@ -740,6 +755,52 @@ while [[ $# -gt 0 ]]; do
                 log_error "YouTube player client list is required after --youtube-client option."
                 exit 1
             fi
+            ;;
+        --cookies-from-browser=*)
+            youtube_cookie_browser="${1#*=}"
+            if [ -z "$youtube_cookie_browser" ]; then
+                log_error "--cookies-from-browser cannot be empty."
+                exit 1
+            fi
+            youtube_cookie_browser_provided=true
+            use_youtube_cookies=true
+            shift
+            ;;
+        --cookies-from-browser)
+            if [ -n "$2" ]; then
+                youtube_cookie_browser="$2"
+                youtube_cookie_browser_provided=true
+                use_youtube_cookies=true
+                shift 2
+            else
+                log_error "Browser value is required after --cookies-from-browser option."
+                exit 1
+            fi
+            ;;
+        --cookies=*)
+            youtube_cookie_file="${1#*=}"
+            if [ -z "$youtube_cookie_file" ]; then
+                log_error "--cookies cannot be empty."
+                exit 1
+            fi
+            youtube_cookie_file_provided=true
+            use_youtube_cookies=true
+            shift
+            ;;
+        --cookies)
+            if [ -n "$2" ]; then
+                youtube_cookie_file="$2"
+                youtube_cookie_file_provided=true
+                use_youtube_cookies=true
+                shift 2
+            else
+                log_error "Cookies file is required after --cookies option."
+                exit 1
+            fi
+            ;;
+        --no-cookies)
+            use_youtube_cookies=false
+            shift
             ;;
         --fallback-client=*)
             fallback_player_client="${1#*=}"
