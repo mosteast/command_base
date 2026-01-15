@@ -946,13 +946,19 @@ if [ -n "$youtube_cookie_fallback_client" ]; then
     youtube_fallback_extractor_args=(--extractor-args "youtube:player_client=${youtube_cookie_fallback_client}")
 fi
 
-# Define match filter that allows Rumble videos to bypass subscription check
-# For Rumble videos - no filter, for other extractors - check for subscription requirement
-MATCH_FILTER="extractor!='Rumble' & extractor!='RumbleEmbed' & availability!='needs_subscription' | extractor='Rumble' | extractor='RumbleEmbed'"
+# Define match filters that allow Rumble videos to bypass subscription check.
+# Use multiple --match-filters entries for OR semantics; "&" is for AND.
+MATCH_FILTERS=(
+    "extractor='Rumble'"
+    "extractor='RumbleEmbed'"
+    "extractor!='Rumble' & extractor!='RumbleEmbed' & availability!='needs_subscription'"
+)
 match_filter_opts=()
-if [ -n "$MATCH_FILTER" ]; then
-    match_filter_opts=(--match-filter "$MATCH_FILTER")
-fi
+for match_filter in "${MATCH_FILTERS[@]}"; do
+    if [ -n "$match_filter" ]; then
+        match_filter_opts+=(--match-filters "$match_filter")
+    fi
+done
 
 # Handle channel URL mode
 if [ -n "$CHANNEL_URL" ]; then

@@ -15,6 +15,8 @@ const DEFAULT_CONFIG_PATH =
   "/Users/hailang/Library/Mobile Documents/com~apple~CloudDocs/main/saved/state/gather.config.yaml";
 const DEFAULT_STATE_FILE =
   "/Users/hailang/Library/Mobile Documents/com~apple~CloudDocs/main/saved/state/gather.state.json";
+const DEFAULT_F2_OUTPUT_DIR =
+  "/Users/hailang/Library/Mobile Documents/com~apple~CloudDocs/main/saved/f2";
 const DEFAULT_CONFIG_LINES = [
   "# Gather config",
   "# Each source item requires a name and handle.",
@@ -261,6 +263,9 @@ function build_help_text(script_name) {
     "  -p, --platform <name...>     Only run these platforms (youtube, rumble, douyin, x_f2, x_gallery_dl)",
     "      --exclude-platform <...> Skip these platforms (youtube, rumble, douyin, x_f2, x_gallery_dl)",
     "      --state-file <path>      State cache path (default: ~/.command_base/exporter/processed.json)",
+    `      --f2-output-dir <path>   f2 download output directory (default: ${chalk.gray(
+      DEFAULT_F2_OUTPUT_DIR,
+    )})`,
     "  -r, --refresh [mode]         Refresh yt-dlp output (youtube, rumble; media, info, all; info skips subs/comments)",
     "      --stop-on-error          Stop on first failed export (default: false)",
     "  -d, --dry-run                Print commands without executing (default: false)",
@@ -400,6 +405,13 @@ function normalize_refresh_mode(raw_value) {
   return { mode: normalized, explicit: true };
 }
 
+function normalize_f2_output_dir(raw_value) {
+  if (raw_value === undefined || raw_value === null) return "";
+  const text = String(raw_value || "").trim();
+  if (!text) return "";
+  return path.resolve(expand_user_path(text));
+}
+
 function looks_like_config_path(raw_value) {
   const text = String(raw_value || "").trim();
   if (!text) return false;
@@ -463,6 +475,10 @@ function parse_cli_arguments() {
       type: "string",
       describe:
         "State cache path (default: ~/.command_base/exporter/processed.json)",
+    })
+    .option("f2-output-dir", {
+      type: "string",
+      describe: `f2 download output directory (default: ${DEFAULT_F2_OUTPUT_DIR})`,
     })
     .option("refresh", {
       alias: "r",
@@ -548,6 +564,11 @@ function parse_cli_arguments() {
       .map(normalize_platform_key)
       .filter(Boolean),
     state_file: argv["state-file"] ? String(argv["state-file"]) : "",
+    f2_output_dir: normalize_f2_output_dir(
+      argv["f2-output-dir"] === undefined
+        ? DEFAULT_F2_OUTPUT_DIR
+        : argv["f2-output-dir"],
+    ),
     refresh_mode: refresh_result.mode,
     refresh_mode_explicit: refresh_result.explicit,
     stop_on_error: Boolean(argv["stop-on-error"]),
@@ -937,14 +958,24 @@ function build_refresh_args(platform_key, refresh_mode) {
   return build_xsave_yt_dlp_refresh_args(refresh_mode);
 }
 
-function build_platform_command(platform_key, url, refresh_mode) {
+function build_platform_command(platform_key, url, refresh_mode, options) {
   const config = PLATFORM_COMMANDS[platform_key];
   if (!config) return null;
   const base_args = config.build_args(url);
   const refresh_args = build_refresh_args(platform_key, refresh_mode);
+  const args = [...base_args, ...refresh_args];
+  if (config.command === "f2") {
+    const f2_output_dir =
+      options && typeof options.f2_output_dir === "string"
+        ? options.f2_output_dir
+        : "";
+    if (f2_output_dir) {
+      args.push("-p", f2_output_dir);
+    }
+  }
   return {
     command: config.command,
-    args: [...base_args, ...refresh_args],
+    args,
     label: config.label || platform_key,
   };
 }
@@ -1367,6 +1398,7 @@ async function run_export_command() {
       job.platform_key,
       job.url,
       refresh_mode,
+      options,
     );
     if (!command_config) {
       skipped_unknown += 1;
