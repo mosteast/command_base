@@ -1040,16 +1040,9 @@ function resolve_pointer_index(job_list, pointer_key) {
   );
 }
 
-function resolve_effective_refresh_mode(
-  options,
-  pointer_found,
-  pointer_at_last,
-) {
+function resolve_effective_refresh_mode(options) {
   if (options.refresh_mode_explicit) {
     return options.refresh_mode || DEFAULT_REFRESH_MODE;
-  }
-  if (pointer_found && !pointer_at_last) {
-    return DEFAULT_REFRESH_MODE;
   }
   return "";
 }
@@ -1362,11 +1355,7 @@ async function run_export_command() {
     logger.debug("No pointer set; starting from first.");
   }
 
-  const refresh_mode = resolve_effective_refresh_mode(
-    options,
-    pointer_found,
-    pointer_at_last,
-  );
+  const refresh_mode = resolve_effective_refresh_mode(options);
   if (refresh_mode) {
     logger.info(`Refresh mode: ${refresh_mode}`);
   }
