@@ -1,0 +1,1373 @@
+#!/usr/bin/env node
+
+"use strict";
+
+const fs = require("fs/promises");
+const path = require("path");
+const crypto = require("crypto");
+const { globSync: glob_sync, hasMagic: has_magic } = require("glob");
+const chalk = require("chalk");
+const yargs_factory = require("yargs/yargs");
+const { JSDOM } = require("jsdom");
+const playwright = require("playwright");
+
+const package_json = require("../package.json");
+
+const default_output_root = path.resolve(process.cwd(), "page_save_output");
+const default_timeout_ms = 30000;
+const default_wait_after_load_ms = 2000;
+const default_scroll_delay_ms = 1000;
+const default_max_scrolls = 10;
+const default_browser_name = "chromium";
+const default_network_idle_timeout_ms = 15000;
+const asset_dir_name = "asset";
+
+const allowed_browsers = ["chromium", "firefox", "webkit"];
+const resource_type_allowlist = new Set([
+  "document",
+  "stylesheet",
+  "image",
+  "media",
+  "font",
+  "script",
+  "other",
+]);
+
+const link_rel_resource_tokens = new Set([
+  "icon",
+  "shortcut",
+  "apple-touch-icon",
+  "mask-icon",
+  "manifest",
+  "preload",
+  "prefetch",
+  "modulepreload",
+]);
+
+const palette = {
+  headline: chalk.cyanBright.bold,
+  info: chalk.cyanBright,
+  success: chalk.greenBright,
+  warn: chalk.yellowBright,
+  error: chalk.redBright,
+  detail: chalk.gray,
+  path: chalk.magentaBright,
+};
+
+const content_type_extension_map = {
+  "text/css": ".css",
+  "text/html": ".html",
+  "text/plain": ".txt",
+  "application/javascript": ".js",
+  "text/javascript": ".js",
+  "application/x-javascript": ".js",
+  "application/json": ".json",
+  "image/png": ".png",
+  "image/jpeg": ".jpg",
+  "image/jpg": ".jpg",
+  "image/webp": ".webp",
+  "image/gif": ".gif",
+  "image/svg+xml": ".svg",
+  "image/x-icon": ".ico",
+  "font/woff": ".woff",
+  "font/woff2": ".woff2",
+  "font/ttf": ".ttf",
+  "font/otf": ".otf",
+  "application/font-woff": ".woff",
+  "application/font-woff2": ".woff2",
+  "video/mp4": ".mp4",
+  "video/webm": ".webm",
+  "video/ogg": ".ogv",
+  "audio/mpeg": ".mp3",
+  "audio/mp4": ".m4a",
+  "audio/ogg": ".ogg",
+};
+
+function build_help_text(script_name) {
+  return [
+    palette.headline("Usage"),
+    `  ${script_name} [options] <url ...>`,
+    "",
+    palette.headline("Description"),
+    "  Save dynamic web pages with localized assets (HTML, CSS, scripts, images,",
+    "  fonts, audio, and video) into an offline-friendly folder.",
+    "",
+    palette.headline("Options"),
+    "  -o, --output-dir <path>       Output root directory (default: ./page_save_output)",
+    "  -u, --url-file <glob ...>     Glob patterns to text files containing URLs",
+    "  --timeout <ms>                Navigation and download timeout in ms (default: 30000)",
+    "  --wait-after-load <ms>        Extra delay after load in ms (default: 2000)",
+    "  --scroll                      Auto-scroll to load lazy content (default: false)",
+    "  --max-scrolls <count>         Max auto-scroll iterations (default: 10)",
+    "  --scroll-delay <ms>           Delay between scrolls in ms (default: 1000)",
+    "  --browser <name>              Browser engine to use (chromium|firefox|webkit)",
+    "  --headful                     Run with a visible browser window (default: false)",
+    "  --refresh                     Reprocess even if output exists (default: false)",
+    "  -d, --dry-run                 Show planned actions without running them",
+    "  --quiet                       Print only warnings and errors",
+    "  --debug                       Print verbose debug logs",
+    "  -v, --version                 Show version number and exit",
+    "  -h, --help                    Show this help message",
+    "",
+    palette.headline("Examples"),
+    "  # Save a single page",
+    "  $0 https://example.com",
+    "",
+    "  # Save multiple pages and auto-scroll to load lazy content",
+    "  $0 --scroll https://example.com https://news.example.com",
+    "",
+    "  # Load URLs from files using glob patterns",
+    "  $0 --url-file \"urls/*.txt\"",
+    "",
+    "  # Force re-save into a custom folder",
+    "  $0 --refresh -o ./archive https://example.com",
+  ].join("\n");
+}
+
+function expand_user_path(raw_path) {
+  if (!raw_path) return raw_path;
+  const text = String(raw_path);
+  if (!text.startsWith("~")) return text;
+  const home_dir = process.env.HOME;
+  if (!home_dir) return text;
+  if (text === "~") return home_dir;
+  if (text.startsWith("~/")) return path.join(home_dir, text.slice(2));
+  return text;
+}
+
+function create_logger({ command_name, quiet_mode, debug_mode }) {
+  const prefix = chalk.dim(command_name);
+
+  function format_message(message) {
+    return `${prefix} ${message}`;
+  }
+
+  return {
+    info(message) {
+      if (quiet_mode) return;
+      console.log(format_message(palette.info(message)));
+    },
+    success(message) {
+      if (quiet_mode) return;
+      console.log(format_message(palette.success(message)));
+    },
+    warn(message) {
+      console.warn(format_message(palette.warn(message)));
+    },
+    error(message, error) {
+      console.error(format_message(palette.error(message)));
+      if (debug_mode && error) {
+        console.error(palette.detail(error.stack || String(error)));
+      }
+    },
+    debug(message) {
+      if (!debug_mode || quiet_mode) return;
+      console.log(format_message(palette.detail(`[debug] ${message}`)));
+    },
+    step(message) {
+      if (!debug_mode || quiet_mode) return;
+      console.log(format_message(palette.detail(`[step] ${message}`)));
+    },
+    io(message) {
+      if (!debug_mode || quiet_mode) return;
+      console.log(format_message(palette.detail(`[io] ${message}`)));
+    },
+  };
+}
+
+function parse_cli_arguments(raw_args) {
+  const parser = yargs_factory(raw_args)
+    .scriptName("page_save")
+    .help(false)
+    .version(false)
+    .showHelpOnFail(false)
+    .parserConfiguration({
+      "camel-case-expansion": false,
+      "strip-dashed": false,
+    })
+    .command("$0 [url...]", false, (cmd) =>
+      cmd.positional("url", {
+        type: "string",
+        array: true,
+        describe: "URL(s) to save",
+      }),
+    )
+    .option("output-dir", {
+      alias: ["output_dir", "o"],
+      type: "string",
+      default: default_output_root,
+      describe: "Output root directory",
+    })
+    .option("url-file", {
+      alias: ["url_file", "u"],
+      type: "array",
+      describe: "Glob patterns to text files containing URLs",
+      default: [],
+    })
+    .option("timeout", {
+      type: "number",
+      default: default_timeout_ms,
+      describe: "Navigation and download timeout in ms",
+    })
+    .option("wait-after-load", {
+      alias: ["wait_after_load"],
+      type: "number",
+      default: default_wait_after_load_ms,
+      describe: "Extra delay after load in ms",
+    })
+    .option("scroll", {
+      type: "boolean",
+      default: false,
+      describe: "Auto-scroll to load lazy content",
+    })
+    .option("max-scrolls", {
+      alias: ["max_scrolls"],
+      type: "number",
+      default: default_max_scrolls,
+      describe: "Max auto-scroll iterations",
+    })
+    .option("scroll-delay", {
+      alias: ["scroll_delay"],
+      type: "number",
+      default: default_scroll_delay_ms,
+      describe: "Delay between scrolls in ms",
+    })
+    .option("browser", {
+      type: "string",
+      choices: allowed_browsers,
+      default: default_browser_name,
+      describe: "Browser engine to use",
+    })
+    .option("headful", {
+      type: "boolean",
+      default: false,
+      describe: "Run with a visible browser window",
+    })
+    .option("refresh", {
+      type: "boolean",
+      default: false,
+      describe: "Reprocess even if output exists",
+    })
+    .option("dry-run", {
+      alias: ["dry_run", "d"],
+      type: "boolean",
+      default: false,
+      describe: "Show planned actions without running them",
+    })
+    .option("quiet", {
+      type: "boolean",
+      default: false,
+      describe: "Print only warnings and errors",
+    })
+    .option("debug", {
+      type: "boolean",
+      default: false,
+      describe: "Print verbose debug logs",
+    })
+    .strict();
+
+  return parser.parse();
+}
+
+function is_http_url(raw_value) {
+  if (!raw_value) return false;
+  try {
+    const parsed = new URL(String(raw_value));
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch (error) {
+    return false;
+  }
+}
+
+function normalize_resource_url(raw_value) {
+  const parsed = new URL(String(raw_value));
+  parsed.hash = "";
+  return parsed.toString();
+}
+
+function normalize_content_type(raw_value) {
+  if (!raw_value) return "";
+  return String(raw_value).split(";")[0].trim().toLowerCase();
+}
+
+function hash_text(value) {
+  return crypto.createHash("sha1").update(String(value)).digest("hex");
+}
+
+function sanitize_dir_segment(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  return text.replace(/[^a-z0-9._-]+/gi, "_").replace(/_+/g, "_");
+}
+
+function build_output_dir_name(target_url) {
+  const url_obj = new URL(target_url);
+  const host_segment = sanitize_dir_segment(url_obj.host) || "page";
+  let path_segment = sanitize_dir_segment(url_obj.pathname);
+  if (!path_segment || path_segment === "_") path_segment = "root";
+  const raw_segment = [host_segment, path_segment]
+    .filter(Boolean)
+    .join("_")
+    .replace(/^_+|_+$/g, "");
+  const shortened_segment =
+    raw_segment.length > 80 ? raw_segment.slice(0, 80) : raw_segment;
+  const suffix = hash_text(target_url).slice(0, 8);
+  return `${shortened_segment}_${suffix}`;
+}
+
+function detect_extension(resource_url, content_type) {
+  let extension = "";
+  try {
+    const url_obj = new URL(resource_url);
+    const path_extension = path.posix.extname(url_obj.pathname || "");
+    if (path_extension && path_extension.length <= 10) {
+      extension = path_extension;
+    }
+  } catch (error) {
+    // Ignore URL parsing issues; fall back to content type.
+  }
+
+  const normalized_content_type = normalize_content_type(content_type);
+  if (!extension && normalized_content_type) {
+    extension = content_type_extension_map[normalized_content_type] || "";
+  }
+
+  if (!extension && normalized_content_type) {
+    extension = ".bin";
+  }
+
+  return extension;
+}
+
+function to_relative_posix_path(from_relative_path, target_relative_path) {
+  const from_dir =
+    from_relative_path && from_relative_path !== "."
+      ? path.posix.dirname(from_relative_path)
+      : ".";
+  let relative_path = path.posix.relative(from_dir, target_relative_path);
+  if (!relative_path) {
+    relative_path = path.posix.basename(target_relative_path);
+  }
+  return relative_path;
+}
+
+async function path_exists(target_path) {
+  try {
+    await fs.access(target_path);
+    return true;
+  } catch (error) {
+    return false;
+  }
+}
+
+async function ensure_dir(target_path, logger) {
+  logger.io(`create directory ${target_path}`);
+  await fs.mkdir(target_path, { recursive: true });
+}
+
+function resolve_possible_url(raw_value) {
+  if (!raw_value) return "";
+  if (is_http_url(raw_value)) return raw_value;
+  const trimmed = String(raw_value).trim();
+  if (!trimmed) return "";
+  const is_local =
+    trimmed.startsWith("localhost") || /^\d{1,3}(?:\.\d{1,3}){3}/.test(trimmed);
+  if (trimmed.startsWith("www.") || trimmed.includes(".") || is_local) {
+    const scheme = is_local ? "http://" : "https://";
+    const candidate = `${scheme}${trimmed}`;
+    if (is_http_url(candidate)) return candidate;
+  }
+  return "";
+}
+
+function is_in_output_root(output_root, file_path) {
+  if (!output_root || !file_path) return false;
+  const relative_path = path.relative(output_root, file_path);
+  return relative_path && !relative_path.startsWith("..");
+}
+
+async function load_urls_from_file(file_path, logger) {
+  logger.io(`read url list ${file_path}`);
+  const raw_text = await fs.readFile(file_path, "utf8");
+  return raw_text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("#"));
+}
+
+function expand_glob_targets(targets, logger) {
+  const expanded = [];
+  for (const target of targets) {
+    if (!target) continue;
+    const resolved = expand_user_path(String(target));
+    if (has_magic(resolved)) {
+      logger.debug(`expand glob ${resolved}`);
+      expanded.push(
+        ...glob_sync(resolved, {
+          nodir: true,
+          dot: true,
+          nocase: false,
+          absolute: true,
+        }),
+      );
+    } else {
+      expanded.push(path.resolve(resolved));
+    }
+  }
+  return Array.from(new Set(expanded));
+}
+
+async function collect_input_urls(raw_args, options, logger) {
+  const output_root = options.output_root;
+  const url_set = new Set();
+  const url_files = expand_glob_targets(options.url_files, logger);
+
+  for (const file_path of url_files) {
+    if (is_in_output_root(output_root, file_path)) {
+      logger.warn(`skip output file ${file_path}`);
+      continue;
+    }
+    if (!(await path_exists(file_path))) {
+      logger.warn(`url file not found: ${file_path}`);
+      continue;
+    }
+    const file_urls = await load_urls_from_file(file_path, logger);
+    for (const url_value of file_urls) {
+      if (!url_set.has(url_value)) {
+        url_set.add(url_value);
+      }
+    }
+  }
+
+  for (const raw_value of raw_args) {
+    if (!raw_value) continue;
+    if (is_http_url(raw_value)) {
+      url_set.add(raw_value);
+      continue;
+    }
+
+    const resolved_path = path.resolve(expand_user_path(String(raw_value)));
+    const has_glob = has_magic(resolved_path);
+    if (has_glob || (await path_exists(resolved_path))) {
+      const expanded_paths = has_glob
+        ? glob_sync(resolved_path, {
+            nodir: true,
+            dot: true,
+            nocase: false,
+            absolute: true,
+          })
+        : [resolved_path];
+      for (const file_path of expanded_paths) {
+        if (is_in_output_root(output_root, file_path)) {
+          logger.warn(`skip output file ${file_path}`);
+          continue;
+        }
+        if (!(await path_exists(file_path))) {
+          logger.warn(`url file not found: ${file_path}`);
+          continue;
+        }
+        const file_urls = await load_urls_from_file(file_path, logger);
+        for (const url_value of file_urls) {
+          if (!url_set.has(url_value)) {
+            url_set.add(url_value);
+          }
+        }
+      }
+      continue;
+    }
+
+    const possible_url = resolve_possible_url(raw_value);
+    if (possible_url) {
+      url_set.add(possible_url);
+      continue;
+    }
+    logger.warn(`unrecognized input: ${raw_value}`);
+  }
+
+  return Array.from(url_set);
+}
+
+function should_skip_url(url_value) {
+  if (!url_value) return true;
+  const normalized = String(url_value).toLowerCase();
+  if (normalized.startsWith("data:")) return true;
+  if (normalized.startsWith("about:")) return true;
+  if (normalized.startsWith("javascript:")) return true;
+  if (normalized.startsWith("mailto:")) return true;
+  if (normalized.startsWith("tel:")) return true;
+  return false;
+}
+
+function is_blob_url(url_value) {
+  return String(url_value || "").toLowerCase().startsWith("blob:");
+}
+
+function build_asset_relative_path(resource_url, content_type) {
+  const url_obj = new URL(resource_url);
+  const host_segment = sanitize_dir_segment(url_obj.host) || "host";
+  let raw_path = url_obj.pathname || "";
+  if (!raw_path || raw_path.endsWith("/")) {
+    raw_path = `${raw_path}index`;
+  }
+  const raw_segments = raw_path.split("/").filter(Boolean);
+  const safe_segments = raw_segments.map(
+    (segment) => sanitize_dir_segment(segment) || "part",
+  );
+  let file_path = safe_segments.join("/") || "resource";
+  let extension = path.posix.extname(file_path);
+  if (!extension) {
+    extension = detect_extension(resource_url, content_type);
+    file_path = `${file_path}${extension}`;
+  }
+  if (url_obj.search) {
+    const query_hash = hash_text(url_obj.search).slice(0, 8);
+    const base_name = path.posix.basename(file_path, extension || "");
+    const dir_name = path.posix.dirname(file_path);
+    const hashed_name = `${base_name}_${query_hash}${extension || ""}`;
+    file_path =
+      dir_name === "." ? hashed_name : path.posix.join(dir_name, hashed_name);
+  }
+  return path.posix.join(asset_dir_name, host_segment, file_path);
+}
+
+function create_response_cache(logger) {
+  const response_cache = new Map();
+
+  function record_response(url_key, response_data) {
+    if (response_cache.has(url_key)) return;
+    response_cache.set(url_key, response_data);
+  }
+
+  async function handle_response(response) {
+    const response_url = response.url();
+    if (!is_http_url(response_url)) return;
+    const resource_type = response.request().resourceType();
+    if (!resource_type_allowlist.has(resource_type)) return;
+    const normalized_url = normalize_resource_url(response_url);
+    if (response_cache.has(normalized_url)) return;
+    if (!response.ok()) return;
+
+    try {
+      const body = await response.body();
+      const headers = response.headers();
+      record_response(normalized_url, {
+        body,
+        headers,
+        content_type: normalize_content_type(headers["content-type"]),
+        status: response.status(),
+        url: response_url,
+      });
+    } catch (error) {
+      logger.debug(`response body failed for ${response_url}: ${error.message}`);
+    }
+  }
+
+  return { response_cache, handle_response };
+}
+
+async function fetch_resource_body({
+  resource_url,
+  response_cache,
+  request_context,
+  timeout_ms,
+  logger,
+}) {
+  const normalized_url = normalize_resource_url(resource_url);
+  const cached = response_cache.get(normalized_url);
+  if (cached) {
+    return {
+      body: cached.body,
+      content_type: cached.content_type,
+      final_url: cached.url || resource_url,
+    };
+  }
+
+  logger.io(`download ${resource_url}`);
+  const response = await request_context.get(resource_url, {
+    timeout: timeout_ms,
+  });
+
+  if (!response.ok()) {
+    throw new Error(`request failed (${response.status()})`);
+  }
+
+  const body = await response.body();
+  const headers = response.headers();
+  return {
+    body,
+    content_type: normalize_content_type(headers["content-type"]),
+    final_url: response.url(),
+  };
+}
+
+function register_resource_entry({
+  resource_cache,
+  resource_registry,
+  url_keys,
+  local_relative_path,
+  content_type,
+  size,
+  processed_as_css,
+}) {
+  const entry = {
+    local_relative_path,
+    content_type: content_type || "",
+    size: size || 0,
+    processed_as_css: Boolean(processed_as_css),
+  };
+
+  for (const url_key of url_keys) {
+    resource_cache.set(url_key, entry);
+  }
+
+  resource_registry.set(local_relative_path, entry);
+}
+
+async function ensure_resource({
+  resource_url,
+  response_cache,
+  request_context,
+  output_dir,
+  resource_cache,
+  resource_registry,
+  timeout_ms,
+  logger,
+}) {
+  if (!resource_url || should_skip_url(resource_url)) return "";
+  if (is_blob_url(resource_url)) {
+    logger.warn(`skip blob url ${resource_url}`);
+    return "";
+  }
+  if (!is_http_url(resource_url)) return "";
+
+  const normalized_url = normalize_resource_url(resource_url);
+  const cached_entry = resource_cache.get(normalized_url);
+  if (cached_entry) return cached_entry.local_relative_path;
+
+  const download = await fetch_resource_body({
+    resource_url,
+    response_cache,
+    request_context,
+    timeout_ms,
+    logger,
+  });
+
+  const final_url = download.final_url || resource_url;
+  const normalized_final_url = normalize_resource_url(final_url);
+  const content_type = download.content_type;
+  const local_relative_path = build_asset_relative_path(
+    final_url,
+    content_type,
+  );
+  const output_path = path.join(output_dir, local_relative_path);
+
+  await ensure_dir(path.dirname(output_path), logger);
+  logger.io(`write ${output_path}`);
+  await fs.writeFile(output_path, download.body);
+
+  register_resource_entry({
+    resource_cache,
+    resource_registry,
+    url_keys: [normalized_url, normalized_final_url],
+    local_relative_path,
+    content_type,
+    size: download.body.length,
+    processed_as_css: false,
+  });
+
+  return local_relative_path;
+}
+
+async function replace_async(text, regex, replacer) {
+  let output = "";
+  let last_index = 0;
+  let match = regex.exec(text);
+
+  while (match) {
+    output += text.slice(last_index, match.index);
+    const replacement = await replacer(...match);
+    output += replacement;
+    last_index = match.index + match[0].length;
+    match = regex.exec(text);
+  }
+
+  output += text.slice(last_index);
+  return output;
+}
+
+async function rewrite_css_urls({
+  css_text,
+  base_url,
+  css_relative_path,
+  response_cache,
+  request_context,
+  output_dir,
+  resource_cache,
+  resource_registry,
+  timeout_ms,
+  logger,
+}) {
+  const import_regex =
+    /@import\s+(?:url\(\s*)?(?:'|")?([^'")\s]+)(?:'|")?\s*\)?/gi;
+  const url_regex = /url\(\s*(['"]?)([^'")]+)\1\s*\)/gi;
+
+  let updated_text = await replace_async(css_text, import_regex, async (
+    full_match,
+    import_url,
+  ) => {
+    if (!import_url || should_skip_url(import_url)) return full_match;
+    const resolved_url = resolve_url(import_url, base_url);
+    if (!resolved_url) return full_match;
+    if (is_blob_url(resolved_url)) {
+      logger.warn(`skip blob url ${resolved_url}`);
+      return full_match;
+    }
+    const localized_path = await localize_css_resource({
+      css_url: resolved_url,
+      base_url,
+      response_cache,
+      request_context,
+      output_dir,
+      resource_cache,
+      resource_registry,
+      timeout_ms,
+      logger,
+    });
+    if (!localized_path) return full_match;
+    const relative_path = to_relative_posix_path(
+      css_relative_path,
+      localized_path,
+    );
+    return full_match.replace(import_url, relative_path);
+  });
+
+  updated_text = await replace_async(updated_text, url_regex, async (
+    full_match,
+    quote,
+    url_value,
+  ) => {
+    const trimmed = String(url_value || "").trim();
+    if (!trimmed || trimmed.startsWith("#")) return full_match;
+    if (should_skip_url(trimmed)) return full_match;
+    const resolved_url = resolve_url(trimmed, base_url);
+    if (!resolved_url) return full_match;
+    if (is_blob_url(resolved_url)) {
+      logger.warn(`skip blob url ${resolved_url}`);
+      return full_match;
+    }
+    const local_relative_path = await ensure_resource({
+      resource_url: resolved_url,
+      response_cache,
+      request_context,
+      output_dir,
+      resource_cache,
+      resource_registry,
+      timeout_ms,
+      logger,
+    });
+    if (!local_relative_path) return full_match;
+    const relative_path = to_relative_posix_path(
+      css_relative_path,
+      local_relative_path,
+    );
+    return `url(${quote}${relative_path}${quote})`;
+  });
+
+  return updated_text;
+}
+
+async function localize_css_resource({
+  css_url,
+  base_url,
+  response_cache,
+  request_context,
+  output_dir,
+  resource_cache,
+  resource_registry,
+  timeout_ms,
+  logger,
+}) {
+  if (!css_url || should_skip_url(css_url)) return "";
+  if (!is_http_url(css_url)) return "";
+
+  const normalized_url = normalize_resource_url(css_url);
+  const cached_entry = resource_cache.get(normalized_url);
+  if (cached_entry && cached_entry.processed_as_css) {
+    return cached_entry.local_relative_path;
+  }
+
+  const download = await fetch_resource_body({
+    resource_url: css_url,
+    response_cache,
+    request_context,
+    timeout_ms,
+    logger,
+  });
+
+  const final_url = download.final_url || css_url;
+  const normalized_final_url = normalize_resource_url(final_url);
+  const content_type = download.content_type || "text/css";
+  const local_relative_path = build_asset_relative_path(final_url, content_type);
+  const css_base_url = resolve_url(final_url, base_url) || final_url;
+
+  const css_text = download.body.toString("utf8");
+  const rewritten_css = await rewrite_css_urls({
+    css_text,
+    base_url: css_base_url,
+    css_relative_path: local_relative_path,
+    response_cache,
+    request_context,
+    output_dir,
+    resource_cache,
+    resource_registry,
+    timeout_ms,
+    logger,
+  });
+
+  const output_path = path.join(output_dir, local_relative_path);
+  await ensure_dir(path.dirname(output_path), logger);
+  logger.io(`write ${output_path}`);
+  await fs.writeFile(output_path, rewritten_css, "utf8");
+
+  register_resource_entry({
+    resource_cache,
+    resource_registry,
+    url_keys: [normalized_url, normalized_final_url],
+    local_relative_path,
+    content_type,
+    size: Buffer.byteLength(rewritten_css, "utf8"),
+    processed_as_css: true,
+  });
+
+  return local_relative_path;
+}
+
+function resolve_url(raw_value, base_url) {
+  if (!raw_value) return "";
+  try {
+    return new URL(raw_value, base_url).toString();
+  } catch (error) {
+    return "";
+  }
+}
+
+async function localize_srcset({
+  srcset_value,
+  base_url,
+  response_cache,
+  request_context,
+  output_dir,
+  resource_cache,
+  resource_registry,
+  timeout_ms,
+  logger,
+}) {
+  const srcset_text = String(srcset_value || "");
+  if (srcset_text.toLowerCase().includes("data:")) {
+    return srcset_text;
+  }
+  const entries = srcset_text
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((part) => {
+      const [url, ...rest] = part.split(/\s+/);
+      return { url, descriptor: rest.join(" ") };
+    });
+
+  if (!entries.length) return "";
+
+  const updated_entries = [];
+  for (const entry of entries) {
+    const resolved_url = resolve_url(entry.url, base_url);
+    if (!resolved_url || should_skip_url(resolved_url)) {
+      updated_entries.push(entry);
+      continue;
+    }
+    if (is_blob_url(resolved_url)) {
+      logger.warn(`skip blob url ${resolved_url}`);
+      updated_entries.push(entry);
+      continue;
+    }
+    const local_relative_path = await ensure_resource({
+      resource_url: resolved_url,
+      response_cache,
+      request_context,
+      output_dir,
+      resource_cache,
+      resource_registry,
+      timeout_ms,
+      logger,
+    });
+    if (!local_relative_path) {
+      updated_entries.push(entry);
+      continue;
+    }
+    updated_entries.push({
+      url: local_relative_path,
+      descriptor: entry.descriptor,
+    });
+  }
+
+  return updated_entries
+    .map((entry) =>
+      entry.descriptor ? `${entry.url} ${entry.descriptor}` : entry.url,
+    )
+    .join(", ");
+}
+
+async function localize_html({
+  html_text,
+  page_url,
+  response_cache,
+  request_context,
+  output_dir,
+  timeout_ms,
+  logger,
+}) {
+  const dom = new JSDOM(html_text);
+  const document = dom.window.document;
+  const base_element = document.querySelector("base[href]");
+  let base_url = page_url;
+
+  if (base_element) {
+    const base_href = base_element.getAttribute("href");
+    const resolved_base = resolve_url(base_href, page_url);
+    if (resolved_base) {
+      base_url = resolved_base;
+    }
+    base_element.remove();
+  }
+
+  const csp_meta_tags = Array.from(
+    document.querySelectorAll('meta[http-equiv="Content-Security-Policy"]'),
+  );
+  for (const node of csp_meta_tags) {
+    node.remove();
+  }
+
+  const resource_cache = new Map();
+  const resource_registry = new Map();
+
+  const link_nodes = Array.from(document.querySelectorAll("link[href]"));
+  for (const link_node of link_nodes) {
+    const rel_value = String(link_node.getAttribute("rel") || "").toLowerCase();
+    const rel_tokens = rel_value.split(/\s+/).filter(Boolean);
+    const href_value = link_node.getAttribute("href");
+    if (!href_value) continue;
+    const resolved_url = resolve_url(href_value, base_url);
+    if (!resolved_url) continue;
+
+    if (rel_tokens.includes("stylesheet")) {
+      const local_css_path = await localize_css_resource({
+        css_url: resolved_url,
+        base_url,
+        response_cache,
+        request_context,
+        output_dir,
+        resource_cache,
+        resource_registry,
+        timeout_ms,
+        logger,
+      });
+      if (local_css_path) {
+        link_node.setAttribute("href", local_css_path);
+        link_node.removeAttribute("integrity");
+      }
+      continue;
+    }
+
+    if (rel_tokens.some((token) => link_rel_resource_tokens.has(token))) {
+      const local_relative_path = await ensure_resource({
+        resource_url: resolved_url,
+        response_cache,
+        request_context,
+        output_dir,
+        resource_cache,
+        resource_registry,
+        timeout_ms,
+        logger,
+      });
+      if (local_relative_path) {
+        link_node.setAttribute("href", local_relative_path);
+        link_node.removeAttribute("integrity");
+      }
+    }
+  }
+
+  const style_nodes = Array.from(document.querySelectorAll("style"));
+  for (const style_node of style_nodes) {
+    const css_text = style_node.textContent || "";
+    if (!css_text.includes("url(") && !css_text.includes("@import")) continue;
+    const rewritten_css = await rewrite_css_urls({
+      css_text,
+      base_url,
+      css_relative_path: "index.html",
+      response_cache,
+      request_context,
+      output_dir,
+      resource_cache,
+      resource_registry,
+      timeout_ms,
+      logger,
+    });
+    style_node.textContent = rewritten_css;
+  }
+
+  const styled_nodes = Array.from(document.querySelectorAll("[style]"));
+  for (const styled_node of styled_nodes) {
+    const style_value = styled_node.getAttribute("style");
+    if (!style_value) continue;
+    if (!style_value.includes("url(") && !style_value.includes("@import"))
+      continue;
+    const rewritten_css = await rewrite_css_urls({
+      css_text: style_value,
+      base_url,
+      css_relative_path: "index.html",
+      response_cache,
+      request_context,
+      output_dir,
+      resource_cache,
+      resource_registry,
+      timeout_ms,
+      logger,
+    });
+    styled_node.setAttribute("style", rewritten_css);
+  }
+
+  const attribute_targets = [
+    { selector: "img[src]", attribute: "src" },
+    { selector: "img[data-src]", attribute: "data-src" },
+    { selector: "img[srcset]", attribute: "srcset", is_srcset: true },
+    { selector: "img[data-srcset]", attribute: "data-srcset", is_srcset: true },
+    { selector: "source[src]", attribute: "src" },
+    { selector: "source[srcset]", attribute: "srcset", is_srcset: true },
+    { selector: "video[src]", attribute: "src" },
+    { selector: "video[poster]", attribute: "poster" },
+    { selector: "audio[src]", attribute: "src" },
+    { selector: "script[src]", attribute: "src" },
+    { selector: "track[src]", attribute: "src" },
+    { selector: "embed[src]", attribute: "src" },
+    { selector: "object[data]", attribute: "data" },
+    { selector: "iframe[src]", attribute: "src" },
+  ];
+
+  for (const target of attribute_targets) {
+    const nodes = Array.from(document.querySelectorAll(target.selector));
+    for (const node of nodes) {
+      const raw_value = node.getAttribute(target.attribute);
+      if (!raw_value) continue;
+      if (target.is_srcset) {
+        const updated_srcset = await localize_srcset({
+          srcset_value: raw_value,
+          base_url,
+          response_cache,
+          request_context,
+          output_dir,
+          resource_cache,
+          resource_registry,
+          timeout_ms,
+          logger,
+        });
+        if (updated_srcset) {
+          node.setAttribute(target.attribute, updated_srcset);
+        }
+        continue;
+      }
+
+      if (should_skip_url(raw_value)) continue;
+      const resolved_url = resolve_url(raw_value, base_url);
+      if (!resolved_url) continue;
+      if (is_blob_url(resolved_url)) {
+        logger.warn(`skip blob url ${resolved_url}`);
+        continue;
+      }
+      const local_relative_path = await ensure_resource({
+        resource_url: resolved_url,
+        response_cache,
+        request_context,
+        output_dir,
+        resource_cache,
+        resource_registry,
+        timeout_ms,
+        logger,
+      });
+      if (local_relative_path) {
+        node.setAttribute(target.attribute, local_relative_path);
+        if (target.attribute === "src") {
+          node.removeAttribute("integrity");
+        }
+      }
+    }
+  }
+
+  return {
+    html_text: dom.serialize(),
+    resource_entries: Array.from(resource_registry.values()),
+  };
+}
+
+async function auto_scroll_page(page, options, logger) {
+  const max_scrolls = Math.max(0, Number(options.max_scrolls) || 0);
+  const scroll_delay = Math.max(0, Number(options.scroll_delay) || 0);
+  if (max_scrolls <= 0) return;
+
+  logger.step("auto-scroll to load lazy content");
+  let last_height = await page.evaluate(() => document.body.scrollHeight);
+
+  for (let i = 0; i < max_scrolls; i += 1) {
+    logger.debug(`scroll ${i + 1}/${max_scrolls}`);
+    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+    if (scroll_delay > 0) {
+      await page.waitForTimeout(scroll_delay);
+    }
+    const next_height = await page.evaluate(() => document.body.scrollHeight);
+    if (next_height === last_height) break;
+    last_height = next_height;
+  }
+}
+
+async function save_page({
+  target_url,
+  output_root,
+  refresh,
+  dry_run,
+  browser,
+  options,
+  logger,
+}) {
+  const output_dir_name = build_output_dir_name(target_url);
+  const output_dir = path.join(output_root, output_dir_name);
+  const manifest_path = path.join(output_dir, "page_save.json");
+
+  if (!refresh && (await path_exists(manifest_path))) {
+    logger.info(`skip existing ${palette.path(output_dir_name)}`);
+    return { skipped: true };
+  }
+
+  if (dry_run) {
+    logger.info(`dry-run: save ${target_url} -> ${output_dir}`);
+    return { skipped: false, dry_run: true };
+  }
+
+  if (refresh && (await path_exists(output_dir))) {
+    logger.step(`refresh output ${output_dir_name}`);
+    logger.io(`remove ${output_dir}`);
+    await fs.rm(output_dir, { recursive: true, force: true });
+  }
+
+  await ensure_dir(output_dir, logger);
+
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  const { response_cache, handle_response } = create_response_cache(logger);
+
+  page.on("response", handle_response);
+  page.setDefaultTimeout(options.timeout_ms);
+
+  try {
+    logger.step(`navigate ${target_url}`);
+    logger.io(`goto ${target_url}`);
+    await page.goto(target_url, {
+      waitUntil: "domcontentloaded",
+      timeout: options.timeout_ms,
+    });
+
+    try {
+      await page.waitForLoadState("networkidle", {
+        timeout: options.network_idle_timeout_ms,
+      });
+    } catch (error) {
+      logger.debug(
+        `networkidle timed out after ${options.network_idle_timeout_ms}ms`,
+      );
+    }
+
+    if (options.scroll) {
+      await auto_scroll_page(page, options, logger);
+    }
+
+    if (options.wait_after_load_ms > 0) {
+      logger.step("wait after load");
+      await page.waitForTimeout(options.wait_after_load_ms);
+    }
+
+    logger.step("capture html");
+    const html_text = await page.content();
+    const final_url = page.url() || target_url;
+
+    logger.step("localize assets");
+    const localized = await localize_html({
+      html_text,
+      page_url: final_url,
+      response_cache,
+      request_context: context.request,
+      output_dir,
+      timeout_ms: options.timeout_ms,
+      logger,
+    });
+
+    const html_path = path.join(output_dir, "index.html");
+    logger.io(`write ${html_path}`);
+    await fs.writeFile(html_path, localized.html_text, "utf8");
+
+    const resource_entries = localized.resource_entries
+      .slice()
+      .sort((left, right) =>
+        left.local_relative_path.localeCompare(right.local_relative_path),
+      );
+
+    const manifest = {
+      source_url: target_url,
+      final_url,
+      saved_at: new Date().toISOString(),
+      output_dir: output_dir_name,
+      html_file: "index.html",
+      asset_count: resource_entries.length,
+      assets: resource_entries.map((entry) => ({
+        local_relative_path: entry.local_relative_path,
+        content_type: entry.content_type,
+        size: entry.size,
+      })),
+    };
+
+    logger.io(`write ${manifest_path}`);
+    await fs.writeFile(manifest_path, JSON.stringify(manifest, null, 2), "utf8");
+
+    logger.success(
+      `saved ${palette.path(output_dir_name)} (assets: ${manifest.asset_count})`,
+    );
+    return { skipped: false, output_dir, asset_count: manifest.asset_count };
+  } finally {
+    try {
+      await context.close();
+    } catch (error) {
+      logger.debug(`context close failed: ${error.message}`);
+    }
+  }
+}
+
+async function run() {
+  const raw_args = process.argv.slice(2);
+  const script_name = path.basename(process.argv[1]);
+
+  if (raw_args.includes("-v") || raw_args.includes("--version")) {
+    console.log(package_json.version);
+    return;
+  }
+
+  if (raw_args.includes("-h") || raw_args.includes("--help")) {
+    console.log(build_help_text(script_name));
+    return;
+  }
+
+  const argv = parse_cli_arguments(raw_args);
+  const logger = create_logger({
+    command_name: "page_save",
+    quiet_mode: argv.quiet,
+    debug_mode: argv.debug,
+  });
+
+  const output_root = path.resolve(expand_user_path(argv["output-dir"]));
+  const timeout_ms = Math.max(
+    1000,
+    Number(argv.timeout) || default_timeout_ms,
+  );
+  const options = {
+    timeout_ms,
+    wait_after_load_ms: Math.max(
+      0,
+      Number(argv["wait-after-load"]) || default_wait_after_load_ms,
+    ),
+    scroll: Boolean(argv.scroll),
+    max_scrolls: Math.max(0, Number(argv["max-scrolls"]) || 0),
+    scroll_delay: Math.max(0, Number(argv["scroll-delay"]) || 0),
+    browser_name: argv.browser || default_browser_name,
+    headful: Boolean(argv.headful),
+    network_idle_timeout_ms: Math.max(
+      1000,
+      Math.min(timeout_ms, default_network_idle_timeout_ms),
+    ),
+  };
+
+  logger.step("resolve input urls");
+  const urls = await collect_input_urls(
+    argv.url || [],
+    {
+      output_root,
+      url_files: argv["url-file"],
+    },
+    logger,
+  );
+
+  if (!urls.length) {
+    logger.error("no urls provided");
+    process.exitCode = 1;
+    return;
+  }
+
+  logger.info(
+    `output root ${palette.path(path.relative(process.cwd(), output_root) || output_root)}`,
+  );
+
+  if (!argv["dry-run"]) {
+    await ensure_dir(output_root, logger);
+  }
+
+  let browser = null;
+  let had_error = false;
+
+  if (!argv["dry-run"]) {
+    logger.step("launch browser");
+    const launcher = playwright[options.browser_name];
+    if (!launcher) {
+      logger.error(`unsupported browser ${options.browser_name}`);
+      process.exitCode = 1;
+      return;
+    }
+    try {
+      browser = await launcher.launch({ headless: !options.headful });
+    } catch (error) {
+      logger.error("failed to launch browser", error);
+      logger.warn("install browsers with: npx playwright install");
+      process.exitCode = 1;
+      return;
+    }
+  }
+
+  for (const target_url of urls) {
+    try {
+      logger.info(`save ${target_url}`);
+      await save_page({
+        target_url,
+        output_root,
+        refresh: Boolean(argv.refresh),
+        dry_run: Boolean(argv["dry-run"]),
+        browser,
+        options,
+        logger,
+      });
+    } catch (error) {
+      had_error = true;
+      logger.error(`failed ${target_url}: ${error.message}`, error);
+    }
+  }
+
+  if (browser) {
+    logger.step("close browser");
+    try {
+      await browser.close();
+    } catch (error) {
+      logger.debug(`browser close failed: ${error.message}`);
+    }
+  }
+
+  if (had_error) {
+    process.exitCode = 1;
+  }
+}
+
+run().catch((error) => {
+  console.error(chalk.red(`page_save failed: ${error.message}`));
+  process.exit(1);
+});
