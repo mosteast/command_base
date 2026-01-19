@@ -1,0 +1,538 @@
+#!/usr/bin/env node
+
+"use strict";
+
+const fs = require("fs/promises");
+const path = require("path");
+const { globSync, hasMagic } = require("glob");
+const chalk = require("chalk");
+const yargs = require("yargs/yargs");
+
+const package_json = require("../package.json");
+
+const DEFAULT_SOURCE_PATH =
+  "/Users/hailang/code_base/tool/DouyinLiveRecorder/downloads/抖音直播";
+const DEFAULT_DESTINATION_PATH =
+  "/Users/hailang/Library/Mobile Documents/com~apple~CloudDocs/main/saved/video/live";
+
+const palette = {
+  headline: chalk.cyanBright.bold,
+  info: chalk.cyanBright,
+  success: chalk.greenBright,
+  warn: chalk.yellowBright,
+  error: chalk.redBright,
+  debug: chalk.gray,
+  path: chalk.magentaBright,
+};
+
+function show_help() {
+  const cmd = path.basename(process.argv[1] || "douyin_live_merge");
+  console.log(`${palette.headline("Usage")}`);
+  console.log(`  ${cmd} [options] [source_glob ...]`);
+  console.log("");
+  console.log(`${palette.headline("Description")}`);
+  console.log(
+    "  Merge files from source paths into a destination directory recursively.",
+  );
+  console.log(
+    "  By default, this merges Douyin Live Recorder downloads into the iCloud live folder.",
+  );
+  console.log("");
+  console.log(`${palette.headline("Options")}`);
+  console.log(
+    `  -s, --source PATH        Source directory or glob (repeatable; default: ${DEFAULT_SOURCE_PATH})`,
+  );
+  console.log(
+    `  -t, --destination PATH   Destination directory (default: ${DEFAULT_DESTINATION_PATH})`,
+  );
+  console.log("      --refresh            Overwrite existing files (default: false)");
+  console.log("  -d, --dry-run            Show planned actions only (default: false)");
+  console.log("      --quiet              Only warnings and errors (default: false)");
+  console.log("      --debug              Print debug logs (default: false)");
+  console.log("  -h, --help               Show this help message");
+  console.log("  -v, --version            Show version number only");
+  console.log("");
+  console.log(`${palette.headline("Examples")}`);
+  console.log("# Merge the default Douyin Live Recorder folder into iCloud");
+  console.log("  $0");
+  console.log("");
+  console.log("# Merge a specific directory into a target");
+  console.log("  $0 -s \"/path/with space/source\" -t \"/path/target\"");
+  console.log("");
+  console.log("# Merge only mp4 files from the default source");
+  console.log("  $0 \"*.mp4\"");
+}
+
+function create_logger(options) {
+  const { debug, quiet } = options;
+  return {
+    debug: (message) => {
+      if (!debug || quiet) return;
+      console.log(palette.debug(`DEBUG ${message}`));
+    },
+    info: (message) => {
+      if (quiet) return;
+      console.log(palette.info(message));
+    },
+    success: (message) => {
+      if (quiet) return;
+      console.log(palette.success(message));
+    },
+    warn: (message) => {
+      console.warn(palette.warn(message));
+    },
+    error: (message) => {
+      console.error(palette.error(message));
+    },
+    path: (value) => palette.path(value),
+  };
+}
+
+function log_step(logger, label) {
+  logger.debug(`Stage: ${label}`);
+}
+
+function log_io(logger, detail) {
+  logger.debug(`IO: ${detail}`);
+}
+
+function get_glob_base(pattern) {
+  let escaped = false;
+  for (let index = 0; index < pattern.length; index += 1) {
+    const char = pattern[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (char === "*" || char === "?" || char === "[" || char === "{") {
+      const prefix = pattern.slice(0, index);
+      if (!prefix) return ".";
+      return prefix.endsWith(path.sep) ? prefix : path.dirname(prefix);
+    }
+  }
+  return pattern || ".";
+}
+
+function is_sub_path(candidate_path, base_path) {
+  const relative_path = path.relative(base_path, candidate_path);
+  if (!relative_path) return true;
+  return (
+    !relative_path.startsWith("..") && !path.isAbsolute(relative_path)
+  );
+}
+
+function build_relative_path(base_root, target_path) {
+  const relative_path = path.relative(base_root, target_path);
+  if (!relative_path) return "";
+  if (relative_path.startsWith("..") || path.isAbsolute(relative_path)) {
+    return "";
+  }
+  return relative_path;
+}
+
+async function safe_lstat(target_path, logger) {
+  log_io(logger, `lstat ${target_path}`);
+  return fs.lstat(target_path);
+}
+
+async function safe_readdir(target_path, logger) {
+  log_io(logger, `readdir ${target_path}`);
+  return fs.readdir(target_path, { withFileTypes: true });
+}
+
+async function ensure_directory(target_path, logger, dry_run) {
+  if (dry_run) {
+    logger.info(`Dry run: mkdir -p ${logger.path(target_path)}`);
+    return;
+  }
+  log_io(logger, `mkdir ${target_path}`);
+  await fs.mkdir(target_path, { recursive: true });
+}
+
+async function copy_file(source_path, destination_path, options) {
+  const { logger, dry_run, refresh } = options;
+  let destination_exists = false;
+
+  try {
+    await safe_lstat(destination_path, logger);
+    destination_exists = true;
+  } catch (error) {
+    if (error && error.code !== "ENOENT") {
+      throw error;
+    }
+  }
+
+  if (destination_exists && !refresh) {
+    logger.debug(
+      `Skip existing file ${logger.path(destination_path)} (use --refresh to overwrite)`,
+    );
+    return { copied: 0, skipped: 1 };
+  }
+
+  const destination_dir = path.dirname(destination_path);
+  await ensure_directory(destination_dir, logger, dry_run);
+
+  if (dry_run) {
+    logger.info(
+      `Dry run: copy ${logger.path(source_path)} -> ${logger.path(
+        destination_path,
+      )}`,
+    );
+    return { copied: 0, skipped: 0 };
+  }
+
+  log_io(
+    logger,
+    `copy ${source_path} -> ${destination_path}`,
+  );
+  await fs.copyFile(source_path, destination_path);
+  return { copied: 1, skipped: 0 };
+}
+
+async function merge_directory(options) {
+  const {
+    source_root,
+    base_root,
+    destination_root,
+    refresh,
+    dry_run,
+    logger,
+  } = options;
+  const pending_dirs = [source_root];
+  const destination_inside_source = is_sub_path(
+    destination_root,
+    source_root,
+  );
+  let copied_count = 0;
+  let skipped_count = 0;
+
+  while (pending_dirs.length > 0) {
+    const current_dir = pending_dirs.pop();
+    if (destination_inside_source && is_sub_path(current_dir, destination_root)) {
+      logger.debug(
+        `Skip output directory ${logger.path(current_dir)}`,
+      );
+      continue;
+    }
+
+    const entries = await safe_readdir(current_dir, logger);
+    for (const entry of entries) {
+      const entry_path = path.join(current_dir, entry.name);
+      if (
+        destination_inside_source &&
+        is_sub_path(entry_path, destination_root)
+      ) {
+        logger.debug(
+          `Skip output path ${logger.path(entry_path)}`,
+        );
+        continue;
+      }
+
+      if (entry.isDirectory()) {
+        pending_dirs.push(entry_path);
+        continue;
+      }
+
+      if (entry.isSymbolicLink()) {
+        logger.warn(
+          `Skip symlink ${logger.path(entry_path)}`,
+        );
+        continue;
+      }
+
+      if (!entry.isFile()) {
+        logger.warn(
+          `Skip unsupported entry ${logger.path(entry_path)}`,
+        );
+        continue;
+      }
+
+      const relative_path = build_relative_path(base_root, entry_path);
+      if (!relative_path) {
+        logger.warn(
+          `Skip path outside base ${logger.path(entry_path)}`,
+        );
+        continue;
+      }
+
+      const destination_path = path.join(destination_root, relative_path);
+      if (path.resolve(destination_path) === path.resolve(entry_path)) {
+        logger.warn(
+          `Skip output file ${logger.path(entry_path)}`,
+        );
+        continue;
+      }
+
+      const result = await copy_file(entry_path, destination_path, {
+        logger,
+        refresh,
+        dry_run,
+      });
+      copied_count += result.copied;
+      skipped_count += result.skipped;
+    }
+  }
+
+  return { copied_count, skipped_count };
+}
+
+async function merge_entry(options) {
+  const {
+    source_path,
+    base_root,
+    destination_root,
+    refresh,
+    dry_run,
+    logger,
+    from_glob,
+  } = options;
+
+  log_step(logger, `Resolve ${logger.path(source_path)}`);
+  let source_stats = null;
+  try {
+    source_stats = await safe_lstat(source_path, logger);
+  } catch (error) {
+    if (error && error.code === "ENOENT") {
+      logger.warn(`Missing source ${logger.path(source_path)}`);
+      return { copied_count: 0, skipped_count: 0 };
+    }
+    throw error;
+  }
+
+  if (source_stats.isDirectory()) {
+    const resolved_base_root =
+      from_glob && base_root ? base_root : source_path;
+    return merge_directory({
+      source_root: source_path,
+      base_root: resolved_base_root,
+      destination_root,
+      refresh,
+      dry_run,
+      logger,
+    });
+  }
+
+  if (!source_stats.isFile()) {
+    logger.warn(`Skip unsupported source ${logger.path(source_path)}`);
+    return { copied_count: 0, skipped_count: 0 };
+  }
+
+  const resolved_base_root =
+    from_glob && base_root ? base_root : path.dirname(source_path);
+  const relative_path = build_relative_path(resolved_base_root, source_path);
+  if (!relative_path) {
+    logger.warn(
+      `Skip path outside base ${logger.path(source_path)}`,
+    );
+    return { copied_count: 0, skipped_count: 0 };
+  }
+
+  const destination_path = path.join(destination_root, relative_path);
+  if (path.resolve(destination_path) === path.resolve(source_path)) {
+    logger.warn(`Skip output file ${logger.path(source_path)}`);
+    return { copied_count: 0, skipped_count: 0 };
+  }
+
+  const result = await copy_file(source_path, destination_path, {
+    logger,
+    refresh,
+    dry_run,
+  });
+  return { copied_count: result.copied, skipped_count: result.skipped };
+}
+
+async function expand_source_patterns(patterns, logger) {
+  log_step(logger, "Expand source patterns");
+  const unique_entries = new Map();
+  const missing_patterns = [];
+
+  for (const raw_pattern of patterns) {
+    const pattern = `${raw_pattern}`.trim();
+    if (!pattern) continue;
+    if (hasMagic(pattern)) {
+      const base_root = path.resolve(get_glob_base(pattern));
+      log_io(logger, `glob ${pattern}`);
+      const matches = globSync(pattern, {
+        cwd: process.cwd(),
+        absolute: true,
+        dot: true,
+        windowsPathsNoEscape: true,
+        mark: false,
+      });
+      if (matches.length === 0) {
+        missing_patterns.push(pattern);
+        continue;
+      }
+      for (const match_path of matches) {
+        const resolved_path = path.resolve(match_path);
+        const key = `${resolved_path}::${base_root}`;
+        if (unique_entries.has(key)) continue;
+        unique_entries.set(key, {
+          source_path: resolved_path,
+          base_root,
+          from_glob: true,
+        });
+      }
+      continue;
+    }
+
+    const resolved_path = path.resolve(pattern);
+    try {
+      await safe_lstat(resolved_path, logger);
+      const key = `${resolved_path}::${resolved_path}`;
+      if (!unique_entries.has(key)) {
+        unique_entries.set(key, {
+          source_path: resolved_path,
+          base_root: resolved_path,
+          from_glob: false,
+        });
+      }
+    } catch (error) {
+      if (error && error.code === "ENOENT") {
+        missing_patterns.push(pattern);
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  for (const missing of missing_patterns) {
+    logger.warn(`No matches for ${logger.path(missing)}`);
+  }
+
+  return Array.from(unique_entries.values());
+}
+
+async function validate_destination(destination_root, logger) {
+  log_step(logger, "Validate destination");
+  try {
+    const destination_stats = await safe_lstat(destination_root, logger);
+    if (!destination_stats.isDirectory()) {
+      throw new Error(
+        `Destination is not a directory: ${destination_root}`,
+      );
+    }
+  } catch (error) {
+    if (error && error.code === "ENOENT") {
+      logger.info(
+        `Destination will be created: ${logger.path(destination_root)}`,
+      );
+      return;
+    }
+    throw error;
+  }
+}
+
+async function run() {
+  const version_args = process.argv.slice(2);
+  if (version_args.includes("-v") || version_args.includes("--version")) {
+    console.log(package_json.version);
+    return;
+  }
+
+  const parser = yargs(process.argv.slice(2))
+    .parserConfiguration({
+      "camel-case-expansion": false,
+      "duplicate-arguments-array": true,
+      "strip-aliased": true,
+    })
+    .help(false)
+    .version(false)
+    .alias("help", "h")
+    .alias("version", "v")
+    .alias("source", "s")
+    .alias("destination", "t")
+    .alias("dry-run", "d")
+    .option("source", { type: "string", array: true })
+    .option("destination", { type: "string" })
+    .option("refresh", { type: "boolean", default: false })
+    .option("dry-run", { type: "boolean", default: false })
+    .option("quiet", { type: "boolean", default: false })
+    .option("debug", { type: "boolean", default: false })
+    .option("help", { type: "boolean", default: false })
+    .wrap(null);
+
+  const argv = parser.parse();
+
+  if (argv.help) {
+    show_help();
+    return;
+  }
+
+  const dry_run = Boolean(argv["dry-run"]);
+  const refresh = Boolean(argv.refresh);
+  const quiet = Boolean(argv.quiet);
+  const debug = Boolean(argv.debug);
+  const logger = create_logger({ debug, quiet });
+  logger.debug(
+    `Args: ${JSON.stringify({
+      raw: process.argv.slice(2),
+      source: argv.source,
+      destination: argv.destination,
+      positional: argv._,
+    })}`,
+  );
+
+  const source_inputs = []
+    .concat(argv.source || [])
+    .concat(argv._ || [])
+    .filter((entry) => entry !== undefined && entry !== null);
+  const source_patterns =
+    source_inputs.length > 0 ? source_inputs : [DEFAULT_SOURCE_PATH];
+
+  const destination_root = path.resolve(
+    argv.destination || DEFAULT_DESTINATION_PATH,
+  );
+
+  logger.info(palette.headline("Douyin Live Merge"));
+  logger.info(
+    `Destination: ${logger.path(destination_root)}`,
+  );
+  if (dry_run) {
+    logger.warn("Dry run enabled; no files will be copied.");
+  }
+  if (refresh) {
+    logger.warn("Refresh enabled; existing files will be overwritten.");
+  }
+
+  await validate_destination(destination_root, logger);
+  const source_entries = await expand_source_patterns(source_patterns, logger);
+
+  if (source_entries.length === 0) {
+    logger.error("No valid source paths were found.");
+    process.exitCode = 1;
+    return;
+  }
+
+  let total_copied = 0;
+  let total_skipped = 0;
+
+  log_step(logger, "Merge sources");
+  for (const entry of source_entries) {
+    logger.info(`Source: ${logger.path(entry.source_path)}`);
+    const result = await merge_entry({
+      source_path: entry.source_path,
+      base_root: entry.base_root,
+      destination_root,
+      refresh,
+      dry_run,
+      logger,
+      from_glob: entry.from_glob,
+    });
+    total_copied += result.copied_count;
+    total_skipped += result.skipped_count;
+  }
+
+  logger.success(
+    `Done. Copied ${total_copied} file(s), skipped ${total_skipped} file(s).`,
+  );
+}
+
+run().catch((error) => {
+  console.error(palette.error(`Error: ${error.message}`));
+  process.exit(1);
+});
