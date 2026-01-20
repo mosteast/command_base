@@ -40,7 +40,6 @@ alias rm='rmtrash'
 alias i=idea
 alias c='cursor'
 
-
 alias f='
 export no_proxy="localhost,127.0.0.1,localaddress,.localdomain.com"
 export http_proxy=http://127.0.0.1:7890
