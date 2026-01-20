@@ -36,7 +36,7 @@ alias list='tree -aFL 1 --dirsfirst'
 # scp -r root@120.27.240.21:/deployment/mosteast_share/.env /Users/kev/Biao\ Dropbox/Kev\ Z/mosteast/production_secret/mosteast_share/dotenv
 # '
 
-alias rm='safe-rm'
+alias rm='rmtrash'
 alias i=idea
 alias c='cursor'
 
