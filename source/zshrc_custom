@@ -4,11 +4,6 @@
 # You can source this file in ~/.zshrc:
 # source '/path/to/this/file/zshrc_custom.sh'
 
-export no_proxy="localhost,127.0.0.1,localaddress,.localdomain.com"
-export http_proxy=http://127.0.0.1:7890
-export https_proxy=http://127.0.0.1:7890
-export all_proxy=socks5://127.0.0.1:7890
-
 export PATH="$HOME/dev_lib/flutter/bin:$HOME/bin:$HOME/code_base/command_base/bin:$HOME/code_base/mosteast/giao/bin:/usr/local/mysql/bin:/opt/homebrew/bin:$PATH"
 export ZPLUG_HOME=/opt/homebrew/opt/zplug
 
@@ -51,7 +46,13 @@ alias fx='
 unset no_proxy
 unset http_proxy
 unset https_proxy
+unset all_proxy
 '
+
+export no_proxy="localhost,127.0.0.1,localaddress,.localdomain.com"
+export http_proxy=http://127.0.0.1:7890
+export https_proxy=http://127.0.0.1:7890
+export all_proxy=socks5://127.0.0.1:7890
 
 alias typora="/Applications/Typora.app/Contents/MacOS/Typora"
 
