@@ -4,7 +4,7 @@ import os from "os";
 import path from "path";
 import { describe, it, expect } from "vitest";
 
-import leaf_extract_module from "../tree/leaf_extract";
+import leaf_extract_module from "../lib/tree/leaf_extract";
 
 const { extract_leaf_levels } = leaf_extract_module;
 const json_cli_entry = path.resolve(__dirname, "../bin/json_tree_leaf_extract");
@@ -104,6 +104,29 @@ describe("tree leaf extraction", () => {
   it("keeps primitive leaf values", () => {
     const { output_data } = extract_leaf_levels(["a", "b"], { level: 1 });
     expect(output_data).toEqual(["a", "b"]);
+  });
+
+  it("auto-detects r_children trees", () => {
+    const input_tree_with_r_children = [
+      {
+        name: "Logical Expression Ability",
+        id: 2618,
+        r_children: [
+          {
+            name: "Logical Sentence Structures",
+            id: 2777,
+          },
+        ],
+      },
+    ];
+
+    const { output_data } = extract_leaf_levels(input_tree_with_r_children, {
+      level: 1,
+    });
+
+    expect(output_data).toEqual([
+      { name: "Logical Sentence Structures", id: 2777 },
+    ]);
   });
 });
 

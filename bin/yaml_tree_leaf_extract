@@ -2,7 +2,7 @@
 
 const YAML = require("yaml");
 
-const { run_leaf_extract_cli } = require("../tree/leaf_extract_cli");
+const { run_leaf_extract_cli } = require("../lib/tree/leaf_extract_cli");
 
 function parse_yaml_text(text) {
   return YAML.parse(text);

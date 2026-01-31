@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-const { run_leaf_extract_cli } = require("../tree/leaf_extract_cli");
+const { run_leaf_extract_cli } = require("../lib/tree/leaf_extract_cli");
 
 function parse_json_text(text) {
   return JSON.parse(text);
