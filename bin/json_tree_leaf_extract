@@ -1,0 +1,22 @@
+#!/usr/bin/env node
+
+const { run_leaf_extract_cli } = require("../tree/leaf_extract_cli");
+
+function parse_json_text(text) {
+  return JSON.parse(text);
+}
+
+function serialize_json_text(data, { indent }) {
+  const safe_indent = Number.isFinite(indent) && indent >= 0 ? indent : 2;
+  const json_text = JSON.stringify(data ?? null, null, safe_indent);
+  return json_text == null ? "null" : json_text;
+}
+
+run_leaf_extract_cli({
+  script_name: "json_tree_leaf_extract",
+  format_label: "JSON",
+  default_extension: ".json",
+  sample_glob: "data/**/*.json",
+  parse_text: parse_json_text,
+  serialize_text: serialize_json_text,
+});

@@ -1,0 +1,23 @@
+#!/usr/bin/env node
+
+const YAML = require("yaml");
+
+const { run_leaf_extract_cli } = require("../tree/leaf_extract_cli");
+
+function parse_yaml_text(text) {
+  return YAML.parse(text);
+}
+
+function serialize_yaml_text(data, { indent }) {
+  const safe_indent = Number.isFinite(indent) && indent >= 0 ? indent : 2;
+  return YAML.stringify(data ?? null, { indent: safe_indent });
+}
+
+run_leaf_extract_cli({
+  script_name: "yaml_tree_leaf_extract",
+  format_label: "YAML",
+  default_extension: ".yaml",
+  sample_glob: "data/**/*.yaml",
+  parse_text: parse_yaml_text,
+  serialize_text: serialize_yaml_text,
+});

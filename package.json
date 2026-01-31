@@ -37,6 +37,7 @@
     "minimist": "^1.2.8",
     "playwright": "^1.49.1",
     "shelljs": "^0.8.3",
+    "tree-model": "^1.0.7",
     "turndown": "^7.1.2",
     "vtt-to-text": "^1.0.1",
     "yaml": "^2.8.1",
