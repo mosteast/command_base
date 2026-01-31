@@ -552,6 +552,8 @@ const VIDEO_EXTENSIONS = new Set([
 ]);
 const DEFAULT_WHISPER_MODEL = process.env.WHISPER_DEFAULT_MODEL || "turbo";
 const DEFAULT_TRANSCRIPT_FORMATS = ["srt", "vtt"];
+const DEFAULT_SOURCE_TYPE = "raw";
+const SOURCE_TYPE_VALUES = new Set(["raw", "compressed"]);
 const JOB_MODE_STEP = "step";
 const JOB_MODE_FILE = "file";
 const DEFAULT_JOB_MODE = JOB_MODE_STEP;
@@ -618,14 +620,8 @@ function showHelp() {
       "      --audio-source PATH        Use existing audio file (skip extraction)",
     ),
   );
-  print_help_line(
-    palette.dim("      --skip-audio               Skip audio extraction step"),
-  );
   print_help_line("");
   print_help_line(palette.headline("Transcription options:"));
-  print_help_line(
-    palette.dim("      --skip-transcript          Skip transcription"),
-  );
   print_help_line(
     palette.dim("      --transcript-dir DIR       Directory for transcripts"),
   );
@@ -670,9 +666,6 @@ function showHelp() {
   );
   print_help_line("");
   print_help_line(palette.headline("Compression options:"));
-  print_help_line(
-    palette.dim("      --skip-compress            Skip video compression"),
-  );
   print_help_line(
     palette.dim("      --compress-output PATH     Output video path"),
   );
@@ -721,6 +714,24 @@ function showHelp() {
   print_help_line("");
   print_help_line(palette.headline("Shared options:"));
   print_help_line(
+    palette.dim(
+      "      --skip STAGE[...]          Skip stages (audio, transcript, compression). Repeat or comma-separated",
+    ),
+  );
+  print_help_line(
+    palette.dim(
+      "      --only STAGE[...]          Run only specific stages (audio, transcript, compression). Repeat or comma-separated",
+    ),
+  );
+  print_help_line(
+    palette.dim("      --skip and --only are mutually exclusive"),
+  );
+  print_help_line(
+    palette.dim(
+      "      --source-type TYPE         Source type: raw (default) or compressed (include .compressed inputs)",
+    ),
+  );
+  print_help_line(
     palette.dim("      --ffmpeg PATH              Path to ffmpeg"),
   );
   print_help_line(
@@ -743,18 +754,26 @@ function showHelp() {
     palette.dim("  -h, --help                     Show this help message"),
   );
   print_help_line("");
+  print_help_line(palette.headline("Notes:"));
+  print_help_line(
+    palette.dim(
+      "  Files with .compressed in the name are skipped for audio extraction and compression unless --source-type compressed is set.",
+    ),
+  );
+  print_help_line("");
   print_help_line(palette.headline("Examples:"));
   print_help_line(palette.stage(`  ${cmd} --force ~/videos/raw.mp4`));
-  print_help_line(palette.stage(`  ${cmd} --skip-transcript ~/videos/project`));
+  print_help_line(palette.stage(`  ${cmd} --skip transcript ~/videos/project`));
+  print_help_line(palette.stage(`  ${cmd} --only transcript ~/videos/raw.mp4`));
   print_help_line(
     palette.stage(
       `  ${cmd} --compress-output ~/videos/raw.compressed.medium.mp4 ~/videos/raw.mp4`,
     ),
   );
-  print_help_line(palette.stage(`  ${cmd} --skip-compress ~/videos/*.mp4`));
+  print_help_line(palette.stage(`  ${cmd} --skip compression ~/videos/*.mp4`));
   print_help_line(
     palette.stage(
-      `  ${cmd} --job-mode file --skip-transcript ~/videos/**/*.mp4`,
+      `  ${cmd} --job-mode file --skip transcript ~/videos/**/*.mp4`,
     ),
   );
   print_help_line(
@@ -781,6 +800,22 @@ function parseNumber(value, label) {
     throw new Error(`Invalid value for ${label}: ${value}`);
   }
   return num;
+}
+
+function normalize_source_type(raw_value) {
+  if (raw_value === undefined || raw_value === null || raw_value === "") {
+    return DEFAULT_SOURCE_TYPE;
+  }
+  const selected = Array.isArray(raw_value)
+    ? raw_value[raw_value.length - 1]
+    : raw_value;
+  const normalized = String(selected).trim().toLowerCase();
+  if (!SOURCE_TYPE_VALUES.has(normalized)) {
+    throw new Error(
+      `Error: --source-type must be one of ${Array.from(SOURCE_TYPE_VALUES).join(", ")}.`,
+    );
+  }
+  return normalized;
 }
 
 function parseRepeatable(value) {
@@ -978,10 +1013,19 @@ function formatDisplayPath(filePath) {
   return absolutePath;
 }
 
+function is_compressed_video_path(file_path) {
+  if (!file_path) return false;
+  const base_name = path.basename(file_path);
+  const ext = path.extname(base_name);
+  const stem = path.basename(base_name, ext);
+  return stem.toLowerCase().includes(".compressed");
+}
+
 function describeSkipReason(reason) {
   if (!reason) return "";
   if (reason === "whisper-not-found") return "whisper CLI missing";
   if (reason === "exists") return "already exists";
+  if (reason === "compressed-input") return "compressed input";
   return reason;
 }
 
@@ -992,6 +1036,274 @@ const STAGE_LABELS = {
   transcript: "Transcription",
   compression: "Compression",
 };
+const STAGE_ALIASES = {
+  audio: "audio",
+  transcript: "transcript",
+  transcription: "transcript",
+  transcribe: "transcript",
+  compress: "compression",
+  compression: "compression",
+};
+
+function split_stage_token(token) {
+  if (token === undefined || token === null) return [];
+  return `${token}`
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+function parse_stage_token(token) {
+  const parts = split_stage_token(token);
+  const stages = [];
+  const invalid_parts = [];
+
+  parts.forEach((part) => {
+    const normalized = part.toLowerCase();
+    const mapped = STAGE_ALIASES[normalized];
+    if (!mapped) {
+      invalid_parts.push(part);
+      return;
+    }
+    stages.push(mapped);
+  });
+
+  return { stages, invalid_parts };
+}
+
+function collect_stage_values(...values) {
+  const flattened = [];
+  const add_entry = (entry) => {
+    if (entry === undefined || entry === null) return;
+    if (Array.isArray(entry)) {
+      entry.forEach(add_entry);
+      return;
+    }
+    const parts = `${entry}`
+      .split(",")
+      .map((part) => part.trim())
+      .filter(Boolean);
+    flattened.push(...parts);
+  };
+
+  values.forEach((value) => {
+    if (value === undefined || value === null) return;
+    if (Array.isArray(value)) {
+      value.forEach(add_entry);
+      return;
+    }
+    add_entry(value);
+  });
+  return flattened;
+}
+
+function parse_stage_flag_arguments(raw_args) {
+  const cleaned_args = [];
+  const skip_values = [];
+  const only_values = [];
+  let skip_used = false;
+  let only_used = false;
+  let index = 0;
+  let stop_parsing = false;
+
+  while (index < raw_args.length) {
+    const token = raw_args[index];
+
+    if (token === "--") {
+      cleaned_args.push(token);
+      stop_parsing = true;
+      index += 1;
+      continue;
+    }
+
+    if (stop_parsing) {
+      cleaned_args.push(token);
+      index += 1;
+      continue;
+    }
+
+    if (token === "--skip" || token === "--only") {
+      const option_label = token === "--skip" ? "skip" : "only";
+      if (option_label === "skip") {
+        skip_used = true;
+      } else {
+        only_used = true;
+      }
+      const target_values = option_label === "skip" ? skip_values : only_values;
+      let consumed_any = false;
+      let next_index = index + 1;
+
+      while (next_index < raw_args.length) {
+        const next_token = raw_args[next_index];
+        if (next_token === "--") break;
+        if (next_token.startsWith("-")) break;
+
+        const parsed = parse_stage_token(next_token);
+        if (parsed.invalid_parts.length) {
+          if (!consumed_any) {
+            const allowed = STAGE_KEYS.join(", ");
+            throw new Error(
+              `Error: --${option_label} must be one or more of: ${allowed}. Invalid: ${parsed.invalid_parts.join(
+                ", ",
+              )}`,
+            );
+          }
+          break;
+        }
+
+        if (!parsed.stages.length) {
+          if (!consumed_any) {
+            throw new Error(
+              `Error: --${option_label} requires at least one stage (${STAGE_KEYS.join(
+                ", ",
+              )}).`,
+            );
+          }
+          break;
+        }
+
+        target_values.push(...parsed.stages);
+        consumed_any = true;
+        next_index += 1;
+      }
+
+      if (!consumed_any) {
+        throw new Error(
+          `Error: --${option_label} requires at least one stage (${STAGE_KEYS.join(
+            ", ",
+          )}).`,
+        );
+      }
+
+      index = next_index;
+      continue;
+    }
+
+    if (token.startsWith("--skip=") || token.startsWith("--only=")) {
+      const option_label = token.startsWith("--skip=") ? "skip" : "only";
+      if (option_label === "skip") {
+        skip_used = true;
+      } else {
+        only_used = true;
+      }
+      const target_values = option_label === "skip" ? skip_values : only_values;
+      const value = token.slice(option_label.length + 3);
+      const parsed = parse_stage_token(value);
+      if (!parsed.stages.length || parsed.invalid_parts.length) {
+        const allowed = STAGE_KEYS.join(", ");
+        const invalid = parsed.invalid_parts.length
+          ? parsed.invalid_parts.join(", ")
+          : value;
+        throw new Error(
+          `Error: --${option_label} must be one or more of: ${allowed}. Invalid: ${invalid}`,
+        );
+      }
+      target_values.push(...parsed.stages);
+      index += 1;
+      continue;
+    }
+
+    cleaned_args.push(token);
+    index += 1;
+  }
+
+  return {
+    cleaned_args,
+    skip_values: Array.from(new Set(skip_values)),
+    only_values: Array.from(new Set(only_values)),
+    skip_used,
+    only_used,
+  };
+}
+
+function normalize_stage_values(raw_values, option_label) {
+  const normalized = [];
+  const invalid = [];
+  raw_values.forEach((raw_value) => {
+    const normalized_value =
+      raw_value === undefined || raw_value === null
+        ? ""
+        : `${raw_value}`.trim().toLowerCase();
+    if (!normalized_value) return;
+    const mapped = STAGE_ALIASES[normalized_value];
+    if (!mapped) {
+      invalid.push(raw_value);
+      return;
+    }
+    normalized.push(mapped);
+  });
+
+  if (invalid.length) {
+    const allowed = STAGE_KEYS.join(", ");
+    throw new Error(
+      `Error: --${option_label} must be one or more of: ${allowed}. Invalid: ${invalid
+        .map((value) => `${value}`)
+        .join(", ")}`,
+    );
+  }
+
+  return Array.from(new Set(normalized));
+}
+
+function resolve_stage_selection(argv, stage_flag_result = {}) {
+  const legacy_skip_flags = [];
+  if (argv["skip-audio"] || argv.skipAudio) {
+    legacy_skip_flags.push("audio");
+  }
+  if (argv["skip-transcript"] || argv.skipTranscript) {
+    legacy_skip_flags.push("transcript");
+  }
+  if (argv["skip-compress"] || argv.skipCompress) {
+    legacy_skip_flags.push("compression");
+  }
+
+  const skip_values = normalize_stage_values(
+    collect_stage_values(argv.skip, legacy_skip_flags),
+    "skip",
+  );
+  const only_values = normalize_stage_values(
+    collect_stage_values(argv.only),
+    "only",
+  );
+
+  const skip_option_used =
+    Boolean(stage_flag_result.skip_used) || legacy_skip_flags.length > 0;
+  const only_option_used = Boolean(stage_flag_result.only_used);
+
+  if (skip_option_used && skip_values.length === 0) {
+    throw new Error(
+      `Error: --skip requires at least one stage (${STAGE_KEYS.join(", ")}).`,
+    );
+  }
+
+  if (only_option_used && only_values.length === 0) {
+    throw new Error(
+      `Error: --only requires at least one stage (${STAGE_KEYS.join(", ")}).`,
+    );
+  }
+
+  if (skip_values.length && only_values.length) {
+    throw new Error("Error: --skip and --only cannot be used together.");
+  }
+
+  const skip_set = new Set();
+  if (only_values.length) {
+    STAGE_KEYS.forEach((key) => {
+      if (!only_values.includes(key)) {
+        skip_set.add(key);
+      }
+    });
+  } else {
+    skip_values.forEach((key) => skip_set.add(key));
+  }
+
+  return {
+    skip_audio: skip_set.has("audio"),
+    skip_transcript: skip_set.has("transcript"),
+    skip_compression: skip_set.has("compression"),
+    legacy_skip_flags,
+  };
+}
 
 function stage_prefix(stage_key) {
   const index = STAGE_KEYS.indexOf(stage_key);
@@ -1163,71 +1475,92 @@ async function processAudioStage(entries, argv, force) {
       }
 
       try {
+        const skip_compressed_audio =
+          !skipAudio &&
+          entry.input_is_compressed &&
+          !argv.include_compressed_sources;
         if (!skipAudio) {
-          try {
-            const audioResult = await extractAudio({
-              inputPath: entry.inputVideo,
-              outputPath: audioOutputOption || entry.targetBasePath,
-              outputExtension: argv["audio-format"],
-              audioStreamIndex: streamIndex,
-              force,
-              preferCopy: true,
-              allowTranscodeFallback: true,
-              fallbackBitrate: argv["audio-bitrate"] || "192k",
-              fallbackSampleRate,
-              ffmpegPath: argv.ffmpeg,
-              ffprobePath: argv.ffprobe,
-              logger: console,
-              commandSilent: true,
-              onCommandStdout: child_stdout_handler,
-              onCommandStderr: child_stderr_handler,
-            });
-            entry.audioForTranscription = audioResult.outputPath;
-            entry.summary.audio = audioResult;
+          if (skip_compressed_audio) {
+            const fallbackSource =
+              entry.audioForTranscription || entry.inputVideo;
+            entry.audioForTranscription = fallbackSource;
+            entry.summary.audio = {
+              skipped: true,
+              reason: "compressed-input",
+              source: fallbackSource,
+            };
             console.log(
-              `${palette.success("    ✓ Audio saved to ")}${highlightPath(
-                audioResult.outputPath,
-              )}`,
+              palette.dim(
+                "    • Compressed input detected; skipping audio extraction (use --source-type compressed to process).",
+              ),
             );
             recordStageSuccess("audio");
-          } catch (err) {
-            if (err && err.code === "OUTPUT_EXISTS" && !force) {
-              const existingOutput =
-                outputExistsPathFromError(err) ||
-                (audioOutputOption ? audioOutputOption : "");
-              const resolvedExisting = existingOutput || null;
-              const fallbackSource = resolvedExisting || entry.inputVideo;
-              await ensureReadable(fallbackSource, "Existing audio output");
-              entry.audioForTranscription = fallbackSource;
-              entry.summary.audio = { skipped: true, reason: "exists" };
-              if (resolvedExisting) {
-                entry.summary.audio.outputPath = resolvedExisting;
-                entry.summary.audio.source = resolvedExisting;
-                console.log(
-                  `${palette.dim("    • Audio already exists at ")}${highlightPath(
-                    resolvedExisting,
-                  )}${palette.dim("; skipping (use --force to regenerate).")}`,
-                );
-              } else {
-                entry.summary.audio.source = fallbackSource;
-                console.log(
-                  palette.dim(
-                    "    • Audio output already exists; skipping (use --force to regenerate).",
-                  ),
-                );
-              }
+          } else {
+            try {
+              const audioResult = await extractAudio({
+                inputPath: entry.inputVideo,
+                outputPath: audioOutputOption || entry.targetBasePath,
+                outputExtension: argv["audio-format"],
+                audioStreamIndex: streamIndex,
+                force,
+                preferCopy: true,
+                allowTranscodeFallback: true,
+                fallbackBitrate: argv["audio-bitrate"] || "192k",
+                fallbackSampleRate,
+                ffmpegPath: argv.ffmpeg,
+                ffprobePath: argv.ffprobe,
+                logger: console,
+                commandSilent: true,
+                onCommandStdout: child_stdout_handler,
+                onCommandStderr: child_stderr_handler,
+              });
+              entry.audioForTranscription = audioResult.outputPath;
+              entry.summary.audio = audioResult;
+              console.log(
+                `${palette.success("    ✓ Audio saved to ")}${highlightPath(
+                  audioResult.outputPath,
+                )}`,
+              );
               recordStageSuccess("audio");
-            } else {
-              const message = resolveErrorMessage(
-                err,
-                `Audio extraction failed for ${displayPath}`,
-              );
-              console.error(
-                palette.error(`    ✗ Audio extraction failed: ${message}`),
-              );
-              recordStageFailure(entry, "audio", message);
-              entry.audioForTranscription = null;
-              continue;
+            } catch (err) {
+              if (err && err.code === "OUTPUT_EXISTS" && !force) {
+                const existingOutput =
+                  outputExistsPathFromError(err) ||
+                  (audioOutputOption ? audioOutputOption : "");
+                const resolvedExisting = existingOutput || null;
+                const fallbackSource = resolvedExisting || entry.inputVideo;
+                await ensureReadable(fallbackSource, "Existing audio output");
+                entry.audioForTranscription = fallbackSource;
+                entry.summary.audio = { skipped: true, reason: "exists" };
+                if (resolvedExisting) {
+                  entry.summary.audio.outputPath = resolvedExisting;
+                  entry.summary.audio.source = resolvedExisting;
+                  console.log(
+                    `${palette.dim("    • Audio already exists at ")}${highlightPath(
+                      resolvedExisting,
+                    )}${palette.dim("; skipping (use --force to regenerate).")}`,
+                  );
+                } else {
+                  entry.summary.audio.source = fallbackSource;
+                  console.log(
+                    palette.dim(
+                      "    • Audio output already exists; skipping (use --force to regenerate).",
+                    ),
+                  );
+                }
+                recordStageSuccess("audio");
+              } else {
+                const message = resolveErrorMessage(
+                  err,
+                  `Audio extraction failed for ${displayPath}`,
+                );
+                console.error(
+                  palette.error(`    ✗ Audio extraction failed: ${message}`),
+                );
+                recordStageFailure(entry, "audio", message);
+                entry.audioForTranscription = null;
+                continue;
+              }
             }
           }
         } else {
@@ -1471,7 +1804,7 @@ async function processTranscriptionStage(entries, argv, force) {
           if (err && err.code === "WHISPER_NOT_FOUND") {
             console.warn(
               palette.warn(
-                "    ⚠ Whisper CLI not found; transcription skipped. Install openai-whisper or faster-whisper, or pass --skip-transcript to silence this message.",
+                "    ⚠ Whisper CLI not found; transcription skipped. Install openai-whisper or faster-whisper, or pass --skip transcript to silence this message.",
               ),
             );
             recordStageFailure(entry, "transcript", "Whisper CLI not found", {
@@ -1560,60 +1893,75 @@ async function processCompressionStage(entries, argv, force) {
       );
 
       try {
-        try {
-          const compressResult = await compressVideo({
-            inputPath: entry.inputVideo,
-            outputPath:
-              compressOutputOption ||
-              `${entry.targetBasePath}.compressed.${presetLabel}.mp4`,
-            force,
-            crf: crfValue,
-            preset: presetValue,
-            audioBitrate: argv["compress-audio-bitrate"] || "128k",
-            videoCodec: argv["compress-video-codec"] || "libx264",
-            audioCodec: argv["compress-audio-codec"] || "aac",
-            pixelFormat: argv["compress-pix-format"] || "yuv420p",
-            keepResolution: Boolean(argv["compress-keep-resolution"]),
-            maxHeight: maxHeightValue,
-            tune: argv["compress-tune"],
-            extraArgs: compressExtraArgs,
-            ffmpegPath: argv.ffmpeg,
-            logger: console,
-            commandSilent: true,
-            onCommandStdout: child_stdout_handler,
-            onCommandStderr: child_stderr_handler,
-          });
-          entry.summary.compression = compressResult;
+        const skip_compressed_video =
+          entry.input_is_compressed && !argv.include_compressed_sources;
+        if (skip_compressed_video) {
+          entry.summary.compression = {
+            skipped: true,
+            reason: "compressed-input",
+          };
           console.log(
-            `${palette.success("    ✓ Video saved to ")}${highlightPath(
-              compressResult.outputPath,
-            )}`,
+            palette.dim(
+              "    • Compressed input detected; skipping compression (use --source-type compressed to process).",
+            ),
           );
           recordStageSuccess("compression");
-        } catch (err) {
-          if (err && err.code === "OUTPUT_EXISTS" && !force) {
-            const existingOutput = outputExistsPathFromError(err);
-            entry.summary.compression = {
-              skipped: true,
-              reason: "exists",
-              outputPath: existingOutput,
-            };
-            if (existingOutput) {
-              console.log(
-                `${palette.dim("    • Compressed video already exists at ")}${highlightPath(
-                  existingOutput,
-                )}${palette.dim("; skipping (use --force to regenerate).")}`,
-              );
-            } else {
-              console.log(
-                palette.dim(
-                  "    • Compressed video output already exists; skipping (use --force to regenerate).",
-                ),
-              );
-            }
+        } else {
+          try {
+            const compressResult = await compressVideo({
+              inputPath: entry.inputVideo,
+              outputPath:
+                compressOutputOption ||
+                `${entry.targetBasePath}.compressed.${presetLabel}.mp4`,
+              force,
+              crf: crfValue,
+              preset: presetValue,
+              audioBitrate: argv["compress-audio-bitrate"] || "128k",
+              videoCodec: argv["compress-video-codec"] || "libx264",
+              audioCodec: argv["compress-audio-codec"] || "aac",
+              pixelFormat: argv["compress-pix-format"] || "yuv420p",
+              keepResolution: Boolean(argv["compress-keep-resolution"]),
+              maxHeight: maxHeightValue,
+              tune: argv["compress-tune"],
+              extraArgs: compressExtraArgs,
+              ffmpegPath: argv.ffmpeg,
+              logger: console,
+              commandSilent: true,
+              onCommandStdout: child_stdout_handler,
+              onCommandStderr: child_stderr_handler,
+            });
+            entry.summary.compression = compressResult;
+            console.log(
+              `${palette.success("    ✓ Video saved to ")}${highlightPath(
+                compressResult.outputPath,
+              )}`,
+            );
             recordStageSuccess("compression");
-          } else {
-            throw err;
+          } catch (err) {
+            if (err && err.code === "OUTPUT_EXISTS" && !force) {
+              const existingOutput = outputExistsPathFromError(err);
+              entry.summary.compression = {
+                skipped: true,
+                reason: "exists",
+                outputPath: existingOutput,
+              };
+              if (existingOutput) {
+                console.log(
+                  `${palette.dim("    • Compressed video already exists at ")}${highlightPath(
+                    existingOutput,
+                  )}${palette.dim("; skipping (use --force to regenerate).")}`,
+                );
+              } else {
+                console.log(
+                  palette.dim(
+                    "    • Compressed video output already exists; skipping (use --force to regenerate).",
+                  ),
+                );
+              }
+              recordStageSuccess("compression");
+            } else {
+              throw err;
+            }
           }
         }
       } catch (err) {
@@ -1692,7 +2040,15 @@ async function writeRunLog(entries, options = {}) {
 }
 
 async function main() {
-  const parser = yargs(process.argv.slice(2))
+  let stage_flag_result;
+  try {
+    stage_flag_result = parse_stage_flag_arguments(process.argv.slice(2));
+  } catch (err) {
+    console.error(palette.error(err.message || "Invalid stage selection."));
+    process.exit(1);
+  }
+
+  const parser = yargs(stage_flag_result.cleaned_args)
     .parserConfiguration({
       "camel-case-expansion": true,
       "duplicate-arguments-array": true,
@@ -1728,10 +2084,13 @@ async function main() {
     .option("compress-max-height", { type: "string" })
     .option("compress-tune", { type: "string" })
     .option("compress-extra", { type: "array" })
+    .option("source-type", { type: "string" })
     .option("ffmpeg", { type: "string" })
     .option("ffprobe", { type: "string" })
     .option("job-mode", { type: "string" })
     .option("input", { type: "string" })
+    .option("skip", { type: "array" })
+    .option("only", { type: "array" })
     .boolean([
       "help",
       "skip-audio",
@@ -1743,6 +2102,8 @@ async function main() {
     ])
     .coerce("whisper-extra", coerceArrayOfStrings)
     .coerce("compress-extra", coerceArrayOfStrings)
+    .coerce("skip", coerceArrayOfStrings)
+    .coerce("only", coerceArrayOfStrings)
     .wrap(null);
 
   const argv = parser.parse();
@@ -1752,6 +2113,32 @@ async function main() {
     showHelp();
     return;
   }
+
+  argv.skip = stage_flag_result.skip_values;
+  argv.only = stage_flag_result.only_values;
+
+  let stage_selection;
+  try {
+    stage_selection = resolve_stage_selection(argv, stage_flag_result);
+  } catch (err) {
+    console.error(palette.error(err.message || "Invalid stage selection."));
+    process.exit(1);
+  }
+
+  if (stage_selection.legacy_skip_flags.length) {
+    console.warn(
+      palette.warn(
+        "⚠ Deprecated: use --skip audio|transcript|compression instead of --skip-audio/--skip-transcript/--skip-compress.",
+      ),
+    );
+  }
+
+  argv.skipAudio = stage_selection.skip_audio;
+  argv["skip-audio"] = stage_selection.skip_audio;
+  argv.skipTranscript = stage_selection.skip_transcript;
+  argv["skip-transcript"] = stage_selection.skip_transcript;
+  argv.skipCompress = stage_selection.skip_compression;
+  argv["skip-compress"] = stage_selection.skip_compression;
 
   const rawJobMode = argv["job-mode"] || argv.jobMode;
   const jobMode = rawJobMode
@@ -1763,6 +2150,17 @@ async function main() {
     );
     process.exit(1);
   }
+
+  let source_type;
+  try {
+    source_type = normalize_source_type(argv["source-type"] || argv.sourceType);
+  } catch (err) {
+    console.error(palette.error(err.message || "Invalid --source-type value."));
+    process.exit(1);
+  }
+  argv["source-type"] = source_type;
+  argv.source_type = source_type;
+  argv.include_compressed_sources = source_type === "compressed";
 
   const rawInputs = argv._.length ? argv._ : argv.input ? [argv.input] : [];
   if (!rawInputs.length) {
@@ -1946,6 +2344,7 @@ async function main() {
       inputVideo: actualPath,
       requestedVideo: requestedPath,
       usedFallback: Boolean(spec.usedFallback),
+      input_is_compressed: is_compressed_video_path(actualPath),
       targetDir: referenceDir,
       targetBaseName: referenceBase,
       targetBasePath,
