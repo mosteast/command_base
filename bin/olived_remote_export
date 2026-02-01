@@ -1,0 +1,940 @@
+#!/usr/bin/env node
+
+"use strict";
+
+const fs = require("fs/promises");
+const path = require("path");
+const { spawn } = require("child_process");
+const chalk = require("chalk");
+const yargs = require("yargs/yargs");
+const { minimatch } = require("minimatch");
+
+const package_json = require("../package.json");
+
+const DEFAULT_CONFIG_PATH = path.resolve(__dirname, "../secret/olived.json");
+const DEFAULT_REMOTE_HOST = "121.41.226.182";
+const DEFAULT_REMOTE_USER = "Administrator";
+const DEFAULT_REMOTE_PATH =
+  "C:\\Users\\Administrator\\Desktop\\live_olived";
+const DEFAULT_LOCAL_PATH =
+  "/Users/hailang/Library/Mobile Documents/com~apple~CloudDocs/main/saved/video/live_olived";
+const DEFAULT_REMOTE_PORT = 22;
+const DEFAULT_PATTERNS = ["**/*"];
+
+const palette = {
+  headline: chalk.cyanBright.bold,
+  info: chalk.cyanBright,
+  success: chalk.greenBright,
+  warn: chalk.yellowBright,
+  error: chalk.redBright,
+  debug: chalk.gray,
+  path: chalk.magentaBright,
+};
+
+function show_help() {
+  const command_name = path.basename(process.argv[1] || "olived_remote_export");
+  console.log(`${palette.headline("Usage")}`);
+  console.log(`  ${command_name} [options] [patterns...]`);
+  console.log("");
+  console.log(`${palette.headline("Description")}`);
+  console.log(
+    "  Merge files recursively from a remote Windows server into a local folder.",
+  );
+  console.log(
+    "  By default, this pulls live_olived from 121.41.226.182 into iCloud.",
+  );
+  console.log(
+    "  Patterns match remote paths relative to the source root (default: **/*).",
+  );
+  console.log(
+    "  When remote_password is set, sshpass is required for non-interactive login.",
+  );
+  console.log("  Delete-on-move uses sftp batch mode.");
+  console.log("");
+  console.log(`${palette.headline("Options")}`);
+  console.log(
+    `  --config <path>         Config file (default: ${DEFAULT_CONFIG_PATH})`,
+  );
+  console.log(
+    `  --host <host>           Remote host (default: ${DEFAULT_REMOTE_HOST})`,
+  );
+  console.log(
+    `  --user <name>           Remote user (default: ${DEFAULT_REMOTE_USER})`,
+  );
+  console.log(
+    `  --port <n>              SSH port (default: ${DEFAULT_REMOTE_PORT})`,
+  );
+  console.log(
+    `  --remote-path <path>    Windows source path (default: ${DEFAULT_REMOTE_PATH})`,
+  );
+  console.log(
+    `  --local-path <path>     Local destination (default: ${DEFAULT_LOCAL_PATH})`,
+  );
+  console.log(
+    "  --remote-password <pw>  Remote password (uses sshpass; default: from config)",
+  );
+  console.log(
+    "  --exclude <glob>        Exclude matching paths (repeatable; default: none)",
+  );
+  console.log("  --refresh              Overwrite existing files (default: false)");
+  console.log(
+    "  --move                 Delete remote files after copy or when local matches (default: false)",
+  );
+  console.log("  -d, --dry-run           Show planned actions only (default: false)");
+  console.log("  --quiet                 Only warnings and errors (default: false)");
+  console.log("  --debug                 Print debug logs (default: false)");
+  console.log("  --ssh-key <path>         SSH identity file");
+  console.log(
+    "  --ssh-option <value>    Extra SSH option (repeatable, e.g. StrictHostKeyChecking=no)",
+  );
+  console.log("  -h, --help              Show this help message");
+  console.log("  -v, --version           Show version number only");
+  console.log("");
+  console.log(`${palette.headline("Examples")}`);
+  console.log("# Copy everything using defaults");
+  console.log("  $0");
+  console.log("");
+  console.log("# Copy only mp4 files");
+  console.log('  $0 "**/*.mp4"');
+  console.log("");
+  console.log("# Move files after merging");
+  console.log("  $0 --move");
+  console.log("");
+  console.log("# Use a custom remote path and local target");
+  console.log(
+    '  $0 --remote-path "D:\\Exports\\live_olived" --local-path "/path/target"',
+  );
+  console.log("");
+  console.log("# Dry run with debug output");
+  console.log('  $0 --dry-run --debug "**/*.mp4"');
+}
+
+function create_logger({ debug, quiet }) {
+  return {
+    debug: (message) => {
+      if (!debug || quiet) return;
+      console.log(palette.debug(`DEBUG ${message}`));
+    },
+    info: (message) => {
+      if (quiet) return;
+      console.log(palette.info(message));
+    },
+    success: (message) => {
+      if (quiet) return;
+      console.log(palette.success(message));
+    },
+    warn: (message) => {
+      console.warn(palette.warn(message));
+    },
+    error: (message) => {
+      console.error(palette.error(message));
+    },
+    path: (value) => palette.path(value),
+  };
+}
+
+function log_step(logger, label) {
+  logger.debug(`Stage: ${label}`);
+}
+
+function log_io(logger, detail) {
+  logger.debug(`IO: ${detail}`);
+}
+
+function format_command(command_name, command_args) {
+  const rendered = [command_name]
+    .concat(command_args)
+    .map((value) => {
+      if (value === undefined || value === null) return "";
+      const text = String(value);
+      if (/[^A-Za-z0-9_./:-]/.test(text)) {
+        return JSON.stringify(text);
+      }
+      return text;
+    })
+    .filter(Boolean)
+    .join(" ");
+  return rendered;
+}
+
+function escape_powershell_literal(value) {
+  return String(value || "").replace(/'/g, "''");
+}
+
+async function read_json_config(config_path, options) {
+  const { logger, required } = options;
+  if (!config_path) return null;
+  log_io(logger, `read ${config_path}`);
+  try {
+    const raw_text = await fs.readFile(config_path, "utf8");
+    return JSON.parse(raw_text);
+  } catch (error) {
+    if (error && error.code === "ENOENT") {
+      if (required) {
+        throw new Error(`Config file not found: ${config_path}`);
+      }
+      logger.warn(`Config file not found: ${logger.path(config_path)}`);
+      return null;
+    }
+    throw new Error(
+      `Failed to read config ${config_path}: ${error.message || String(error)}`,
+    );
+  }
+}
+
+function normalize_config_list(value) {
+  if (!value) return [];
+  if (Array.isArray(value)) return value.map((entry) => String(entry));
+  return [String(value)];
+}
+
+function encode_powershell_command(script_text) {
+  return Buffer.from(script_text, "utf16le").toString("base64");
+}
+
+function normalize_windows_path(value) {
+  return String(value || "").replace(/\//g, "\\");
+}
+
+function windows_path_to_scp_path(windows_path) {
+  const normalized = String(windows_path || "").replace(/\\/g, "/");
+  if (!normalized) return normalized;
+  if (normalized.startsWith("/")) return normalized;
+  const drive_match = normalized.match(/^([A-Za-z]):(\/.*)?$/);
+  if (drive_match) {
+    const drive = drive_match[1].toUpperCase();
+    const rest = drive_match[2] || "";
+    return `/${drive}:${rest}`;
+  }
+  return normalized;
+}
+
+function normalize_relative_path(relative_path) {
+  return String(relative_path || "").replace(/\\/g, "/");
+}
+
+function split_relative_path(relative_path) {
+  const normalized = normalize_relative_path(relative_path);
+  return normalized.split("/").filter(Boolean);
+}
+
+function build_remote_target({ remote_user, remote_host }) {
+  if (!remote_user) return remote_host;
+  return `${remote_user}@${remote_host}`;
+}
+
+function resolve_ssh_args(options) {
+  const args = [];
+  if (options.port) {
+    args.push("-p", String(options.port));
+  }
+  if (options.ssh_key) {
+    args.push("-i", options.ssh_key);
+  }
+  if (options.ssh_options.length > 0) {
+    for (const option of options.ssh_options) {
+      args.push("-o", option);
+    }
+  }
+  return args;
+}
+
+function resolve_scp_args(options) {
+  const args = ["-p"];
+  if (options.port) {
+    args.push("-P", String(options.port));
+  }
+  if (options.ssh_key) {
+    args.push("-i", options.ssh_key);
+  }
+  if (options.ssh_options.length > 0) {
+    for (const option of options.ssh_options) {
+      args.push("-o", option);
+    }
+  }
+  return args;
+}
+
+function resolve_sftp_args(options) {
+  const args = [];
+  if (options.port) {
+    args.push("-P", String(options.port));
+  }
+  if (options.ssh_key) {
+    args.push("-i", options.ssh_key);
+  }
+  if (options.ssh_options.length > 0) {
+    for (const option of options.ssh_options) {
+      args.push("-o", option);
+    }
+  }
+  return args;
+}
+
+function build_ssh_command(ssh_args, options) {
+  if (options.remote_password) {
+    return {
+      command_name: "sshpass",
+      command_args: ["-e", "ssh"].concat(ssh_args),
+      env: { SSHPASS: options.remote_password },
+      redacted_args: ["-e", "ssh"].concat(ssh_args),
+    };
+  }
+  return {
+    command_name: "ssh",
+    command_args: ssh_args,
+    env: null,
+    redacted_args: null,
+  };
+}
+
+function build_scp_command(scp_args, options) {
+  if (options.remote_password) {
+    return {
+      command_name: "sshpass",
+      command_args: ["-e", "scp"].concat(scp_args),
+      env: { SSHPASS: options.remote_password },
+      redacted_args: ["-e", "scp"].concat(scp_args),
+    };
+  }
+  return {
+    command_name: "scp",
+    command_args: scp_args,
+    env: null,
+    redacted_args: null,
+  };
+}
+
+function build_sftp_command(sftp_args, options) {
+  if (options.remote_password) {
+    return {
+      command_name: "sshpass",
+      command_args: ["-e", "sftp"].concat(sftp_args),
+      env: { SSHPASS: options.remote_password },
+      redacted_args: ["-e", "sftp"].concat(sftp_args),
+    };
+  }
+  return {
+    command_name: "sftp",
+    command_args: sftp_args,
+    env: null,
+    redacted_args: null,
+  };
+}
+
+async function run_command(
+  command_name,
+  command_args,
+  logger,
+  stdin_input,
+  options = {},
+) {
+  const { env, redacted_args } = options;
+  const log_args = Array.isArray(redacted_args) ? redacted_args : command_args;
+  log_io(logger, format_command(command_name, log_args));
+  return await new Promise((resolve, reject) => {
+    const child = spawn(command_name, command_args, {
+      stdio: ["pipe", "pipe", "pipe"],
+      env: env ? { ...process.env, ...env } : process.env,
+    });
+    let stdout = "";
+    let stderr = "";
+
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+
+    child.on("error", (error) => {
+      reject(error);
+    });
+
+    child.on("close", (code) => {
+      resolve({ stdout, stderr, exit_code: code });
+    });
+
+    if (stdin_input !== undefined && stdin_input !== null) {
+      child.stdin.write(stdin_input);
+    }
+    child.stdin.end();
+  });
+}
+
+async function ensure_command_available(command_name, logger) {
+  log_step(logger, `Check ${command_name}`);
+  const result = await run_command("which", [command_name], logger);
+  if (result.exit_code !== 0) {
+    throw new Error(`Required command not found: ${command_name}`);
+  }
+}
+
+async function ensure_directory(target_dir, logger) {
+  log_io(logger, `mkdir -p ${target_dir}`);
+  await fs.mkdir(target_dir, { recursive: true });
+}
+
+async function stat_path(target_path, logger) {
+  log_io(logger, `stat ${target_path}`);
+  return await fs.stat(target_path);
+}
+
+function parse_port(value, fallback) {
+  const parsed = Number(value);
+  if (Number.isFinite(parsed) && parsed > 0) {
+    return Math.floor(parsed);
+  }
+  return fallback;
+}
+
+function build_remote_list_script(remote_root) {
+  const sanitized_root = escape_powershell_literal(remote_root);
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    `$root = '${sanitized_root}'`,
+    "$root = $root.TrimEnd('\\')",
+    "if (-not (Test-Path -LiteralPath $root)) {",
+    "  Write-Error (\"Missing path: \" + $root)",
+    "  exit 2",
+    "}",
+    "$items = Get-ChildItem -LiteralPath $root -File -Recurse -Force",
+    "foreach ($item in $items) {",
+    "  $relative = $item.FullName.Substring($root.Length).TrimStart('\\')",
+    "  $relative_b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($relative))",
+    "  $full_b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($item.FullName))",
+    "  $size = $item.Length",
+    "  $mtime = [int64]$item.LastWriteTimeUtc.ToFileTimeUtc()",
+    "  Write-Output ($relative_b64 + \"`t\" + $full_b64 + \"`t\" + $size + \"`t\" + $mtime)",
+    "}",
+  ].join("; ");
+}
+
+function parse_remote_list_output(raw_output, logger) {
+  const entries = [];
+  const lines = String(raw_output || "")
+    .split(/\r?\n/)
+    .filter((line) => line.trim().length > 0);
+
+  for (const line of lines) {
+    const parts = line.split("\t");
+    if (parts.length < 4) {
+      logger.warn(`Skip malformed entry: ${line}`);
+      continue;
+    }
+    const [relative_b64, full_b64, size_text, mtime_text] = parts;
+    let relative_path = "";
+    let full_path = "";
+    try {
+      relative_path = Buffer.from(relative_b64, "base64").toString("utf8");
+      full_path = Buffer.from(full_b64, "base64").toString("utf8");
+    } catch (error) {
+      logger.warn(`Skip invalid base64 path: ${line}`);
+      continue;
+    }
+    const size = Number(size_text);
+    const mtime = Number(mtime_text);
+    entries.push({
+      relative_path,
+      full_path,
+      size: Number.isFinite(size) ? size : 0,
+      mtime: Number.isFinite(mtime) ? mtime : 0,
+    });
+  }
+  return entries;
+}
+
+async function list_remote_files(options, logger) {
+  log_step(logger, "List remote files");
+  const remote_root = normalize_windows_path(options.remote_path);
+  const script_text = build_remote_list_script(remote_root);
+  const encoded_script = encode_powershell_command(script_text);
+  const ssh_args = resolve_ssh_args(options);
+  const remote_target = build_remote_target(options);
+  const command_args = ssh_args.concat([
+    remote_target,
+    "powershell",
+    "-NoProfile",
+    "-NonInteractive",
+    "-EncodedCommand",
+    encoded_script,
+  ]);
+
+  const ssh_command = build_ssh_command(command_args, options);
+  const result = await run_command(
+    ssh_command.command_name,
+    ssh_command.command_args,
+    logger,
+    null,
+    {
+      env: ssh_command.env,
+      redacted_args: ssh_command.redacted_args,
+    },
+  );
+  if (result.exit_code !== 0) {
+    const error_message = result.stderr || result.stdout || "Unknown ssh error";
+    throw new Error(`Failed to list remote files: ${error_message.trim()}`);
+  }
+
+  return parse_remote_list_output(result.stdout, logger);
+}
+
+function normalize_patterns(patterns) {
+  return (patterns || [])
+    .map((pattern) => normalize_relative_path(String(pattern || "").trim()))
+    .filter(Boolean);
+}
+
+function matches_patterns(relative_path, include_patterns, exclude_patterns) {
+  const normalized_path = normalize_relative_path(relative_path);
+  const match_options = {
+    dot: true,
+    nocase: true,
+    matchBase: true,
+  };
+
+  const include_match = include_patterns.length === 0
+    ? true
+    : include_patterns.some((pattern) =>
+        minimatch(normalized_path, pattern, match_options),
+      );
+  if (!include_match) return false;
+
+  if (exclude_patterns.length === 0) return true;
+  return !exclude_patterns.some((pattern) =>
+    minimatch(normalized_path, pattern, match_options),
+  );
+}
+
+function filter_remote_entries(entries, include_patterns, exclude_patterns, logger) {
+  log_step(logger, "Filter remote entries");
+  const filtered = [];
+  for (const entry of entries) {
+    if (!matches_patterns(entry.relative_path, include_patterns, exclude_patterns)) {
+      logger.debug(
+        `Skip by pattern ${entry.relative_path}`,
+      );
+      continue;
+    }
+    filtered.push(entry);
+  }
+  return filtered;
+}
+
+async function resolve_local_root(local_root, logger) {
+  const resolved_root = path.resolve(local_root);
+  log_step(logger, "Prepare local destination");
+  try {
+    const stats = await stat_path(resolved_root, logger);
+    if (!stats.isDirectory()) {
+      throw new Error(`Destination is not a directory: ${resolved_root}`);
+    }
+  } catch (error) {
+    if (error && error.code === "ENOENT") {
+      await ensure_directory(resolved_root, logger);
+    } else {
+      throw error;
+    }
+  }
+  return resolved_root;
+}
+
+function build_local_path(local_root, relative_path) {
+  const segments = split_relative_path(relative_path);
+  return path.join(local_root, ...segments);
+}
+
+async function copy_remote_file(entry, local_path, options, logger) {
+  const result = {
+    copied: 0,
+    skipped: 0,
+    scheduled_delete: false,
+    size_mismatch: false,
+  };
+
+  let local_stats = null;
+  try {
+    local_stats = await stat_path(local_path, logger);
+  } catch (error) {
+    if (error && error.code !== "ENOENT") {
+      throw error;
+    }
+  }
+
+  if (local_stats && !options.refresh) {
+    result.skipped = 1;
+    logger.debug(`Skip existing ${entry.relative_path}`);
+    if (local_stats.size === entry.size) {
+      if (options.move) {
+        result.scheduled_delete = true;
+      }
+    } else {
+      result.size_mismatch = true;
+    }
+    return result;
+  }
+
+  await ensure_directory(path.dirname(local_path), logger);
+
+  const remote_target = build_remote_target(options);
+  const scp_path = windows_path_to_scp_path(entry.full_path);
+  const scp_args = resolve_scp_args(options);
+  const remote_source = `${remote_target}:${scp_path}`;
+  const command_args = scp_args.concat([remote_source, local_path]);
+
+  if (options.dry_run) {
+    logger.info(`Dry run: copy ${logger.path(entry.relative_path)}`);
+    result.copied = 1;
+    if (options.move) {
+      result.scheduled_delete = true;
+    }
+    return result;
+  }
+
+  const scp_command = build_scp_command(command_args, options);
+  const command_result = await run_command(
+    scp_command.command_name,
+    scp_command.command_args,
+    logger,
+    null,
+    {
+      env: scp_command.env,
+      redacted_args: scp_command.redacted_args,
+    },
+  );
+  if (command_result.exit_code !== 0) {
+    const error_message = command_result.stderr || command_result.stdout;
+    throw new Error(
+      `Failed to copy ${entry.relative_path}: ${String(error_message || "").trim()}`,
+    );
+  }
+
+  result.copied = 1;
+  if (options.move) {
+    result.scheduled_delete = true;
+  }
+  return result;
+}
+
+function quote_sftp_path(value) {
+  const sanitized = String(value || "").replace(/"/g, '\\"');
+  return `"${sanitized}"`;
+}
+
+function build_sftp_delete_batch(entries) {
+  const lines = [];
+  for (const entry of entries) {
+    const sftp_path = windows_path_to_scp_path(entry.full_path);
+    lines.push(`rm ${quote_sftp_path(sftp_path)}`);
+  }
+  return lines.join("\n").concat("\n");
+}
+
+async function delete_remote_files(entries, options, logger) {
+  if (entries.length === 0) return;
+  log_step(logger, "Delete remote files");
+  const sftp_args = resolve_sftp_args(options).concat([
+    "-b",
+    "-",
+    build_remote_target(options),
+  ]);
+  const batch_payload = build_sftp_delete_batch(entries);
+
+  if (options.dry_run) {
+    for (const entry of entries) {
+      logger.info(`Dry run: delete ${logger.path(entry.relative_path)}`);
+    }
+    return;
+  }
+
+  const sftp_command = build_sftp_command(sftp_args, options);
+  const result = await run_command(
+    sftp_command.command_name,
+    sftp_command.command_args,
+    logger,
+    batch_payload,
+    {
+      env: sftp_command.env,
+      redacted_args: sftp_command.redacted_args,
+    },
+  );
+  if (result.exit_code !== 0) {
+    const error_message = result.stderr || result.stdout || "Unknown delete error";
+    throw new Error(`Failed to delete remote files: ${error_message.trim()}`);
+  }
+}
+
+async function run() {
+  const parser = yargs(process.argv.slice(2))
+    .scriptName("olived_remote_export")
+    .help(false)
+    .version(false)
+    .parserConfiguration({
+      "camel-case-expansion": false,
+      "strip-dashed": false,
+    })
+    .option("config", {
+      type: "string",
+      describe: "Path to JSON config file",
+    })
+    .option("host", {
+      type: "string",
+      describe: "Remote host",
+    })
+    .option("user", {
+      type: "string",
+      describe: "Remote user",
+    })
+    .option("port", {
+      type: "number",
+      describe: "SSH port",
+    })
+    .option("remote-path", {
+      type: "string",
+      describe: "Remote Windows path",
+    })
+    .option("local-path", {
+      type: "string",
+      describe: "Local destination path",
+    })
+    .option("remote-password", {
+      type: "string",
+      describe: "Remote password (uses sshpass)",
+    })
+    .option("exclude", {
+      type: "string",
+      array: true,
+      describe: "Exclude glob pattern",
+      default: [],
+    })
+    .option("refresh", {
+      type: "boolean",
+      default: false,
+      describe: "Overwrite existing files",
+    })
+    .option("move", {
+      type: "boolean",
+      default: false,
+      describe: "Delete remote files after copy",
+    })
+    .option("dry-run", {
+      alias: "d",
+      type: "boolean",
+      default: false,
+      describe: "Preview actions without changes",
+    })
+    .option("quiet", {
+      type: "boolean",
+      default: false,
+      describe: "Only warnings and errors",
+    })
+    .option("debug", {
+      type: "boolean",
+      default: false,
+      describe: "Show debug logs",
+    })
+    .option("ssh-key", {
+      type: "string",
+      describe: "SSH identity file",
+    })
+    .option("ssh-option", {
+      type: "string",
+      array: true,
+      default: [],
+      describe: "Extra SSH option",
+    })
+    .option("help", {
+      alias: "h",
+      type: "boolean",
+      describe: "Show help",
+    })
+    .option("version", {
+      alias: "v",
+      type: "boolean",
+      describe: "Show version",
+    })
+    .strict(false);
+
+  const argv = parser.parse();
+
+  if (argv.help) {
+    show_help();
+    return;
+  }
+
+  if (argv.version) {
+    console.log(package_json.version || "0.0.0");
+    return;
+  }
+
+  const logger = create_logger({
+    debug: Boolean(argv.debug),
+    quiet: Boolean(argv.quiet),
+  });
+
+  const config_path = argv.config
+    ? path.resolve(String(argv.config))
+    : DEFAULT_CONFIG_PATH;
+  const config_data = await read_json_config(config_path, {
+    logger,
+    required: Boolean(argv.config),
+  });
+  const config = config_data || {};
+  const config_ssh_options = normalize_config_list(
+    config.ssh_option || config.ssh_options,
+  );
+  const cli_ssh_options = Array.isArray(argv["ssh-option"])
+    ? argv["ssh-option"].map(String)
+    : [];
+
+  const options = {
+    remote_host: argv.host || config.remote_host || DEFAULT_REMOTE_HOST,
+    remote_user: argv.user || config.remote_user || DEFAULT_REMOTE_USER,
+    remote_password: argv["remote-password"] || config.remote_password || "",
+    port: parse_port(
+      argv.port !== undefined ? argv.port : config.remote_port,
+      DEFAULT_REMOTE_PORT,
+    ),
+    remote_path: argv["remote-path"] || config.remote_path || DEFAULT_REMOTE_PATH,
+    local_path: argv["local-path"] || config.local_path || DEFAULT_LOCAL_PATH,
+    refresh: Boolean(argv.refresh),
+    move: Boolean(argv.move),
+    dry_run: Boolean(argv["dry-run"]),
+    quiet: Boolean(argv.quiet),
+    debug: Boolean(argv.debug),
+    ssh_key: argv["ssh-key"]
+      ? path.resolve(String(argv["ssh-key"]))
+      : config.ssh_key
+        ? path.resolve(String(config.ssh_key))
+        : "",
+    ssh_options: config_ssh_options.concat(cli_ssh_options),
+  };
+
+  if (config_data) {
+    logger.debug(`Loaded config ${logger.path(config_path)}`);
+  }
+
+  logger.info(palette.headline("Olived Remote Export"));
+  logger.info(
+    `Remote: ${logger.path(
+      `${options.remote_user}@${options.remote_host}:${options.remote_path}`,
+    )}`,
+  );
+  logger.info(`Local: ${logger.path(options.local_path)}`);
+
+  if (options.dry_run) {
+    logger.warn("Dry run enabled; no files will be copied or deleted.");
+  }
+  if (options.refresh) {
+    logger.warn("Refresh enabled; existing files will be overwritten.");
+  }
+  if (options.move) {
+    logger.warn("Move enabled; remote files will be deleted after merge.");
+  }
+
+  await ensure_command_available("ssh", logger);
+  await ensure_command_available("scp", logger);
+  await ensure_command_available("sftp", logger);
+  if (options.remote_password) {
+    await ensure_command_available("sshpass", logger);
+  }
+
+  const raw_patterns = Array.isArray(argv._) ? argv._ : [];
+  const include_patterns = normalize_patterns(
+    raw_patterns.length > 0 ? raw_patterns : DEFAULT_PATTERNS,
+  );
+  const exclude_patterns = normalize_patterns(argv.exclude);
+
+  const local_root = await resolve_local_root(options.local_path, logger);
+  const remote_entries = await list_remote_files(options, logger);
+
+  if (remote_entries.length === 0) {
+    logger.warn("No remote files found.");
+    return;
+  }
+
+  const filtered_entries = filter_remote_entries(
+    remote_entries,
+    include_patterns,
+    exclude_patterns,
+    logger,
+  );
+
+  if (filtered_entries.length === 0) {
+    logger.warn("No remote files matched the given patterns.");
+    return;
+  }
+
+  log_step(logger, "Copy files");
+
+  let copied_count = 0;
+  let skipped_count = 0;
+  let planned_delete_count = 0;
+  let deleted_count = 0;
+  let error_count = 0;
+  let size_mismatch_count = 0;
+  const delete_entries = [];
+
+  for (const entry of filtered_entries) {
+    const local_path = build_local_path(local_root, entry.relative_path);
+    let copy_result = null;
+    try {
+      copy_result = await copy_remote_file(entry, local_path, options, logger);
+    } catch (error) {
+      error_count += 1;
+      logger.error(error.message || String(error));
+      continue;
+    }
+
+    copied_count += copy_result.copied;
+    skipped_count += copy_result.skipped;
+    if (copy_result.size_mismatch) {
+      size_mismatch_count += 1;
+      logger.warn(
+        `Skip ${logger.path(entry.relative_path)}; size differs (use --refresh to overwrite).`,
+      );
+    }
+    if (copy_result.scheduled_delete) {
+      delete_entries.push(entry);
+      planned_delete_count += 1;
+    }
+  }
+
+  if (options.move && delete_entries.length > 0) {
+    try {
+      await delete_remote_files(delete_entries, options, logger);
+      deleted_count = delete_entries.length;
+    } catch (error) {
+      error_count += 1;
+      logger.error(error.message || String(error));
+    }
+  }
+
+  if (error_count > 0) {
+    logger.warn(`Completed with ${error_count} error(s).`);
+    process.exitCode = 1;
+  }
+
+  if (options.dry_run) {
+    logger.success(
+      `Dry run complete. Planned copy ${copied_count} file(s), planned delete ${planned_delete_count} file(s), skipped ${skipped_count} file(s).`,
+    );
+    return;
+  }
+
+  if (options.move) {
+    logger.success(
+      `Done. Copied ${copied_count} file(s), deleted ${deleted_count} file(s), skipped ${skipped_count} file(s).`,
+    );
+    return;
+  }
+
+  logger.success(
+    `Done. Copied ${copied_count} file(s), skipped ${skipped_count} file(s).`,
+  );
+}
+
+run().catch((error) => {
+  console.error(palette.error(`Error: ${error.message || String(error)}`));
+  process.exit(1);
+});
