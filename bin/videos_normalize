@@ -1804,7 +1804,7 @@ async function processTranscriptionStage(entries, argv, force) {
           if (err && err.code === "WHISPER_NOT_FOUND") {
             console.warn(
               palette.warn(
-                "    ⚠ Whisper CLI not found; transcription skipped. Install openai-whisper or faster-whisper, or pass --skip transcript to silence this message.",
+                "    ⚠ Whisper CLI not found; transcription skipped. Install openai-whisper (pip install -U openai-whisper) or faster-whisper (pip install faster-whisper), or pass --skip transcript to silence this message.",
               ),
             );
             recordStageFailure(entry, "transcript", "Whisper CLI not found", {
