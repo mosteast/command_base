@@ -3,7 +3,7 @@
 # Initialize variables
 CHANNEL_URL=""
 PLAYLIST_URL=""
-default_output_dir="$HOME/Library/Mobile Documents/com~apple~CloudDocs/main/saved/video/YouTube/%(uploader)s"
+default_output_dir="$HOME/Library/Mobile Documents/com~apple~CloudDocs/main/saved/video/youtube.com/%(uploader)s"
 OUTPUT_DIR="$default_output_dir"
 output_dir_provided=false
 VIDEO_URLS=()
@@ -26,7 +26,7 @@ yt_dlp_color_policy="always"
 yt_dlp_color_opts=(--color "$yt_dlp_color_policy")
 
 cleanup_ready=false
-cleanup_target_dir=""
+cleanup_target_dirs=()
 
 # Retry configuration
 retry_attempt_limit=3
@@ -129,6 +129,30 @@ resolve_cleanup_root() {
     printf "%s" "$cleanup_root"
 }
 
+list_contains() {
+    local needle="$1"
+    shift
+    local item
+    for item in "$@"; do
+        if [ "$item" = "$needle" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+add_cleanup_target_dir() {
+    local target_dir="$1"
+    if [ -z "$target_dir" ]; then
+        return 0
+    fi
+    if list_contains "$target_dir" "${cleanup_target_dirs[@]}"; then
+        return 0
+    fi
+    cleanup_target_dirs+=("$target_dir")
+    cleanup_ready=true
+}
+
 cleanup_zero_byte_files() {
     local target_dir="$1"
     if [ -z "$target_dir" ]; then
@@ -174,7 +198,10 @@ maybe_cleanup_zero_byte_files() {
     if [ "$cleanup_ready" != true ]; then
         return 0
     fi
-    cleanup_zero_byte_files "$cleanup_target_dir"
+    local target_dir
+    for target_dir in "${cleanup_target_dirs[@]}"; do
+        cleanup_zero_byte_files "$target_dir"
+    done
 }
 
 trap maybe_cleanup_zero_byte_files EXIT
@@ -301,6 +328,10 @@ detect_platform() {
         printf "bilibili"
         return 0
     fi
+    if [[ "$url" == *"bitchute.com"* ]]; then
+        printf "bitchute"
+        return 0
+    fi
     if [[ "$url" == *"rumble.com"* ]]; then
         printf "rumble"
         return 0
@@ -315,10 +346,13 @@ resolve_default_output_dir() {
             printf "%s" "$default_output_dir"
             ;;
         bilibili)
-            printf "%s" "${default_output_dir/YouTube/Bilibili}"
+            printf "%s" "${default_output_dir/youtube.com/bilibili.com}"
+            ;;
+        bitchute)
+            printf "%s" "${default_output_dir/youtube.com/bitchute.com}"
             ;;
         rumble)
-            printf "%s" "${default_output_dir/YouTube/Rumble}"
+            printf "%s" "${default_output_dir/youtube.com/rumble.com}"
             ;;
         *)
             printf "%s" "$default_output_dir"
@@ -946,12 +980,14 @@ if [ -n "$youtube_cookie_fallback_client" ]; then
     youtube_fallback_extractor_args=(--extractor-args "youtube:player_client=${youtube_cookie_fallback_client}")
 fi
 
-# Define match filters that allow Rumble videos to bypass subscription check.
+# Define match filters that allow select extractors to bypass subscription checks.
 # Use multiple --match-filters entries for OR semantics; "&" is for AND.
 MATCH_FILTERS=(
     "extractor='Rumble'"
     "extractor='RumbleEmbed'"
-    "extractor!='Rumble' & extractor!='RumbleEmbed' & availability!='needs_subscription'"
+    "extractor='BitChute'"
+    "extractor='BitChuteChannel'"
+    "extractor!='Rumble' & extractor!='RumbleEmbed' & extractor!='BitChute' & extractor!='BitChuteChannel' & availability!='needs_subscription'"
 )
 match_filter_opts=()
 for match_filter in "${MATCH_FILTERS[@]}"; do
@@ -967,8 +1003,7 @@ if [ -n "$CHANNEL_URL" ]; then
     if [ "$output_dir_provided" != true ]; then
         OUTPUT_DIR=$(resolve_default_output_dir "$channel_platform")
     fi
-    cleanup_target_dir=$(resolve_cleanup_root "$OUTPUT_DIR")
-    cleanup_ready=true
+    add_cleanup_target_dir "$(resolve_cleanup_root "$OUTPUT_DIR")"
     log_step "Normalize channel URL"
     CHANNEL_URL=$(normalize_channel_url "$CHANNEL_URL" "$channel_platform")
     channel_referer_opts=()
@@ -1121,8 +1156,7 @@ elif [ -n "$PLAYLIST_URL" ]; then
     if [ "$output_dir_provided" != true ]; then
         OUTPUT_DIR=$(resolve_default_output_dir "$playlist_platform")
     fi
-    cleanup_target_dir=$(resolve_cleanup_root "$OUTPUT_DIR")
-    cleanup_ready=true
+    add_cleanup_target_dir "$(resolve_cleanup_root "$OUTPUT_DIR")"
     log_step "Normalize playlist URL"
     if contains_non_ascii "$PLAYLIST_URL"; then
         log_warn "Playlist URL contains non-ASCII characters; encoding for HTTP requests."
@@ -1261,8 +1295,6 @@ elif [ -n "$PLAYLIST_URL" ]; then
 # Handle individual video URLs mode
 else
     log_step "Manual video download"
-    cleanup_target_dir=$(resolve_cleanup_root "$OUTPUT_DIR")
-    cleanup_ready=true
     log_step "Normalize manual video URLs"
     normalized_video_urls=()
     for url in "${VIDEO_URLS[@]}"; do
@@ -1281,38 +1313,47 @@ else
     VIDEO_URLS=("${normalized_video_urls[@]}")
     overall_exit_code=0
     failed_video_urls=()
-    expanded_output_dir="${OUTPUT_DIR/#\~/$HOME}"
-    [ -z "$expanded_output_dir" ] && expanded_output_dir="manual_video_downloads"
-    manual_archive_hash=$(printf "%s" "$expanded_output_dir" | md5sum | cut -d' ' -f1)
-    manual_archive_file="${ARCHIVE_DIR}/manual_urls_${manual_archive_hash}.txt"
-
-    if [ "$REFRESH" = true ]; then
-        if [ -f "$manual_archive_file" ]; then
-            log_info "Refresh requested; clearing archive cache at '${manual_archive_file}'."
-            if [ "$dry_run" = true ]; then
-                log_info "Dry-run: would remove archive cache at '${manual_archive_file}'."
-            else
-                log_io "remove archive cache ${manual_archive_file}"
-                rm -f "$manual_archive_file"
-            fi
-        else
-            log_warn "Refresh requested but no manual video archive found to clear."
-        fi
-    fi
-
-    if [ "$OVERWRITE" != true ]; then
-        if [ "$dry_run" = true ]; then
-            log_info "Dry-run: would create archive cache at '${manual_archive_file}'."
-        else
-            log_io "create archive cache ${manual_archive_file}"
-            touch "$manual_archive_file"
-        fi
-    fi
+    manual_archive_seen_dirs=()
 
     for url in "${VIDEO_URLS[@]}"; do
         url_platform=$(detect_platform "$url")
+        url_output_dir="$OUTPUT_DIR"
+        if [ "$output_dir_provided" != true ]; then
+            url_output_dir=$(resolve_default_output_dir "$url_platform")
+        fi
+        add_cleanup_target_dir "$(resolve_cleanup_root "$url_output_dir")"
+        expanded_output_dir="${url_output_dir/#\~/$HOME}"
+        [ -z "$expanded_output_dir" ] && expanded_output_dir="manual_video_downloads"
+        manual_archive_hash=$(printf "%s" "$expanded_output_dir" | md5sum | cut -d' ' -f1)
+        manual_archive_file="${ARCHIVE_DIR}/manual_urls_${manual_archive_hash}.txt"
 
-        if retry_command "Video download: ${url}" download_video_with_fallback "$url" "$manual_archive_file" "$OUTPUT_DIR" "$url_platform"
+        if ! list_contains "$expanded_output_dir" "${manual_archive_seen_dirs[@]}"; then
+            manual_archive_seen_dirs+=("$expanded_output_dir")
+            if [ "$REFRESH" = true ]; then
+                if [ -f "$manual_archive_file" ]; then
+                    log_info "Refresh requested; clearing archive cache at '${manual_archive_file}'."
+                    if [ "$dry_run" = true ]; then
+                        log_info "Dry-run: would remove archive cache at '${manual_archive_file}'."
+                    else
+                        log_io "remove archive cache ${manual_archive_file}"
+                        rm -f "$manual_archive_file"
+                    fi
+                else
+                    log_warn "Refresh requested but no manual video archive found to clear."
+                fi
+            fi
+
+            if [ "$OVERWRITE" != true ]; then
+                if [ "$dry_run" = true ]; then
+                    log_info "Dry-run: would create archive cache at '${manual_archive_file}'."
+                else
+                    log_io "create archive cache ${manual_archive_file}"
+                    touch "$manual_archive_file"
+                fi
+            fi
+        fi
+
+        if retry_command "Video download: ${url}" download_video_with_fallback "$url" "$manual_archive_file" "$url_output_dir" "$url_platform"
         then
             :
         else
