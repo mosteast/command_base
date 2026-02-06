@@ -28,6 +28,9 @@ const DEFAULT_CONFIG_LINES = [
   "  rumble:",
   "    - name: Example Rumble channel",
   "      handle: https://rumble.com/c/example",
+  "  bitchute:",
+  "    - name: Example Bitchute channel",
+  "      handle: https://www.bitchute.com/channel/EXAMPLE_ID",
   "  x_f2:",
   "    - name: Example X user (f2)",
   "      handle: https://x.com/user1",
@@ -60,6 +63,11 @@ const PLATFORM_COMMANDS = {
     build_args: (url) => ["-c", url],
     label: "rumble",
   },
+  bitchute: {
+    command: "xsave_yt_dlp",
+    build_args: (url) => ["-c", url],
+    label: "bitchute",
+  },
   douyin: {
     command: "f2",
     build_args: (url) => ["dy", "-M", "post", "-u", url],
@@ -81,6 +89,7 @@ const PLATFORM_HANDLE_BASE_URLS = {
   // Keep aligned with DEFAULT_CONFIG_LINES examples.
   youtube: "https://www.youtube.com/@",
   rumble: "https://rumble.com/c/",
+  bitchute: "https://www.bitchute.com/channel/",
   x_f2: "https://x.com/",
   x_gallery_dl: "https://x.com/",
   douyin: "https://www.douyin.com/user/",
@@ -260,13 +269,13 @@ function build_help_text(script_name) {
     "",
     `${chalk.bold("Options")}`,
     `  -c, --config <path...>       YAML config path(s), supports glob patterns (default: ${chalk.gray(DEFAULT_CONFIG_PATH)})`,
-    "  -p, --platform <name...>     Only run these platforms (youtube, rumble, douyin, x_f2, x_gallery_dl)",
-    "      --exclude-platform <...> Skip these platforms (youtube, rumble, douyin, x_f2, x_gallery_dl)",
+    "  -p, --platform <name...>     Only run these platforms (youtube, rumble, bitchute, douyin, x_f2, x_gallery_dl)",
+    "      --exclude-platform <...> Skip these platforms (youtube, rumble, bitchute, douyin, x_f2, x_gallery_dl)",
     "      --state-file <path>      State cache path (default: ~/.command_base/exporter/processed.json)",
     `      --f2-output-dir <path>   f2 download output directory (default: ${chalk.gray(
       DEFAULT_F2_OUTPUT_DIR,
     )})`,
-    "  -r, --refresh [mode]         Refresh yt-dlp output (youtube, rumble; media, info, all; info skips subs/comments)",
+    "  -r, --refresh [mode]         Refresh yt-dlp output (youtube, rumble, bitchute; media, info, all; info skips subs/comments)",
     "      --stop-on-error          Stop on first failed export (default: false)",
     "  -d, --dry-run                Print commands without executing (default: false)",
     "      --quiet                  Print only warnings and errors (default: false)",
@@ -298,7 +307,7 @@ function build_help_text(script_name) {
     "",
     `${chalk.bold("YAML format")}`,
     "  # Each item must include name and handle",
-    "  # handle supports full URLs or usernames (e.g. youtube handle: user1, rumble handle: m16)",
+    "  # handle supports full URLs or usernames (e.g. youtube handle: user1, rumble handle: m16, bitchute handle: wnuZEpMvRZs6)",
     "  source:",
     "    x_f2:",
     "      - name: Example X user (f2)",
@@ -312,6 +321,9 @@ function build_help_text(script_name) {
     "    rumble:",
     "      - name: Example Rumble channel",
     "        handle: https://rumble.com/c/m16",
+    "    bitchute:",
+    "      - name: Example Bitchute channel",
+    "        handle: https://www.bitchute.com/channel/wnuZEpMvRZs6",
     "    youtube:",
     "      - name: Example YouTube channel",
     "        handle: https://www.youtube.com/@user1",
@@ -464,12 +476,12 @@ function parse_cli_arguments() {
       alias: "p",
       type: "array",
       describe:
-        "Only run these platforms (youtube, rumble, douyin, x_f2, x_gallery_dl)",
+        "Only run these platforms (youtube, rumble, bitchute, douyin, x_f2, x_gallery_dl)",
     })
     .option("exclude-platform", {
       type: "array",
       describe:
-        "Skip these platforms (youtube, rumble, douyin, x_f2, x_gallery_dl)",
+        "Skip these platforms (youtube, rumble, bitchute, douyin, x_f2, x_gallery_dl)",
     })
     .option("state-file", {
       type: "string",
@@ -484,7 +496,7 @@ function parse_cli_arguments() {
       alias: "r",
       type: "string",
       describe:
-        "Refresh yt-dlp output (youtube, rumble; media, info, all; default: info)",
+        "Refresh yt-dlp output (youtube, rumble, bitchute; media, info, all; default: info)",
     })
     .option("stop-on-error", {
       type: "boolean",
@@ -954,7 +966,12 @@ function build_xsave_yt_dlp_refresh_args(refresh_mode) {
 
 function build_refresh_args(platform_key, refresh_mode) {
   if (!refresh_mode) return [];
-  if (platform_key !== "youtube" && platform_key !== "rumble") return [];
+  if (
+    platform_key !== "youtube" &&
+    platform_key !== "rumble" &&
+    platform_key !== "bitchute"
+  )
+    return [];
   return build_xsave_yt_dlp_refresh_args(refresh_mode);
 }
 
