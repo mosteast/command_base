@@ -269,7 +269,7 @@ function build_help_text(script_name) {
     "",
     `${chalk.bold("Options")}`,
     `  -c, --config <path...>       YAML config path(s), supports glob patterns (default: ${chalk.gray(DEFAULT_CONFIG_PATH)})`,
-    "  -p, --platform <name...>     Only run these platforms (youtube, rumble, bitchute, douyin, x_f2, x_gallery_dl)",
+    "  -p, --platform <name...>     Only run these platforms (youtube, rumble, bitchute, douyin, x_f2, x_gallery_dl; default: all in config)",
     "      --exclude-platform <...> Skip these platforms (youtube, rumble, bitchute, douyin, x_f2, x_gallery_dl)",
     "      --state-file <path>      State cache path (default: ~/.command_base/exporter/processed.json)",
     `      --f2-output-dir <path>   f2 download output directory (default: ${chalk.gray(
@@ -549,6 +549,30 @@ function parse_cli_arguments() {
     ...normalize_list(argv.config),
     ...normalize_list(argv._ || []),
   ];
+  const raw_include_platforms = normalize_list(argv.platform);
+  const raw_exclude_platforms = normalize_list(argv["exclude-platform"]);
+
+  const include_platforms = [];
+  for (const raw_value of raw_include_platforms) {
+    const normalized_platform = normalize_platform_key(raw_value);
+    if (!normalized_platform) continue;
+    if (looks_like_config_path(raw_value)) {
+      config_patterns.push(raw_value);
+      continue;
+    }
+    include_platforms.push(normalized_platform);
+  }
+
+  const exclude_platforms = [];
+  for (const raw_value of raw_exclude_platforms) {
+    const normalized_platform = normalize_platform_key(raw_value);
+    if (!normalized_platform) continue;
+    if (looks_like_config_path(raw_value)) {
+      config_patterns.push(raw_value);
+      continue;
+    }
+    exclude_platforms.push(normalized_platform);
+  }
 
   let refresh_result = normalize_refresh_mode(argv.refresh);
   if (
@@ -569,12 +593,8 @@ function parse_cli_arguments() {
   return {
     command_name: argv.$0 || "batch_exporter",
     config_patterns,
-    include_platforms: normalize_list(argv.platform)
-      .map(normalize_platform_key)
-      .filter(Boolean),
-    exclude_platforms: normalize_list(argv["exclude-platform"])
-      .map(normalize_platform_key)
-      .filter(Boolean),
+    include_platforms,
+    exclude_platforms,
     state_file: argv["state-file"] ? String(argv["state-file"]) : "",
     f2_output_dir: normalize_f2_output_dir(
       argv["f2-output-dir"] === undefined
