@@ -42,6 +42,7 @@ const DEFAULT_CONFIG_LINES = [
   "      handle: https://www.douyin.com/user/EXAMPLE_ID",
 ];
 const DEFAULT_CONFIG_TEMPLATE = `${DEFAULT_CONFIG_LINES.join("\n")}\n`;
+const RANGE_VALUES = ["all", "source", "command"];
 
 const PLATFORM_ALIASES = {
   dy: "douyin",
@@ -271,6 +272,7 @@ function build_help_text(script_name) {
     `  -c, --config <path...>       YAML config path(s), supports glob patterns (default: ${chalk.gray(DEFAULT_CONFIG_PATH)})`,
     "  -p, --platform <name...>     Only run these platforms (youtube, rumble, bitchute, douyin, x_f2, x_gallery_dl; default: all in config)",
     "      --exclude-platform <...> Skip these platforms (youtube, rumble, bitchute, douyin, x_f2, x_gallery_dl)",
+    "      --range <name...>        Run range(s): all, source, command (default: all)",
     "      --state-file <path>      State cache path (default: ~/.command_base/exporter/processed.json)",
     `      --f2-output-dir <path>   f2 download output directory (default: ${chalk.gray(
       DEFAULT_F2_OUTPUT_DIR,
@@ -295,6 +297,15 @@ function build_help_text(script_name) {
     "",
     "  # Preview the commands without executing",
     `  ${example_cmd} --dry-run source/exporter.yaml`,
+    "",
+    "  # Run only source entries from config",
+    `  ${example_cmd} --range source source/exporter.yaml`,
+    "",
+    "  # Run only custom commands from command: in config",
+    `  ${example_cmd} --range command source/exporter.yaml`,
+    "",
+    "  # Run both source and command ranges explicitly",
+    `  ${example_cmd} --range source command source/exporter.yaml`,
     "",
     "  # Refresh metadata only (skip media downloads)",
     `  ${example_cmd} --refresh info source/exporter.yaml`,
@@ -327,6 +338,9 @@ function build_help_text(script_name) {
     "    youtube:",
     "      - name: Example YouTube channel",
     "        handle: https://www.youtube.com/@user1",
+    "  command:",
+    "    - name: Example custom command",
+    "      command: f2 x -M like -u user1",
   ].join("\n");
 }
 
@@ -417,6 +431,57 @@ function normalize_refresh_mode(raw_value) {
   return { mode: normalized, explicit: true };
 }
 
+function normalize_range_selection(raw_value) {
+  const raw_ranges = normalize_list(raw_value);
+  const normalized_ranges = raw_ranges
+    .map((entry) =>
+      String(entry || "")
+        .trim()
+        .toLowerCase(),
+    )
+    .filter(Boolean);
+
+  if (normalized_ranges.length === 0) {
+    return {
+      run_source_jobs: true,
+      run_command_jobs: true,
+      range_list: ["all"],
+    };
+  }
+
+  if (normalized_ranges.includes("all")) {
+    return {
+      run_source_jobs: true,
+      run_command_jobs: true,
+      range_list: ["all"],
+    };
+  }
+
+  const selected = new Set();
+  for (const range_text of normalized_ranges) {
+    if (!RANGE_VALUES.includes(range_text)) {
+      return { error: `Invalid range value: ${range_text}` };
+    }
+    if (range_text === "source" || range_text === "command") {
+      selected.add(range_text);
+    }
+  }
+
+  if (selected.size === 0) {
+    return {
+      run_source_jobs: true,
+      run_command_jobs: true,
+      range_list: ["all"],
+    };
+  }
+
+  return {
+    run_source_jobs: selected.has("source"),
+    run_command_jobs: selected.has("command"),
+    range_list: Array.from(selected),
+  };
+}
+
 function normalize_f2_output_dir(raw_value) {
   if (raw_value === undefined || raw_value === null) return "";
   const text = String(raw_value || "").trim();
@@ -482,6 +547,10 @@ function parse_cli_arguments() {
       type: "array",
       describe:
         "Skip these platforms (youtube, rumble, bitchute, douyin, x_f2, x_gallery_dl)",
+    })
+    .option("range", {
+      type: "array",
+      describe: "Run range(s): all, source, command (default: all)",
     })
     .option("state-file", {
       type: "string",
@@ -551,6 +620,27 @@ function parse_cli_arguments() {
   ];
   const raw_include_platforms = normalize_list(argv.platform);
   const raw_exclude_platforms = normalize_list(argv["exclude-platform"]);
+  const raw_range_values = normalize_list(argv.range);
+  const range_tokens = [];
+  for (const raw_value of raw_range_values) {
+    const normalized_range = String(raw_value || "")
+      .trim()
+      .toLowerCase();
+    if (!normalized_range) continue;
+    if (RANGE_VALUES.includes(normalized_range)) {
+      range_tokens.push(normalized_range);
+      continue;
+    }
+    if (looks_like_config_path(raw_value)) {
+      config_patterns.push(raw_value);
+      continue;
+    }
+
+    console.error(chalk.red(`Invalid range value: ${raw_value}`));
+    console.log(build_help_text(argv.$0 || "batch_exporter"));
+    process.exit(1);
+  }
+  const range_result = normalize_range_selection(range_tokens);
 
   const include_platforms = [];
   for (const raw_value of raw_include_platforms) {
@@ -590,6 +680,12 @@ function parse_cli_arguments() {
     process.exit(1);
   }
 
+  if (range_result.error) {
+    console.error(chalk.red(range_result.error));
+    console.log(build_help_text(argv.$0 || "batch_exporter"));
+    process.exit(1);
+  }
+
   return {
     command_name: argv.$0 || "batch_exporter",
     config_patterns,
@@ -601,6 +697,9 @@ function parse_cli_arguments() {
         ? DEFAULT_F2_OUTPUT_DIR
         : argv["f2-output-dir"],
     ),
+    range_list: range_result.range_list,
+    run_source_jobs: Boolean(range_result.run_source_jobs),
+    run_command_jobs: Boolean(range_result.run_command_jobs),
     refresh_mode: refresh_result.mode,
     refresh_mode_explicit: refresh_result.explicit,
     stop_on_error: Boolean(argv["stop-on-error"]),
@@ -838,15 +937,27 @@ async function init_config_file(file_path, options, logger) {
   return { status: "initialized" };
 }
 
-function normalize_source_map(raw_config, logger, source_label) {
+function normalize_source_map(raw_config, logger, source_label, options = {}) {
+  const suppress_missing_source_warning = Boolean(
+    options.suppress_missing_source_warning,
+  );
+  const allow_root_source_fallback =
+    options.allow_root_source_fallback !== false;
   if (!raw_config || typeof raw_config !== "object") {
-    logger.warn(`Config ${source_label} is empty or not an object.`);
+    if (!suppress_missing_source_warning) {
+      logger.warn(`Config ${source_label} is empty or not an object.`);
+    }
     return {};
   }
 
-  const source = raw_config.source || raw_config.sources || raw_config;
+  const source =
+    raw_config.source ||
+    raw_config.sources ||
+    (allow_root_source_fallback ? raw_config : null);
   if (!source || typeof source !== "object" || Array.isArray(source)) {
-    logger.warn(`Config ${source_label} has no "source" map to process.`);
+    if (!suppress_missing_source_warning) {
+      logger.warn(`Config ${source_label} has no "source" map to process.`);
+    }
     return {};
   }
 
@@ -924,6 +1035,56 @@ function has_valid_source_items(source_map) {
   return Object.values(source_map).some(
     (items) => Array.isArray(items) && items.length > 0,
   );
+}
+
+function normalize_command_list(raw_config, logger, source_label) {
+  if (!raw_config || typeof raw_config !== "object") return [];
+
+  const raw_command_list = raw_config.command || raw_config.commands;
+  if (!raw_command_list) return [];
+
+  const command_list = [];
+
+  function add_command(entry, entry_label) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      logger.warn(
+        `Config ${source_label} ${entry_label} in command must be an object with command.`,
+      );
+      return;
+    }
+
+    const command_text = String(entry.command || entry.cmd || "").trim();
+    const name_text = String(entry.name || "").trim();
+
+    if (!command_text) {
+      logger.warn(
+        `Config ${source_label} ${entry_label} in command requires command.`,
+      );
+      return;
+    }
+
+    command_list.push({
+      name: name_text,
+      command_text,
+    });
+  }
+
+  if (Array.isArray(raw_command_list)) {
+    raw_command_list.forEach((entry, index) => {
+      add_command(entry, `entry ${index + 1}`);
+    });
+    return command_list;
+  }
+
+  if (typeof raw_command_list === "object") {
+    add_command(raw_command_list, "entry");
+    return command_list;
+  }
+
+  logger.warn(
+    `Config ${source_label} "command" must be a list of entries with name and command.`,
+  );
+  return command_list;
 }
 
 function print_config_sample(logger) {
@@ -1198,6 +1359,25 @@ function build_jobs_from_sources(source_maps, logger) {
   return { job_list, duplicate_count };
 }
 
+function build_jobs_from_commands(command_maps) {
+  const job_list = [];
+
+  for (const source of command_maps) {
+    const source_file = source.source_file;
+    const command_list = source.command_list;
+
+    for (const item of command_list) {
+      job_list.push({
+        name: String(item.name || "").trim(),
+        command_text: String(item.command_text || "").trim(),
+        source_file,
+      });
+    }
+  }
+
+  return job_list;
+}
+
 async function run_export_job(job, command_config, options, logger) {
   const command_text = format_command(
     command_config.command,
@@ -1273,6 +1453,156 @@ async function run_export_job(job, command_config, options, logger) {
   });
 }
 
+async function run_custom_command_job(job, options, logger) {
+  const command_text = String(job.command_text || "").trim();
+  const name_suffix = job.name ? ` (${job.name})` : "";
+  logger.info(
+    `Run ${palette.path("command")}${name_suffix}: ${palette.detail(command_text)}`,
+  );
+
+  if (shutdown_state.requested) {
+    logger.warn(
+      `Skip command due to stop request: ${palette.detail(command_text)}`,
+    );
+    return {
+      ok: false,
+      command_text,
+      exit_code: shutdown_state.exit_code || 130,
+      aborted: true,
+    };
+  }
+
+  if (options.dry_run) {
+    logger.success("Dry-run mode: command not executed.");
+    return { ok: true, command_text, exit_code: 0, dry_run: true };
+  }
+
+  logger.debug(`IO: spawn ${command_text}`);
+
+  return new Promise((resolve) => {
+    const stdio_mode = options.quiet_mode
+      ? ["ignore", "ignore", "inherit"]
+      : "inherit";
+    const child = spawn(command_text, {
+      stdio: stdio_mode,
+      shell: true,
+    });
+    active_child_process = child;
+
+    child.on("error", (error) => {
+      clear_active_child();
+      logger.error("Failed to launch custom command.", error);
+      resolve({ ok: false, command_text, exit_code: 1 });
+    });
+
+    child.on("close", (code, signal) => {
+      clear_active_child();
+      if (signal) {
+        if (shutdown_state.requested) {
+          logger.warn(`Stopped by ${signal}: ${command_text}`);
+          resolve({ ok: false, command_text, exit_code: 1, aborted: true });
+        } else {
+          logger.error(
+            `Command terminated by signal ${signal}: ${command_text}`,
+          );
+          resolve({ ok: false, command_text, exit_code: 1 });
+        }
+        return;
+      }
+      const exit_code = typeof code === "number" ? code : 1;
+      if (shutdown_state.requested) {
+        logger.warn(`Stopped: ${command_text}`);
+        resolve({ ok: false, command_text, exit_code, aborted: true });
+        return;
+      }
+      if (exit_code === 0) {
+        logger.success(`Success: ${command_text}`);
+        resolve({ ok: true, command_text, exit_code });
+      } else {
+        logger.error(`Failed (exit ${exit_code}): ${command_text}`);
+        resolve({ ok: false, command_text, exit_code });
+      }
+    });
+  });
+}
+
+async function run_custom_command_jobs(
+  command_maps,
+  options,
+  logger,
+  run_settings = {},
+) {
+  const warn_when_empty = run_settings.warn_when_empty !== false;
+  logger.debug("Step: build custom command list");
+  const command_jobs = build_jobs_from_commands(command_maps);
+
+  if (command_jobs.length === 0) {
+    if (warn_when_empty) {
+      logger.warn('No entries found in config "command" section.');
+    } else {
+      logger.debug('No entries found in config "command" section; skipping.');
+    }
+    return { failed: 0, executed: 0, dry_run: 0, aborted: 0, has_jobs: false };
+  }
+
+  logger.debug("Step: execute custom command jobs");
+  let executed = 0;
+  let failed = 0;
+  let dry_run_count = 0;
+  let aborted = 0;
+
+  for (let index = 0; index < command_jobs.length; index += 1) {
+    const job = command_jobs[index];
+    logger.debug(`Step: command job ${index + 1}/${command_jobs.length}`);
+
+    if (shutdown_state.requested) {
+      aborted += 1;
+      logger.warn("Stop requested; skipping remaining commands.");
+      break;
+    }
+
+    const result = await run_custom_command_job(job, options, logger);
+    if (result.aborted) {
+      aborted += 1;
+      break;
+    }
+
+    if (result.dry_run) {
+      dry_run_count += 1;
+      continue;
+    }
+
+    executed += 1;
+    if (!result.ok) {
+      failed += 1;
+      if (options.stop_on_error) {
+        logger.warn("Stopping on first failure as requested.");
+        break;
+      }
+    }
+  }
+
+  logger.debug("Step: print custom command summary");
+  const summary_lines = [
+    `Total commands: ${command_jobs.length}`,
+    `Executed: ${executed}`,
+    `Dry-run: ${dry_run_count}`,
+    `Failed: ${failed}`,
+  ];
+  if (aborted > 0) {
+    summary_lines.push(`Aborted: ${aborted}`);
+  }
+  logger.info(summary_lines.join(" | "));
+
+  return {
+    failed,
+    executed,
+    dry_run: dry_run_count,
+    aborted,
+    has_jobs: true,
+  };
+}
+
 async function run_export_command() {
   const options = parse_cli_arguments();
   const logger = create_logger({
@@ -1282,6 +1612,16 @@ async function run_export_command() {
   });
   logger.debug("Step: register signal handlers");
   register_signal_handlers(logger);
+
+  if (!options.run_source_jobs && options.include_platforms.length > 0) {
+    logger.warn("Ignore --platform when source range is not selected.");
+  }
+  if (!options.run_source_jobs && options.exclude_platforms.length > 0) {
+    logger.warn("Ignore --exclude-platform when source range is not selected.");
+  }
+  if (!options.run_source_jobs && options.refresh_mode_explicit) {
+    logger.warn("Ignore --refresh when source range is not selected.");
+  }
 
   logger.debug("Step: prepare config patterns");
   const default_config_path = path.resolve(DEFAULT_CONFIG_PATH);
@@ -1313,24 +1653,47 @@ async function run_export_command() {
 
   logger.debug("Step: load config files");
   const source_maps = [];
+  const command_maps = [];
   for (const file_path of config_files) {
     const resolved_path = path.resolve(expand_user_path(file_path));
     try {
       const raw_config = await read_yaml_file(resolved_path, logger);
       logger.debug(`Step: validate config content ${resolved_path}`);
+      const normalized_config = raw_config || {};
       const source_map = normalize_source_map(
-        raw_config || {},
+        normalized_config,
+        logger,
+        resolved_path,
+        {
+          suppress_missing_source_warning: !options.run_source_jobs,
+          allow_root_source_fallback: options.run_source_jobs,
+        },
+      );
+      const command_list = normalize_command_list(
+        normalized_config,
         logger,
         resolved_path,
       );
-      if (!has_valid_source_items(source_map)) {
+
+      const has_source_entries = has_valid_source_items(source_map);
+      if (has_source_entries) {
+        source_maps.push({ source_file: resolved_path, source_map });
+      }
+      if (command_list.length > 0) {
+        command_maps.push({ source_file: resolved_path, command_list });
+      }
+
+      if (
+        options.run_source_jobs &&
+        !options.run_command_jobs &&
+        !has_source_entries
+      ) {
         logger.error(
           `Config ${palette.path(resolved_path)} has no valid source entries.`,
         );
         print_config_sample(logger);
         process.exit(1);
       }
-      source_maps.push({ source_file: resolved_path, source_map });
     } catch (error) {
       logger.error(`Unable to process config ${resolved_path}.`, error);
       print_config_sample(logger);
@@ -1338,156 +1701,185 @@ async function run_export_command() {
     }
   }
 
-  logger.debug("Step: build job list");
-  const { job_list: all_jobs, duplicate_count } = build_jobs_from_sources(
-    source_maps,
-    logger,
-  );
+  let source_failed = 0;
+  let command_failed = 0;
 
-  if (duplicate_count > 0) {
-    logger.info(`Skipped ${duplicate_count} duplicate handle entries.`);
-  }
-
-  logger.debug("Step: filter jobs by platform");
-  const filtered_jobs = filter_jobs(all_jobs, options);
-
-  if (filtered_jobs.length === 0) {
-    logger.warn("No jobs matched the provided config and filters.");
-    console.log(build_help_text(options.command_name));
-    process.exit(0);
-  }
-
-  logger.debug("Step: prepare state cache");
-  const state_file = path.resolve(
-    expand_user_path(options.state_file || DEFAULT_STATE_FILE),
-  );
-  const state_data = await load_state(state_file, logger);
-
-  logger.debug("Step: resolve pointer");
-  const pointer_key =
-    state_data.pointer && typeof state_data.pointer.job_key === "string"
-      ? state_data.pointer.job_key
-      : "";
-  const pointer_index = resolve_pointer_index(filtered_jobs, pointer_key);
-  const pointer_found = pointer_index >= 0;
-  const last_index = filtered_jobs.length - 1;
-  const pointer_at_last = pointer_found && pointer_index === last_index;
-
-  let start_index = 0;
-  if (pointer_found && !pointer_at_last) {
-    start_index = pointer_index + 1;
-    const pointer_job = filtered_jobs[pointer_index];
-    const display_handle = format_handle_for_log(
-      pointer_job.handle,
-      pointer_job.url,
-    );
-    logger.info(
-      `Resume after pointer ${pointer_index + 1}/${filtered_jobs.length}: ${palette.path(display_handle)}`,
-    );
-  } else if (pointer_key && !pointer_found) {
-    logger.warn("Pointer not found in current job list; starting from first.");
-  } else if (pointer_at_last) {
-    logger.debug("Pointer at last record; starting full export.");
-  } else {
-    logger.debug("No pointer set; starting from first.");
-  }
-
-  const refresh_mode = resolve_effective_refresh_mode(options);
-  if (refresh_mode) {
-    logger.info(`Refresh mode: ${refresh_mode}`);
-  }
-
-  logger.debug("Step: execute export jobs");
-  let skipped_pointer = start_index;
-  let skipped_unknown = 0;
-  let executed = 0;
-  let failed = 0;
-  let dry_run_count = 0;
-  let aborted = 0;
-  let pointer_locked = false;
-
-  const jobs_to_process = filtered_jobs.slice(start_index);
-  for (let offset = 0; offset < jobs_to_process.length; offset += 1) {
-    const job = jobs_to_process[offset];
-    const job_index = start_index + offset;
-    logger.debug(
-      `Step: job ${job_index + 1}/${filtered_jobs.length} ${job.platform_key}`,
+  if (options.run_source_jobs) {
+    logger.debug("Step: build job list");
+    const { job_list: all_jobs, duplicate_count } = build_jobs_from_sources(
+      source_maps,
+      logger,
     );
 
-    if (shutdown_state.requested) {
-      aborted += 1;
-      logger.warn("Stop requested; skipping remaining jobs.");
-      break;
+    if (duplicate_count > 0) {
+      logger.info(`Skipped ${duplicate_count} duplicate handle entries.`);
     }
 
-    const command_config = build_platform_command(
-      job.platform_key,
-      job.url,
-      refresh_mode,
-      options,
-    );
-    if (!command_config) {
-      skipped_unknown += 1;
-      logger.warn(
-        `Unsupported platform ${job.platform_key} in ${job.source_file}.`,
-      );
-      if (!pointer_locked) {
-        update_pointer_state(state_data, job);
-      }
-      continue;
-    }
+    logger.debug("Step: filter jobs by platform");
+    const filtered_jobs = filter_jobs(all_jobs, options);
 
-    const result = await run_export_job(job, command_config, options, logger);
-    if (result.aborted) {
-      aborted += 1;
-      break;
-    }
-    if (result.dry_run) {
-      dry_run_count += 1;
-      continue;
-    }
-    executed += 1;
-    if (result.ok) {
-      record_processed(state_data, job, result.command_text);
-      if (!pointer_locked) {
-        update_pointer_state(state_data, job);
+    if (filtered_jobs.length === 0) {
+      logger.warn("No source jobs matched the provided config and filters.");
+      if (!options.run_command_jobs) {
+        console.log(build_help_text(options.command_name));
+        process.exit(0);
       }
     } else {
-      failed += 1;
-      pointer_locked = true;
-      if (options.stop_on_error) {
-        logger.warn("Stopping on first failure as requested.");
-        break;
+      logger.debug("Step: prepare state cache");
+      const state_file = path.resolve(
+        expand_user_path(options.state_file || DEFAULT_STATE_FILE),
+      );
+      const state_data = await load_state(state_file, logger);
+
+      logger.debug("Step: resolve pointer");
+      const pointer_key =
+        state_data.pointer && typeof state_data.pointer.job_key === "string"
+          ? state_data.pointer.job_key
+          : "";
+      const pointer_index = resolve_pointer_index(filtered_jobs, pointer_key);
+      const pointer_found = pointer_index >= 0;
+      const last_index = filtered_jobs.length - 1;
+      const pointer_at_last = pointer_found && pointer_index === last_index;
+
+      let start_index = 0;
+      if (pointer_found && !pointer_at_last) {
+        start_index = pointer_index + 1;
+        const pointer_job = filtered_jobs[pointer_index];
+        const display_handle = format_handle_for_log(
+          pointer_job.handle,
+          pointer_job.url,
+        );
+        logger.info(
+          `Resume after pointer ${pointer_index + 1}/${filtered_jobs.length}: ${palette.path(display_handle)}`,
+        );
+      } else if (pointer_key && !pointer_found) {
+        logger.warn(
+          "Pointer not found in current job list; starting from first.",
+        );
+      } else if (pointer_at_last) {
+        logger.debug("Pointer at last record; starting full export.");
+      } else {
+        logger.debug("No pointer set; starting from first.");
       }
+
+      const refresh_mode = resolve_effective_refresh_mode(options);
+      if (refresh_mode) {
+        logger.info(`Refresh mode: ${refresh_mode}`);
+      }
+
+      logger.debug("Step: execute export jobs");
+      let skipped_pointer = start_index;
+      let skipped_unknown = 0;
+      let executed = 0;
+      let failed = 0;
+      let dry_run_count = 0;
+      let aborted = 0;
+      let pointer_locked = false;
+
+      const jobs_to_process = filtered_jobs.slice(start_index);
+      for (let offset = 0; offset < jobs_to_process.length; offset += 1) {
+        const job = jobs_to_process[offset];
+        const job_index = start_index + offset;
+        logger.debug(
+          `Step: job ${job_index + 1}/${filtered_jobs.length} ${job.platform_key}`,
+        );
+
+        if (shutdown_state.requested) {
+          aborted += 1;
+          logger.warn("Stop requested; skipping remaining jobs.");
+          break;
+        }
+
+        const command_config = build_platform_command(
+          job.platform_key,
+          job.url,
+          refresh_mode,
+          options,
+        );
+        if (!command_config) {
+          skipped_unknown += 1;
+          logger.warn(
+            `Unsupported platform ${job.platform_key} in ${job.source_file}.`,
+          );
+          if (!pointer_locked) {
+            update_pointer_state(state_data, job);
+          }
+          continue;
+        }
+
+        const result = await run_export_job(
+          job,
+          command_config,
+          options,
+          logger,
+        );
+        if (result.aborted) {
+          aborted += 1;
+          break;
+        }
+        if (result.dry_run) {
+          dry_run_count += 1;
+          continue;
+        }
+        executed += 1;
+        if (result.ok) {
+          record_processed(state_data, job, result.command_text);
+          if (!pointer_locked) {
+            update_pointer_state(state_data, job);
+          }
+        } else {
+          failed += 1;
+          pointer_locked = true;
+          if (options.stop_on_error) {
+            logger.warn("Stopping on first failure as requested.");
+            break;
+          }
+        }
+      }
+
+      if (!options.dry_run) {
+        logger.debug("Step: save state cache");
+        await save_state(state_file, state_data, logger);
+      }
+
+      logger.debug("Step: print summary");
+      const summary_lines = [
+        `Total jobs: ${filtered_jobs.length}`,
+        `Executed: ${executed}`,
+        `Dry-run: ${dry_run_count}`,
+        `Skipped before pointer: ${skipped_pointer}`,
+        `Skipped unknown platforms: ${skipped_unknown}`,
+        `Failed: ${failed}`,
+      ];
+      if (aborted > 0) {
+        summary_lines.push(`Aborted: ${aborted}`);
+      }
+      logger.info(summary_lines.join(" | "));
+      source_failed = failed;
     }
   }
-
-  if (!options.dry_run) {
-    logger.debug("Step: save state cache");
-    await save_state(state_file, state_data, logger);
-  }
-
-  logger.debug("Step: print summary");
-  const summary_lines = [
-    `Total jobs: ${filtered_jobs.length}`,
-    `Executed: ${executed}`,
-    `Dry-run: ${dry_run_count}`,
-    `Skipped before pointer: ${skipped_pointer}`,
-    `Skipped unknown platforms: ${skipped_unknown}`,
-    `Failed: ${failed}`,
-  ];
-  if (aborted > 0) {
-    summary_lines.push(`Aborted: ${aborted}`);
-  }
-
-  logger.info(summary_lines.join(" | "));
 
   if (shutdown_state.requested) {
     logger.warn(`Stopped by ${shutdown_state.signal}.`);
     process.exit(shutdown_state.exit_code || 130);
   }
 
-  if (failed > 0) {
+  if (options.run_command_jobs) {
+    const command_result = await run_custom_command_jobs(
+      command_maps,
+      options,
+      logger,
+      { warn_when_empty: !options.run_source_jobs },
+    );
+    command_failed = command_result.failed;
+  }
+
+  if (shutdown_state.requested) {
+    logger.warn(`Stopped by ${shutdown_state.signal}.`);
+    process.exit(shutdown_state.exit_code || 130);
+  }
+
+  if (source_failed > 0 || command_failed > 0) {
     process.exit(1);
   }
 }
