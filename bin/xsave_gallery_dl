@@ -16,6 +16,7 @@ write_tags=true
 enable_twitter_conversations=true
 enable_twitter_replies=true
 enable_twitter_quoted=true
+twitter_ratelimit_mode="abort"
 
 use_archive=true
 archive_dir="${HOME}/.gallery-dl/archives"
@@ -26,7 +27,7 @@ refresh=false
 debug_mode=false
 quiet_mode=false
 dry_run=false
-script_version="1.0.1"
+script_version="1.0.2"
 
 # Color codes for output readability
 color_reset=$'\033[0m'
@@ -187,6 +188,29 @@ cleanup_zero_byte_files() {
     log_success "Removed ${removed_count} zero-byte file(s) from '${target_dir}'."
 }
 
+is_valid_twitter_ratelimit_mode() {
+    local mode="$1"
+    if [ -z "$mode" ]; then
+        return 1
+    fi
+
+    case "$mode" in
+        abort|wait)
+            return 0
+            ;;
+        wait:*)
+            local wait_seconds="${mode#wait:}"
+            if [[ "$wait_seconds" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+                return 0
+            fi
+            return 1
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 show_usage() {
     local script_name
     script_name=$(basename "$0")
@@ -202,6 +226,7 @@ ${color_blue}Description:${color_reset}
     - Cookies file: ${default_cookies_file} (if present)
     - Write info JSON, metadata, and tags
     - Enable Twitter conversations and quoted tweets
+    - Abort on Twitter rate limits (skip waiting)
     - Use a download archive to skip already processed files
 
   Pass any gallery-dl options after "--" to keep full compatibility.
@@ -227,6 +252,13 @@ ${color_blue}Options:${color_reset}
                               Disable Twitter conversations (default: false)
       --no-twitter-replies    Disable Twitter replies (default: false)
       --no-twitter-quoted     Disable Twitter quoted tweets (default: false)
+      --twitter-ratelimit <mode>
+                              Twitter rate-limit mode (default: abort)
+                              abort: fail immediately
+                              wait: wait until reset time
+                              wait:<seconds>: wait fixed seconds
+      --twitter-ratelimit-wait
+                              Alias for --twitter-ratelimit wait
       --                      Pass remaining arguments to gallery-dl
 
 ${color_blue}Examples:${color_reset}
@@ -238,6 +270,9 @@ ${color_blue}Examples:${color_reset}
 
   # Pass extra gallery-dl options (sleep + retries)
   \$0 https://x.com/user -- --sleep 1.5 --retries 6
+
+  # Re-enable waiting for Twitter rate limits
+  \$0 --twitter-ratelimit wait https://x.com/user
 
   # Use a custom cookies file and disable tags
   \$0 --cookies "\$HOME/Downloads/cookies.txt" --no-write-tags https://x.com/user
@@ -402,6 +437,31 @@ while [[ $# -gt 0 ]]; do
             enable_twitter_quoted=false
             shift
             ;;
+        --twitter-ratelimit=*)
+            twitter_ratelimit_mode="${1#*=}"
+            if ! is_valid_twitter_ratelimit_mode "$twitter_ratelimit_mode"; then
+                log_error "Invalid --twitter-ratelimit value: '${twitter_ratelimit_mode}'. Use: abort | wait | wait:<seconds>."
+                exit 1
+            fi
+            shift
+            ;;
+        --twitter-ratelimit)
+            if [ -n "$2" ]; then
+                twitter_ratelimit_mode="$2"
+                if ! is_valid_twitter_ratelimit_mode "$twitter_ratelimit_mode"; then
+                    log_error "Invalid --twitter-ratelimit value: '${twitter_ratelimit_mode}'. Use: abort | wait | wait:<seconds>."
+                    exit 1
+                fi
+                shift 2
+            else
+                log_error "Twitter rate-limit mode is required after --twitter-ratelimit."
+                exit 1
+            fi
+            ;;
+        --twitter-ratelimit-wait)
+            twitter_ratelimit_mode="wait"
+            shift
+            ;;
         --)
             shift
             extra_opts=("$@")
@@ -549,6 +609,7 @@ fi
 if [ "$enable_twitter_quoted" = true ]; then
     gallery_dl_args+=(-o "extractor.twitter.quoted=true")
 fi
+gallery_dl_args+=(-o "extractor.twitter.ratelimit=${twitter_ratelimit_mode}")
 
 if [ ${#cookie_opts[@]} -gt 0 ]; then
     gallery_dl_args+=("${cookie_opts[@]}")
