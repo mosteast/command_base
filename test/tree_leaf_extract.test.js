@@ -6,8 +6,8 @@ import { describe, it, expect } from "vitest";
 
 import leaf_extract_module from "../lib/tree/leaf_extract";
 
-const { extract_leaf_levels } = leaf_extract_module;
-const json_cli_entry = path.resolve(__dirname, "../bin/json_tree_leaf_extract");
+const { extract_leaf_levels, extract_tree_levels } = leaf_extract_module;
+const json_cli_entry = path.resolve(__dirname, "../bin/json_tree_extract");
 
 const input_tree = [
   {
@@ -130,8 +130,31 @@ describe("tree leaf extraction", () => {
   });
 });
 
-describe("json_tree_leaf_extract CLI", () => {
-  it("writes extracted leaves next to the input file", async () => {
+describe("tree root extraction", () => {
+  it("extracts level 1 from root", () => {
+    const { output_data } = extract_tree_levels(input_tree, { level: 1 });
+
+    expect(output_data).toEqual([{ value: "1" }, { value: "2" }]);
+  });
+
+  it("extracts level 2 from root", () => {
+    const { output_data } = extract_tree_levels(input_tree, { level: 2 });
+
+    expect(output_data).toEqual([
+      {
+        value: "1",
+        children: [{ value: "1.1" }, { value: "1.2" }],
+      },
+      {
+        value: "2",
+        children: [{ value: "2.1" }, { value: "2.2" }],
+      },
+    ]);
+  });
+});
+
+describe("json_tree_extract CLI", () => {
+  it("writes root-level extraction next to the input file by default", async () => {
     const temp_root = await create_temp_dir();
     const input_file = path.join(temp_root, "tree.json");
 
@@ -139,6 +162,27 @@ describe("json_tree_leaf_extract CLI", () => {
 
     try {
       const result = await run_cli([input_file]);
+
+      expect(result.exit_code).toBe(0);
+
+      const output_file = path.join(temp_root, "tree.tree.1.json");
+      const output_text = await fs.readFile(output_file, "utf8");
+      const output_data = JSON.parse(output_text);
+
+      expect(output_data).toEqual([{ value: "1" }, { value: "2" }]);
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps legacy behavior when using --from-leaf", async () => {
+    const temp_root = await create_temp_dir();
+    const input_file = path.join(temp_root, "tree.json");
+
+    await fs.writeFile(input_file, JSON.stringify(input_tree), "utf8");
+
+    try {
+      const result = await run_cli(["--from-leaf", input_file]);
 
       expect(result.exit_code).toBe(0);
 
