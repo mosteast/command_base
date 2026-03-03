@@ -1,0 +1,925 @@
+#!/usr/bin/env node
+
+"use strict";
+
+const fs = require("fs/promises");
+const path = require("path");
+const os = require("os");
+const { spawnSync } = require("child_process");
+const { sync: globSync } = require("glob");
+const chalk = require("chalk");
+const yargs = require("yargs");
+
+const command_name = path.basename(process.argv[1] || "html2epub");
+const package_info = (() => {
+  try {
+    return require(path.resolve(__dirname, "..", "package.json"));
+  } catch (error) {
+    return { version: "0.0.0" };
+  }
+})();
+
+const XHTML_DOCTYPE =
+  '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">';
+const STDIN_SENTINEL = "-";
+
+function build_help_text(script_name) {
+  return [
+    `${chalk.bold("Usage")}`,
+    `  ${script_name} [options] <html|glob ...>`,
+    `  ${script_name} --input <html|glob ...> [--cover <cover-image>]`,
+    "",
+    `${chalk.bold("Description")}`,
+    "  Convert one or more HTML files into EPUB2 files with optional embedded local cover images.",
+    "  Supports glob patterns, safe skip behavior, and manual EPUB packaging for compatibility.",
+    "",
+    `${chalk.bold("Options")}`,
+    "  -i, --input <path|glob...>   Input HTML files or glob patterns (can repeat)",
+    "  -c, --cover <path>           Optional cover image path (.jpg/.jpeg/.png)",
+    "  -o, --output <path>          Output EPUB path (single input only)",
+    "      --out-dir <dir>          Output directory for generated EPUB files",
+    "      --title <text>           Override title for all generated EPUB files",
+    "      --author <text>          Override author for all generated EPUB files",
+    "      --lang <code>            Metadata language code (default: en)",
+    "      --cover-url-match <txt>  Replace first matching <img src> in body with local cover (with --cover)",
+    "      --refresh                Rebuild even if output EPUB already exists (default: false)",
+    "  -d, --dry-run                Print planned actions without writing files (default: false)",
+    "      --quiet                  Suppress info/debug logs (default: false)",
+    "      --debug                  Print verbose debug logs (default: false)",
+    "  -v, --version                Show version number and exit",
+    "  -h, --help                   Show this help message and exit",
+    "",
+    `${chalk.bold("Examples")}`,
+    "  # Convert a single HTML file into a sibling EPUB without a cover image",
+    "  $0 \"ebook/book.html\"",
+    "",
+    "  # Convert using explicit input option and a local cover image",
+    "  $0 --input \"ebook/book.html\" --cover \"/Users/me/cover.jpg\"",
+    "",
+    "  # Convert using explicit input option and custom output path",
+    "  $0 --input \"ebook/book.html\" --cover \"cover.jpg\" --output \"ebook/book.epub\"",
+    "",
+    "  # Convert multiple HTML files via glob into one output directory",
+    "  $0 \"ebook/**/*.html\" --cover \"cover.png\" --out-dir \"dist/epub\"",
+    "",
+    "  # Preview work only, without writing files",
+    "  $0 \"ebook/*.html\" --cover \"cover.jpg\" --dry-run --debug",
+  ].join("\n");
+}
+
+function create_logger({ quiet_mode, debug_mode }) {
+  const prefix = chalk.dim(`[${command_name}]`);
+
+  return {
+    info(message) {
+      if (quiet_mode) return;
+      console.log(prefix, chalk.cyan(message));
+    },
+    success(message) {
+      if (quiet_mode) return;
+      console.log(prefix, chalk.green(message));
+    },
+    warn(message) {
+      console.warn(prefix, chalk.yellow(message));
+    },
+    error(message) {
+      console.error(prefix, chalk.red(message));
+    },
+    debug(message) {
+      if (!debug_mode || quiet_mode) return;
+      console.log(prefix, chalk.magenta(`[debug] ${message}`));
+    },
+  };
+}
+
+function parse_cli_arguments() {
+  const argv = yargs(process.argv.slice(2))
+    .scriptName(command_name)
+    .help(false)
+    .version(false)
+    .parserConfiguration({
+      "camel-case-expansion": false,
+      "strip-dashed": false,
+    })
+    .option("input", {
+      alias: "i",
+      type: "array",
+      describe: "Input HTML files or glob patterns",
+    })
+    .option("cover", {
+      alias: "c",
+      type: "string",
+      describe: "Optional cover image path (.jpg/.jpeg/.png)",
+    })
+    .option("output", {
+      alias: "o",
+      type: "string",
+      describe: "Output EPUB path for single input",
+    })
+    .option("out-dir", {
+      type: "string",
+      describe: "Output directory for generated EPUB files",
+    })
+    .option("title", {
+      type: "string",
+      describe: "Override title metadata",
+    })
+    .option("author", {
+      type: "string",
+      describe: "Override author metadata",
+    })
+    .option("lang", {
+      type: "string",
+      default: "en",
+      describe: "Metadata language code",
+    })
+    .option("cover-url-match", {
+      type: "string",
+      default: "",
+      describe: "Substring used to match and replace cover image URL in HTML body (with --cover)",
+    })
+    .option("refresh", {
+      type: "boolean",
+      default: false,
+      describe: "Rebuild even if output file already exists",
+    })
+    .option("dry-run", {
+      alias: "d",
+      type: "boolean",
+      default: false,
+      describe: "Show planned changes without writing files",
+    })
+    .option("quiet", {
+      type: "boolean",
+      default: false,
+      describe: "Suppress non-error logs",
+    })
+    .option("debug", {
+      type: "boolean",
+      default: false,
+      describe: "Enable verbose debug logs",
+    })
+    .option("version", {
+      alias: "v",
+      type: "boolean",
+      describe: "Show version number and exit",
+    })
+    .option("help", {
+      alias: "h",
+      type: "boolean",
+      describe: "Show help text and exit",
+    })
+    .strict(false)
+    .usage(build_help_text(command_name))
+    .wrap(Math.min(yargs.terminalWidth(), 110))
+    .parse();
+
+  if (argv.help) {
+    console.log(build_help_text(command_name));
+    process.exit(0);
+  }
+
+  if (argv.version) {
+    console.log(package_info.version || "0.0.0");
+    process.exit(0);
+  }
+
+  const patterns = [];
+  for (const arg of argv._ || []) {
+    patterns.push(String(arg));
+  }
+  for (const value of argv.input || []) {
+    patterns.push(String(value));
+  }
+
+  return {
+    patterns,
+    cover_path: argv.cover ? path.resolve(String(argv.cover)) : "",
+    output_path: argv.output ? path.resolve(String(argv.output)) : "",
+    out_dir: argv["out-dir"] ? path.resolve(String(argv["out-dir"])) : "",
+    override_title: argv.title ? String(argv.title) : "",
+    override_author: argv.author ? String(argv.author) : "",
+    lang: String(argv.lang || "en"),
+    cover_url_match: String(argv["cover-url-match"] || ""),
+    refresh: Boolean(argv.refresh),
+    dry_run: Boolean(argv["dry-run"]),
+    quiet_mode: Boolean(argv.quiet),
+    debug_mode: Boolean(argv.debug),
+  };
+}
+
+function looks_like_html_path(file_path) {
+  const ext = path.extname(file_path).toLowerCase();
+  return ext === ".html" || ext === ".htm" || ext === ".xhtml";
+}
+
+function infer_image_media_type(file_path) {
+  const ext = path.extname(file_path).toLowerCase();
+  if (ext === ".jpg" || ext === ".jpeg") return "image/jpeg";
+  if (ext === ".png") return "image/png";
+  return "";
+}
+
+function infer_cover_file_name(file_path) {
+  const ext = path.extname(file_path).toLowerCase();
+  const normalized = ext === ".jpeg" ? ".jpg" : ext;
+  return `cover${normalized || ".jpg"}`;
+}
+
+function infer_cover_matcher(cover_path) {
+  const base = path.basename(cover_path || "");
+  const first_token = base.split(".")[0] || "";
+  return first_token;
+}
+
+function strip_extension(file_path) {
+  const ext = path.extname(file_path);
+  return ext ? file_path.slice(0, -ext.length) : file_path;
+}
+
+function xml_escape(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+function xml_escape_attr(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function escape_regex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function strip_tags(value) {
+  return String(value || "").replace(/<[^>]+>/g, "");
+}
+
+function decode_html(value) {
+  return String(value || "")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&#x27;/gi, "'");
+}
+
+function extract_tag_text(html_text, tag_name) {
+  const regex = new RegExp(`<${tag_name}\\b[^>]*>([\\s\\S]*?)<\\/${tag_name}>`, "i");
+  const match = String(html_text || "").match(regex);
+  if (!match) return "";
+  return decode_html(strip_tags(match[1])).trim();
+}
+
+function extract_by_class_tag_text(html_text, class_name) {
+  const escaped = escape_regex(class_name);
+  const regex = new RegExp(
+    `<([a-zA-Z0-9]+)\\b[^>]*class=["'][^"']*\\b${escaped}\\b[^"']*["'][^>]*>([\\s\\S]*?)<\\/\\1>`,
+    "i",
+  );
+  const match = String(html_text || "").match(regex);
+  if (!match) return "";
+  return decode_html(strip_tags(match[2])).trim();
+}
+
+function extract_styles(html_text) {
+  const regex = /<style\b[^>]*>([\s\S]*?)<\/style>/gi;
+  const chunks = [];
+  let match;
+  while ((match = regex.exec(String(html_text || "")))) {
+    chunks.push((match[1] || "").trim());
+  }
+  const style_text = chunks.join("\n\n").trim();
+  return style_text || "body { font-family: serif; line-height: 1.5; margin: 1em; }";
+}
+
+function extract_body(html_text) {
+  const match = String(html_text || "").match(/<body\b[^>]*>([\s\S]*?)<\/body>/i);
+  return (match ? match[1] : String(html_text || "")).trim();
+}
+
+function replace_cover_image_in_body(body_html, matcher, cover_file_name) {
+  let replaced = false;
+  const updated = String(body_html || "").replace(/<img\b[^>]*>/gi, (tag) => {
+    const src_match = tag.match(/\bsrc=(["'])(.*?)\1/i);
+    if (!src_match) return tag;
+
+    const src_value = src_match[2] || "";
+    const should_replace =
+      !replaced &&
+      (matcher
+        ? src_value.includes(matcher)
+        : /\bcover-image\b/i.test(tag) || /^https?:\/\//i.test(src_value));
+
+    if (!should_replace) return tag;
+
+    replaced = true;
+    return tag.replace(
+      /\bsrc=(["'])(.*?)\1/i,
+      `src="images/${xml_escape_attr(cover_file_name)}"`,
+    );
+  });
+
+  return updated;
+}
+
+function close_void_tag(html_text, tag_name) {
+  const regex = new RegExp(`<${tag_name}(?=\\s|\\/|>)([^>]*)>`, "gi");
+  return String(html_text || "").replace(regex, (full, attrs) => {
+    if (/\/\s*$/.test(attrs)) {
+      return `<${tag_name}${attrs}>`;
+    }
+    return `<${tag_name}${attrs} />`;
+  });
+}
+
+function normalize_html_for_xhtml(html_text) {
+  let out = String(html_text || "");
+  out = close_void_tag(out, "br");
+  out = close_void_tag(out, "hr");
+  out = close_void_tag(out, "img");
+  out = close_void_tag(out, "meta");
+  out = close_void_tag(out, "link");
+  out = close_void_tag(out, "input");
+  return out;
+}
+
+function extract_toc_entries(body_html) {
+  const nav_match = String(body_html || "").match(
+    /<nav\b[^>]*\bid=(["'])toc\1[^>]*>([\s\S]*?)<\/nav>/i,
+  );
+  const source = nav_match ? nav_match[2] : String(body_html || "");
+  const anchor_regex = /<a\b[^>]*\bhref=(["'])(.*?)\1[^>]*>([\s\S]*?)<\/a\s*>/gi;
+  const entries = [];
+  let match;
+  while ((match = anchor_regex.exec(source))) {
+    const href = (match[2] || "").trim();
+    const label = decode_html(strip_tags(match[3] || "")).trim();
+    if (!href || !label) continue;
+    entries.push({
+      label,
+      href: href.startsWith("#") ? `content.xhtml${href}` : href,
+    });
+  }
+
+  if (entries.length > 0) return entries;
+
+  const heading_regex = /<h([1-6])\b[^>]*\bid=(["'])(.*?)\2[^>]*>([\s\S]*?)<\/h\1>/gi;
+  while ((match = heading_regex.exec(source))) {
+    const id = (match[3] || "").trim();
+    const label = decode_html(strip_tags(match[4] || "")).trim();
+    if (!id || !label) continue;
+    entries.push({ label, href: `content.xhtml#${id}` });
+  }
+
+  return entries;
+}
+
+function build_content_xhtml({ title, body, styles, lang }) {
+  return [
+    '<?xml version="1.0" encoding="utf-8"?>',
+    XHTML_DOCTYPE,
+    `<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="${xml_escape(lang)}" lang="${xml_escape(lang)}">`,
+    "  <head>",
+    '    <meta http-equiv="Content-Type" content="application/xhtml+xml; charset=utf-8" />',
+    `    <title>${xml_escape(title)}</title>`,
+    '    <style type="text/css">',
+    styles,
+    "    </style>",
+    "  </head>",
+    "  <body>",
+    body,
+    "  </body>",
+    "</html>",
+    "",
+  ].join("\n");
+}
+
+function build_cover_xhtml({ lang, cover_file_name }) {
+  return [
+    '<?xml version="1.0" encoding="utf-8"?>',
+    XHTML_DOCTYPE,
+    `<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="${xml_escape(lang)}" lang="${xml_escape(lang)}">`,
+    "  <head>",
+    '    <meta http-equiv="Content-Type" content="application/xhtml+xml; charset=utf-8" />',
+    "    <title>Cover</title>",
+    '    <style type="text/css">',
+    "      html, body { margin: 0; padding: 0; }",
+    "      body { text-align: center; }",
+    "      img { max-width: 100%; max-height: 100%; }",
+    "    </style>",
+    "  </head>",
+    "  <body>",
+    "    <div>",
+    `      <img src="images/${xml_escape(cover_file_name)}" alt="Cover" />`,
+    "    </div>",
+    "  </body>",
+    "</html>",
+    "",
+  ].join("\n");
+}
+
+function build_toc_ncx({ book_id, title, author, toc_entries }) {
+  const nav_points = toc_entries
+    .map((entry, index) => {
+      return [
+        `    <navPoint id="navPoint-${index + 1}" playOrder="${index + 1}">`,
+        `      <navLabel><text>${xml_escape(entry.label)}</text></navLabel>`,
+        `      <content src="${xml_escape(entry.href)}" />`,
+        "    </navPoint>",
+      ].join("\n");
+    })
+    .join("\n");
+
+  return [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<!DOCTYPE ncx PUBLIC "-//NISO//DTD ncx 2005-1//EN"',
+    '  "http://www.daisy.org/z3986/2005/ncx-2005-1.dtd">',
+    '<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">',
+    "  <head>",
+    `    <meta name="dtb:uid" content="${xml_escape(book_id)}" />`,
+    '    <meta name="dtb:depth" content="1" />',
+    '    <meta name="dtb:totalPageCount" content="0" />',
+    '    <meta name="dtb:maxPageNumber" content="0" />',
+    "  </head>",
+    "  <docTitle>",
+    `    <text>${xml_escape(title)}</text>`,
+    "  </docTitle>",
+    "  <docAuthor>",
+    `    <text>${xml_escape(author)}</text>`,
+    "  </docAuthor>",
+    "  <navMap>",
+    nav_points,
+    "  </navMap>",
+    "</ncx>",
+    "",
+  ].join("\n");
+}
+
+function build_content_opf({
+  book_id,
+  title,
+  author,
+  lang,
+  modified,
+  has_cover,
+  cover_file_name,
+  cover_media_type,
+}) {
+  const metadata_lines = [
+    `    <dc:title>${xml_escape(title)}</dc:title>`,
+    `    <dc:creator opf:role="aut">${xml_escape(author)}</dc:creator>`,
+    `    <dc:language>${xml_escape(lang)}</dc:language>`,
+    `    <dc:identifier id="bookid">${xml_escape(book_id)}</dc:identifier>`,
+    `    <dc:date>${xml_escape(modified)}</dc:date>`,
+  ];
+
+  if (has_cover) {
+    metadata_lines.push('    <meta name="cover" content="cover-image" />');
+  }
+
+  const manifest_lines = [
+    '    <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml" />',
+  ];
+
+  if (has_cover) {
+    manifest_lines.push(
+      '    <item id="cover-page" href="cover.xhtml" media-type="application/xhtml+xml" />',
+    );
+  }
+
+  manifest_lines.push('    <item id="content" href="content.xhtml" media-type="application/xhtml+xml" />');
+
+  if (has_cover) {
+    manifest_lines.push(
+      `    <item id="cover-image" href="images/${xml_escape(cover_file_name)}" media-type="${xml_escape(cover_media_type)}" />`,
+    );
+  }
+
+  const spine_lines = ['  <spine toc="ncx">'];
+  if (has_cover) {
+    spine_lines.push('    <itemref idref="cover-page" />');
+  }
+  spine_lines.push('    <itemref idref="content" />');
+  spine_lines.push("  </spine>");
+
+  const guide_lines = ["  <guide>"];
+  if (has_cover) {
+    guide_lines.push('    <reference type="cover" title="Cover" href="cover.xhtml" />');
+  }
+  guide_lines.push('    <reference type="toc" title="Table of Contents" href="content.xhtml#toc" />');
+  guide_lines.push('    <reference type="text" title="Start" href="content.xhtml" />');
+  guide_lines.push("  </guide>");
+
+  return [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<package xmlns="http://www.idpf.org/2007/opf" unique-identifier="bookid" version="2.0">',
+    '  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">',
+    ...metadata_lines,
+    "  </metadata>",
+    "  <manifest>",
+    ...manifest_lines,
+    "  </manifest>",
+    ...spine_lines,
+    ...guide_lines,
+    "</package>",
+    "",
+  ].join("\n");
+}
+
+function build_container_xml() {
+  return [
+    '<?xml version="1.0"?>',
+    '<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">',
+    "  <rootfiles>",
+    '    <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>',
+    "  </rootfiles>",
+    "</container>",
+    "",
+  ].join("\n");
+}
+
+function random_uuid() {
+  try {
+    const crypto = require("crypto");
+    if (typeof crypto.randomUUID === "function") {
+      return crypto.randomUUID();
+    }
+  } catch (error) {
+    // ignore and fallback
+  }
+
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (char) => {
+    const rand = Math.floor(Math.random() * 16);
+    const value = char === "x" ? rand : (rand & 0x3) | 0x8;
+    return value.toString(16);
+  });
+}
+
+async function file_exists(file_path) {
+  try {
+    await fs.stat(file_path);
+    return true;
+  } catch (error) {
+    if (error && error.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+async function ensure_regular_file(file_path, label) {
+  let stats;
+  try {
+    stats = await fs.stat(file_path);
+  } catch (error) {
+    if (error && error.code === "ENOENT") {
+      throw new Error(`Missing ${label}: ${file_path}`);
+    }
+    throw error;
+  }
+
+  if (!stats.isFile()) {
+    throw new Error(`Not a file (${label}): ${file_path}`);
+  }
+}
+
+function expand_patterns(patterns, logger) {
+  const resolved = new Set();
+  for (const pattern of patterns) {
+    if (pattern === STDIN_SENTINEL) continue;
+
+    const matches = globSync(pattern, {
+      nodir: true,
+      absolute: true,
+      windowsPathsNoEscape: true,
+    });
+
+    if (matches.length === 0) {
+      const literal = path.resolve(pattern);
+      logger.debug(`Pattern matched no files; using literal path: ${literal}`);
+      resolved.add(literal);
+      continue;
+    }
+
+    for (const file_path of matches) {
+      resolved.add(path.resolve(file_path));
+    }
+  }
+
+  return Array.from(resolved);
+}
+
+function resolve_output_path({ input_path, output_path, out_dir }) {
+  if (output_path) return output_path;
+
+  const base_name = path.basename(strip_extension(input_path));
+  const file_name = `${base_name}.epub`;
+
+  if (out_dir) {
+    return path.join(out_dir, file_name);
+  }
+
+  return path.join(path.dirname(input_path), file_name);
+}
+
+async function write_epub_tree({
+  temp_root,
+  content_xhtml,
+  cover_xhtml,
+  toc_ncx,
+  content_opf,
+  container_xml,
+  has_cover,
+  cover_path,
+  cover_file_name,
+  logger,
+}) {
+  const meta_inf_dir = path.join(temp_root, "META-INF");
+  const oebps_dir = path.join(temp_root, "OEBPS");
+  const images_dir = path.join(oebps_dir, "images");
+
+  logger.debug(`IO mkdir - ${meta_inf_dir}`);
+  await fs.mkdir(meta_inf_dir, { recursive: true });
+  logger.debug(`IO mkdir - ${oebps_dir}`);
+  await fs.mkdir(oebps_dir, { recursive: true });
+  if (has_cover) {
+    logger.debug(`IO mkdir - ${images_dir}`);
+    await fs.mkdir(images_dir, { recursive: true });
+  }
+
+  logger.debug(`IO write - ${path.join(temp_root, "mimetype")}`);
+  await fs.writeFile(path.join(temp_root, "mimetype"), "application/epub+zip", "utf8");
+
+  logger.debug(`IO write - ${path.join(meta_inf_dir, "container.xml")}`);
+  await fs.writeFile(path.join(meta_inf_dir, "container.xml"), container_xml, "utf8");
+
+  logger.debug(`IO write - ${path.join(oebps_dir, "content.opf")}`);
+  await fs.writeFile(path.join(oebps_dir, "content.opf"), content_opf, "utf8");
+
+  logger.debug(`IO write - ${path.join(oebps_dir, "toc.ncx")}`);
+  await fs.writeFile(path.join(oebps_dir, "toc.ncx"), toc_ncx, "utf8");
+
+  logger.debug(`IO write - ${path.join(oebps_dir, "content.xhtml")}`);
+  await fs.writeFile(path.join(oebps_dir, "content.xhtml"), content_xhtml, "utf8");
+
+  if (has_cover) {
+    logger.debug(`IO write - ${path.join(oebps_dir, "cover.xhtml")}`);
+    await fs.writeFile(path.join(oebps_dir, "cover.xhtml"), cover_xhtml, "utf8");
+
+    logger.debug(`IO copy - ${cover_path} -> ${path.join(images_dir, cover_file_name)}`);
+    await fs.copyFile(cover_path, path.join(images_dir, cover_file_name));
+  }
+}
+
+async function package_epub({ temp_root, output_path, logger }) {
+  logger.debug(`Stage: package EPUB with zip -> ${output_path}`);
+  await fs.mkdir(path.dirname(output_path), { recursive: true });
+  await fs.rm(output_path, { force: true });
+
+  logger.debug(`IO exec - zip mimetype first: ${output_path}`);
+  const first = spawnSync("zip", ["-X0", output_path, "mimetype"], {
+    cwd: temp_root,
+    encoding: "utf8",
+  });
+  if (first.status !== 0) {
+    throw new Error(
+      `zip failed while writing mimetype: ${first.stderr || first.stdout || "(no output)"}`,
+    );
+  }
+
+  logger.debug(`IO exec - zip content: ${output_path}`);
+  const rest = spawnSync("zip", ["-Xr9D", output_path, "META-INF", "OEBPS"], {
+    cwd: temp_root,
+    encoding: "utf8",
+  });
+  if (rest.status !== 0) {
+    throw new Error(
+      `zip failed while writing content: ${rest.stderr || rest.stdout || "(no output)"}`,
+    );
+  }
+}
+
+async function convert_single_file({
+  input_path,
+  output_path,
+  cover_path,
+  cover_file_name,
+  cover_media_type,
+  options,
+  logger,
+}) {
+  logger.debug(`Stage: parse HTML - ${input_path}`);
+  logger.debug(`IO read - ${input_path}`);
+
+  const raw_html = await fs.readFile(input_path, "utf8");
+  const normalized_html = raw_html.replace(/\r\n?/g, "\n");
+
+  const title_from_html = extract_tag_text(normalized_html, "title");
+  const author_from_html = extract_by_class_tag_text(normalized_html, "book-author") || "Unknown";
+  const style_text = extract_styles(normalized_html);
+  const body_html = extract_body(normalized_html);
+
+  const has_cover = Boolean(cover_path && cover_file_name && cover_media_type);
+  const cover_matcher = options.cover_url_match || infer_cover_matcher(cover_path);
+  const replaced_body_html = has_cover
+    ? replace_cover_image_in_body(body_html, cover_matcher, cover_file_name)
+    : body_html;
+  const xhtml_body = normalize_html_for_xhtml(replaced_body_html);
+  const toc_entries = extract_toc_entries(replaced_body_html);
+
+  const title = options.override_title || title_from_html || path.basename(strip_extension(input_path));
+  const author = options.override_author || author_from_html;
+  const book_id = `urn:uuid:${random_uuid()}`;
+  const modified = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+
+  logger.debug(`Stage: build EPUB documents - ${input_path}`);
+  const content_xhtml = build_content_xhtml({
+    title,
+    body: xhtml_body,
+    styles: style_text,
+    lang: options.lang,
+  });
+
+  const cover_xhtml = has_cover ? build_cover_xhtml({ lang: options.lang, cover_file_name }) : "";
+
+  const toc_ncx = build_toc_ncx({
+    book_id,
+    title,
+    author,
+    toc_entries,
+  });
+
+  const content_opf = build_content_opf({
+    book_id,
+    title,
+    author,
+    lang: options.lang,
+    modified,
+    has_cover,
+    cover_file_name,
+    cover_media_type,
+  });
+
+  const container_xml = build_container_xml();
+
+  if (options.dry_run) {
+    logger.info(
+      `${chalk.yellow("[dry-run]")} ${input_path} -> ${output_path} (${toc_entries.length} TOC entries)`,
+    );
+    return { converted: false, skipped: false, dry_run: true };
+  }
+
+  logger.debug(`Stage: write temporary EPUB tree - ${input_path}`);
+  const temp_root = await fs.mkdtemp(path.join(os.tmpdir(), "html2epub-"));
+  logger.debug(`IO mkdir - temp root ${temp_root}`);
+
+  try {
+    await write_epub_tree({
+      temp_root,
+      content_xhtml,
+      cover_xhtml,
+      toc_ncx,
+      content_opf,
+      container_xml,
+      has_cover,
+      cover_path,
+      cover_file_name,
+      logger,
+    });
+
+    await package_epub({ temp_root, output_path, logger });
+
+    logger.success(`Converted: ${input_path} -> ${output_path}`);
+    logger.info(`Metadata: title="${title}", author="${author}", toc=${toc_entries.length}`);
+    return { converted: true, skipped: false, dry_run: false };
+  } finally {
+    logger.debug(`IO remove - temp root ${temp_root}`);
+    await fs.rm(temp_root, { recursive: true, force: true });
+  }
+}
+
+async function main() {
+  const options = parse_cli_arguments();
+  const logger = create_logger({
+    quiet_mode: options.quiet_mode,
+    debug_mode: options.debug_mode,
+  });
+
+  logger.debug("Stage: validate CLI arguments");
+
+  if (!options.patterns || options.patterns.length === 0) {
+    throw new Error("No input files provided. Use <html|glob ...> or --input.");
+  }
+
+  if (options.output_path && options.out_dir) {
+    throw new Error("Use either --output or --out-dir, not both.");
+  }
+
+  let cover_media_type = "";
+  let cover_file_name = "";
+  if (options.cover_path) {
+    logger.debug(`Stage: validate cover image - ${options.cover_path}`);
+    await ensure_regular_file(options.cover_path, "cover image");
+
+    cover_media_type = infer_image_media_type(options.cover_path);
+    if (!cover_media_type) {
+      throw new Error(
+        `Unsupported cover image format: ${path.extname(options.cover_path) || "(none)"}. Use jpg/jpeg/png.`,
+      );
+    }
+
+    cover_file_name = infer_cover_file_name(options.cover_path);
+  } else if (options.cover_url_match) {
+    logger.warn("--cover-url-match is ignored when --cover is not set.");
+  }
+
+  logger.debug("Stage: resolve input patterns");
+  const resolved_inputs = expand_patterns(options.patterns, logger);
+
+  if (resolved_inputs.length === 0) {
+    throw new Error("No files matched input patterns.");
+  }
+
+  const html_inputs = [];
+  for (const file_path of resolved_inputs) {
+    if (!looks_like_html_path(file_path)) {
+      logger.warn(`Skipping non-HTML file: ${file_path}`);
+      continue;
+    }
+    html_inputs.push(file_path);
+  }
+
+  if (html_inputs.length === 0) {
+    throw new Error("No HTML files found after filtering input paths.");
+  }
+
+  if (options.output_path && html_inputs.length > 1) {
+    throw new Error("--output supports only one input file. Use --out-dir for multiple files.");
+  }
+
+  let converted_count = 0;
+  let skipped_count = 0;
+  let dry_run_count = 0;
+
+  for (const input_path of html_inputs) {
+    logger.debug(`Stage: validate input file - ${input_path}`);
+    await ensure_regular_file(input_path, "input HTML");
+
+    const output_path = resolve_output_path({
+      input_path,
+      output_path: options.output_path,
+      out_dir: options.out_dir,
+    });
+
+    logger.debug(`Stage: resolve output path - ${output_path}`);
+
+    const already_exists = await file_exists(output_path);
+    if (already_exists && !options.refresh) {
+      skipped_count += 1;
+      logger.info(
+        `${chalk.yellow("Skipped existing")}: ${output_path} ${chalk.gray("(use --refresh to rebuild)")}`,
+      );
+      continue;
+    }
+
+    const result = await convert_single_file({
+      input_path,
+      output_path,
+      cover_path: options.cover_path,
+      cover_file_name,
+      cover_media_type,
+      options,
+      logger,
+    });
+
+    if (result.dry_run) {
+      dry_run_count += 1;
+      continue;
+    }
+
+    if (result.converted) {
+      converted_count += 1;
+    }
+  }
+
+  logger.info(
+    `Done: ${chalk.green(`${converted_count} converted`)}, ${chalk.yellow(`${skipped_count} skipped`)}, ${chalk.cyan(`${dry_run_count} dry-run`)}`,
+  );
+}
+
+main().catch((error) => {
+  const logger = create_logger({ quiet_mode: false, debug_mode: true });
+  logger.error(error.message || String(error));
+  if (error && error.stack) {
+    logger.debug(error.stack);
+  }
+  process.exit(1);
+});
