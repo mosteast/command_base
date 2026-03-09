@@ -1,0 +1,586 @@
+#!/usr/bin/env node
+
+"use strict";
+
+const fs = require("fs/promises");
+const path = require("path");
+const { spawn } = require("child_process");
+const { globSync, hasMagic } = require("glob");
+const chalk = require("chalk");
+const yargs = require("yargs/yargs");
+
+const package_json = require("../package.json");
+const {
+  move_to_trash,
+  resolve_trash_directory,
+} = require("../lib/file/trash");
+
+const DEFAULT_KEEP_POLICY = "oldest";
+const DEFAULT_ACTION = "trash";
+const DEFAULT_WRAP_WIDTH = 110;
+const KEEP_POLICIES = new Set(["oldest", "newest"]);
+const ACTIONS = new Set(["trash", "delete"]);
+
+function build_help_text(script_name) {
+  return [
+    `${chalk.bold("Usage")}`,
+    `  ${script_name} [options] [path|glob ...]`,
+    `  ${script_name} --input <path|glob...> [--keep oldest]`,
+    "",
+    `${chalk.bold("Description")}`,
+    "  Find duplicate files recursively with fclones, keep the oldest file by",
+    "  modification time by default, and move the redundant copies to Trash by",
+    "  default. Supports directories, files, and glob patterns.",
+    "",
+    "  Requires the fclones binary to be available on PATH or passed by",
+    "  --fclones-bin.",
+    "",
+    `${chalk.bold("Options")}`,
+    "  -i, --input <path|glob...>   Input paths or glob patterns (repeatable)",
+    "      --keep <policy>          Which file to preserve in each group:",
+    "                               oldest | newest (default: oldest)",
+    "      --action <mode>          How to handle redundant files:",
+    "                               trash | delete (default: trash)",
+    "      --trash-dir <path>       Override the Trash directory",
+    "      --fclones-bin <path>     Path to the fclones executable",
+    "      --refresh                Include files already inside Trash when scanning (default: false)",
+    "  -d, --dry-run                Print planned actions without changing files",
+    "      --quiet                  Print only warnings and errors (default: false)",
+    "      --debug                  Print verbose debug logs (default: false)",
+    "  -v, --version                Show version number only",
+    "  -h, --help                   Show this help message",
+    "",
+    `${chalk.bold("Examples")}`,
+    "  # Scan the current directory recursively and move duplicates to Trash",
+    "  $0",
+    "",
+    "  # Scan a specific directory and keep the newest file instead",
+    "  $0 --keep newest \"/path/to/dir\"",
+    "",
+    "  # Preview duplicate cleanup for all markdown files under content/",
+    "  $0 \"content/**/*.md\" --dry-run --debug",
+    "",
+    "  # Permanently delete redundant copies instead of moving them to Trash",
+    "  $0 --action delete \"/path/to/dir\"",
+  ].join("\n");
+}
+
+function create_logger({ command_name, quiet_mode, debug_mode }) {
+  const prefix = chalk.dim(`[${command_name}]`);
+
+  return {
+    info(message) {
+      if (quiet_mode) return;
+      console.log(prefix, chalk.cyan(message));
+    },
+    success(message) {
+      if (quiet_mode) return;
+      console.log(prefix, chalk.green(message));
+    },
+    warn(message) {
+      console.warn(prefix, chalk.yellow(message));
+    },
+    error(message) {
+      console.error(prefix, chalk.red(message));
+    },
+    debug(message) {
+      if (!debug_mode || quiet_mode) return;
+      console.log(prefix, chalk.gray(`DEBUG ${message}`));
+    },
+    path(value) {
+      return chalk.magenta(path.resolve(String(value)));
+    },
+  };
+}
+
+function log_step(logger, label) {
+  logger.debug(`Step: ${label}`);
+}
+
+function log_io(logger, detail) {
+  logger.debug(`IO: ${detail}`);
+}
+
+function parse_cli_arguments(command_name) {
+  const parser = yargs(process.argv.slice(2))
+    .scriptName(command_name)
+    .help(false)
+    .version(false)
+    .parserConfiguration({
+      "camel-case-expansion": false,
+      "strip-dashed": false,
+    })
+    .option("input", {
+      alias: "i",
+      type: "array",
+      describe: "Input paths or glob patterns",
+    })
+    .option("keep", {
+      type: "string",
+      default: DEFAULT_KEEP_POLICY,
+      describe: "Keep oldest or newest file",
+    })
+    .option("action", {
+      type: "string",
+      default: DEFAULT_ACTION,
+      describe: "Move duplicates to Trash or delete them",
+    })
+    .option("trash-dir", {
+      type: "string",
+      describe: "Override the Trash directory",
+    })
+    .option("fclones-bin", {
+      type: "string",
+      describe: "Path to the fclones executable",
+    })
+    .option("refresh", {
+      type: "boolean",
+      default: false,
+      describe: "Include files already inside Trash when scanning",
+    })
+    .option("dry-run", {
+      alias: "d",
+      type: "boolean",
+      default: false,
+      describe: "Print planned actions without changing files",
+    })
+    .option("quiet", {
+      type: "boolean",
+      default: false,
+      describe: "Print only warnings and errors",
+    })
+    .option("debug", {
+      type: "boolean",
+      default: false,
+      describe: "Print verbose debug logs",
+    })
+    .option("version", {
+      alias: "v",
+      type: "boolean",
+      describe: "Show version number only",
+    })
+    .option("help", {
+      alias: "h",
+      type: "boolean",
+      describe: "Show help text",
+    })
+    .strict(false)
+    .usage(build_help_text(command_name))
+    .wrap(DEFAULT_WRAP_WIDTH);
+
+  const argv = parser.parse();
+
+  if (argv.help) {
+    console.log(build_help_text(command_name));
+    process.exit(0);
+  }
+
+  if (argv.version) {
+    console.log(package_json.version || "0.0.0");
+    process.exit(0);
+  }
+
+  const raw_keep_policy = String(argv.keep || DEFAULT_KEEP_POLICY).trim();
+  const raw_action = String(argv.action || DEFAULT_ACTION).trim();
+  if (!KEEP_POLICIES.has(raw_keep_policy)) {
+    throw new Error(
+      `Invalid --keep value: ${raw_keep_policy}. Expected oldest or newest.`,
+    );
+  }
+  if (!ACTIONS.has(raw_action)) {
+    throw new Error(
+      `Invalid --action value: ${raw_action}. Expected trash or delete.`,
+    );
+  }
+
+  const patterns = [];
+  for (const value of argv._ || []) {
+    patterns.push(String(value));
+  }
+  for (const value of argv.input || []) {
+    patterns.push(String(value));
+  }
+
+  return {
+    patterns: patterns.length > 0 ? patterns : ["."],
+    keep_policy: raw_keep_policy,
+    action: raw_action,
+    trash_dir: argv["trash-dir"] ? path.resolve(String(argv["trash-dir"])) : "",
+    fclones_bin: argv["fclones-bin"]
+      ? String(argv["fclones-bin"])
+      : process.env.FCLONES_BIN || "fclones",
+    refresh: Boolean(argv.refresh),
+    dry_run: Boolean(argv["dry-run"]),
+    quiet_mode: Boolean(argv.quiet),
+    debug_mode: Boolean(argv.debug),
+  };
+}
+
+async function safe_lstat(target_path, logger) {
+  log_io(logger, `lstat ${target_path}`);
+  return fs.lstat(target_path);
+}
+
+async function safe_unlink(target_path, logger) {
+  log_io(logger, `unlink ${target_path}`);
+  return fs.unlink(target_path);
+}
+
+function is_path_inside_directory(candidate_path, directory_path) {
+  const resolved_candidate = path.resolve(candidate_path);
+  const resolved_directory = path.resolve(directory_path);
+  const relative_path = path.relative(resolved_directory, resolved_candidate);
+
+  if (!relative_path) return true;
+  return !relative_path.startsWith("..") && !path.isAbsolute(relative_path);
+}
+
+async function resolve_scan_targets(patterns, logger) {
+  log_step(logger, "resolve scan targets");
+  const targets = new Set();
+
+  for (const raw_pattern of patterns) {
+    const pattern = String(raw_pattern || "").trim();
+    if (!pattern) continue;
+
+    if (hasMagic(pattern)) {
+      const matches = globSync(pattern, {
+        absolute: true,
+        dot: true,
+        windowsPathsNoEscape: true,
+      });
+
+      if (matches.length === 0) {
+        logger.warn(`No matches for glob ${pattern}`);
+        continue;
+      }
+
+      for (const match of matches) {
+        targets.add(path.resolve(match));
+      }
+      continue;
+    }
+
+    targets.add(path.resolve(pattern));
+  }
+
+  const resolved_targets = [];
+  for (const target_path of targets) {
+    try {
+      await safe_lstat(target_path, logger);
+      resolved_targets.push(target_path);
+    } catch (error) {
+      if (error && error.code === "ENOENT") {
+        logger.warn(`Skip missing input ${logger.path(target_path)}`);
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  if (resolved_targets.length === 0) {
+    throw new Error("No input files or directories were found.");
+  }
+
+  return resolved_targets;
+}
+
+function run_fclones_group(options) {
+  const { fclones_bin, target_paths, logger } = options;
+
+  return new Promise((resolve, reject) => {
+    const args = ["group", ...target_paths];
+    log_io(logger, `spawn ${fclones_bin} ${args.join(" ")}`);
+    const child = spawn(fclones_bin, args, {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    let stdout_text = "";
+    let stderr_text = "";
+
+    child.stdout.on("data", (chunk) => {
+      stdout_text += chunk.toString();
+    });
+
+    child.stderr.on("data", (chunk) => {
+      const text = chunk.toString();
+      stderr_text += text;
+      for (const line of text.split(/\r?\n/)) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        logger.debug(`[fclones] ${trimmed}`);
+      }
+    });
+
+    child.on("error", (error) => {
+      if (error && error.code === "ENOENT") {
+        reject(
+          new Error(
+            `${fclones_bin} was not found. Install fclones first, for example: brew install fclones or cargo install fclones.`,
+          ),
+        );
+        return;
+      }
+      reject(error);
+    });
+
+    child.on("close", (code) => {
+      if (code === 0) {
+        resolve({ stdout_text, stderr_text });
+        return;
+      }
+
+      reject(
+        new Error(
+          stderr_text.trim() ||
+            `fclones group exited with code ${code == null ? "unknown" : code}.`,
+        ),
+      );
+    });
+  });
+}
+
+function parse_fclones_report(report_text) {
+  const duplicate_groups = [];
+  let current_group = [];
+
+  const lines = String(report_text || "").split(/\r?\n/);
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    if (line.startsWith("#")) continue;
+
+    if (/^\s+/.test(line)) {
+      current_group.push(line.trim());
+      continue;
+    }
+
+    if (current_group.length > 0) {
+      duplicate_groups.push(current_group);
+      current_group = [];
+    }
+  }
+
+  if (current_group.length > 0) {
+    duplicate_groups.push(current_group);
+  }
+
+  return duplicate_groups;
+}
+
+function compare_duplicate_age(left_entry, right_entry) {
+  const age_difference =
+    left_entry.stats.mtimeMs - right_entry.stats.mtimeMs;
+  if (age_difference !== 0) return age_difference;
+  return left_entry.path.localeCompare(right_entry.path);
+}
+
+async function load_group_entries(group_paths, options) {
+  const { logger, trash_dir, refresh } = options;
+  const entries = [];
+  let skipped_in_trash = 0;
+  let skipped_missing = 0;
+  let skipped_non_file = 0;
+
+  for (const group_path of group_paths) {
+    const resolved_path = path.resolve(String(group_path));
+
+    if (!refresh && is_path_inside_directory(resolved_path, trash_dir)) {
+      skipped_in_trash += 1;
+      logger.debug(`Skip Trash file ${logger.path(resolved_path)}`);
+      continue;
+    }
+
+    let stats;
+    try {
+      stats = await safe_lstat(resolved_path, logger);
+    } catch (error) {
+      if (error && error.code === "ENOENT") {
+        skipped_missing += 1;
+        logger.warn(`Skip missing file ${logger.path(resolved_path)}`);
+        continue;
+      }
+      throw error;
+    }
+
+    if (!stats.isFile()) {
+      skipped_non_file += 1;
+      logger.warn(`Skip non-file duplicate candidate ${logger.path(resolved_path)}`);
+      continue;
+    }
+
+    entries.push({
+      path: resolved_path,
+      stats,
+    });
+  }
+
+  return {
+    entries,
+    skipped_in_trash,
+    skipped_missing,
+    skipped_non_file,
+  };
+}
+
+async function apply_duplicate_action(entry, options) {
+  const { action, trash_dir, dry_run, logger } = options;
+
+  if (action === "delete") {
+    if (dry_run) {
+      logger.info(`Dry run: delete ${logger.path(entry.path)}`);
+      return { deleted: 1, trashed: 0 };
+    }
+
+    await safe_unlink(entry.path, logger);
+    logger.success(`Deleted ${logger.path(entry.path)}`);
+    return { deleted: 1, trashed: 0 };
+  }
+
+  if (dry_run) {
+    logger.info(`Dry run: move to Trash ${logger.path(entry.path)}`);
+    return { deleted: 0, trashed: 1 };
+  }
+
+  const trashed_path = await move_to_trash(entry.path, { trash_dir, logger });
+  logger.success(
+    `Moved to Trash ${logger.path(entry.path)} -> ${logger.path(trashed_path)}`,
+  );
+  return { deleted: 0, trashed: 1 };
+}
+
+async function deduplicate_files(options) {
+  const {
+    target_paths,
+    keep_policy,
+    action,
+    trash_dir,
+    refresh,
+    dry_run,
+    logger,
+    fclones_bin,
+  } = options;
+
+  log_step(logger, "run fclones group");
+  const { stdout_text } = await run_fclones_group({
+    fclones_bin,
+    target_paths,
+    logger,
+  });
+
+  log_step(logger, "parse duplicate report");
+  const duplicate_groups = parse_fclones_report(stdout_text);
+  logger.info(`Found ${duplicate_groups.length} duplicate group(s).`);
+
+  const summary = {
+    duplicate_groups: duplicate_groups.length,
+    groups_changed: 0,
+    kept_files: 0,
+    trashed_files: 0,
+    deleted_files: 0,
+    skipped_in_trash: 0,
+    skipped_missing: 0,
+    skipped_non_file: 0,
+  };
+
+  for (const group_paths of duplicate_groups) {
+    const group_result = await load_group_entries(group_paths, {
+      logger,
+      trash_dir,
+      refresh,
+    });
+
+    summary.skipped_in_trash += group_result.skipped_in_trash;
+    summary.skipped_missing += group_result.skipped_missing;
+    summary.skipped_non_file += group_result.skipped_non_file;
+
+    if (group_result.entries.length < 2) {
+      continue;
+    }
+
+    const sorted_entries = [...group_result.entries].sort(compare_duplicate_age);
+    const keep_entry =
+      keep_policy === "newest"
+        ? sorted_entries[sorted_entries.length - 1]
+        : sorted_entries[0];
+    const redundant_entries = sorted_entries.filter(
+      (entry) => entry.path !== keep_entry.path,
+    );
+
+    summary.kept_files += 1;
+    summary.groups_changed += 1;
+    logger.info(
+      `Keep ${logger.path(keep_entry.path)} and ${action} ${redundant_entries.length} duplicate file(s).`,
+    );
+
+    for (const redundant_entry of redundant_entries) {
+      const action_result = await apply_duplicate_action(redundant_entry, {
+        action,
+        trash_dir,
+        dry_run,
+        logger,
+      });
+      summary.deleted_files += action_result.deleted;
+      summary.trashed_files += action_result.trashed;
+    }
+  }
+
+  return summary;
+}
+
+async function main() {
+  const command_name = path.basename(process.argv[1] || "file_deduplicate");
+  const cli_options = parse_cli_arguments(command_name);
+  const logger = create_logger({
+    command_name,
+    quiet_mode: cli_options.quiet_mode,
+    debug_mode: cli_options.debug_mode,
+  });
+
+  log_step(logger, "resolve Trash directory");
+  const trash_dir =
+    cli_options.action === "trash" || !cli_options.refresh
+      ? await resolve_trash_directory(cli_options.trash_dir)
+      : cli_options.trash_dir
+        ? path.resolve(cli_options.trash_dir)
+        : await resolve_trash_directory("");
+
+  if (cli_options.action === "trash") {
+    logger.info(`Trash directory: ${logger.path(trash_dir)}`);
+  }
+
+  const target_paths = await resolve_scan_targets(cli_options.patterns, logger);
+  logger.info(`Scanning ${target_paths.length} input path(s) with fclones.`);
+
+  const summary = await deduplicate_files({
+    target_paths,
+    keep_policy: cli_options.keep_policy,
+    action: cli_options.action,
+    trash_dir,
+    refresh: cli_options.refresh,
+    dry_run: cli_options.dry_run,
+    logger,
+    fclones_bin: cli_options.fclones_bin,
+  });
+
+  const action_label = cli_options.action === "delete" ? "deleted" : "moved to Trash";
+  logger.success(
+    `Done. Groups: ${summary.duplicate_groups}, updated: ${summary.groups_changed}, kept: ${summary.kept_files}, ${action_label}: ${
+      cli_options.action === "delete"
+        ? summary.deleted_files
+        : summary.trashed_files
+    }, skipped in Trash: ${summary.skipped_in_trash}, missing: ${summary.skipped_missing}, non-file: ${summary.skipped_non_file}.`,
+  );
+}
+
+main().catch((error) => {
+  const message = error && error.message ? error.message : String(error);
+  console.error(chalk.red(message));
+  if (
+    (process.argv.includes("--debug") || process.argv.includes("--debug=true")) &&
+    error &&
+    error.stack
+  ) {
+    console.error(chalk.red(error.stack));
+  }
+  process.exit(1);
+});
