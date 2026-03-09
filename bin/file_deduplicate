@@ -10,16 +10,15 @@ const chalk = require("chalk");
 const yargs = require("yargs/yargs");
 
 const package_json = require("../package.json");
-const {
-  move_to_trash,
-  resolve_trash_directory,
-} = require("../lib/file/trash");
+const { move_to_trash, resolve_trash_directory } = require("../lib/file/trash");
 
 const DEFAULT_KEEP_POLICY = "oldest";
 const DEFAULT_ACTION = "trash";
+const DEFAULT_MODE = "directory";
 const DEFAULT_WRAP_WIDTH = 110;
 const KEEP_POLICIES = new Set(["oldest", "newest"]);
 const ACTIONS = new Set(["trash", "delete"]);
+const MODES = new Set(["directory", "everywhere"]);
 
 function build_help_text(script_name) {
   return [
@@ -41,6 +40,8 @@ function build_help_text(script_name) {
     "                               oldest | newest (default: oldest)",
     "      --action <mode>          How to handle redundant files:",
     "                               trash | delete (default: trash)",
+    "      --mode <scope>           How to scope duplicate removal:",
+    "                               directory | everywhere (default: directory)",
     "      --trash-dir <path>       Override the Trash directory",
     "      --fclones-bin <path>     Path to the fclones executable",
     "      --refresh                Include files already inside Trash when scanning (default: false)",
@@ -55,13 +56,16 @@ function build_help_text(script_name) {
     "  $0",
     "",
     "  # Scan a specific directory and keep the newest file instead",
-    "  $0 --keep newest \"/path/to/dir\"",
+    '  $0 --keep newest "/path/to/dir"',
     "",
     "  # Preview duplicate cleanup for all markdown files under content/",
-    "  $0 \"content/**/*.md\" --dry-run --debug",
+    '  $0 "content/**/*.md" --dry-run --debug',
     "",
     "  # Permanently delete redundant copies instead of moving them to Trash",
-    "  $0 --action delete \"/path/to/dir\"",
+    '  $0 --action delete "/path/to/dir"',
+    "",
+    "  # Remove duplicates across all scanned directories instead of per directory",
+    "  $0 --mode everywhere dir_a dir_b",
   ].join("\n");
 }
 
@@ -125,6 +129,11 @@ function parse_cli_arguments(command_name) {
       default: DEFAULT_ACTION,
       describe: "Move duplicates to Trash or delete them",
     })
+    .option("mode", {
+      type: "string",
+      default: DEFAULT_MODE,
+      describe: "Limit duplicate removal per directory or across all inputs",
+    })
     .option("trash-dir", {
       type: "string",
       describe: "Override the Trash directory",
@@ -182,6 +191,7 @@ function parse_cli_arguments(command_name) {
 
   const raw_keep_policy = String(argv.keep || DEFAULT_KEEP_POLICY).trim();
   const raw_action = String(argv.action || DEFAULT_ACTION).trim();
+  const raw_mode = String(argv.mode || DEFAULT_MODE).trim();
   if (!KEEP_POLICIES.has(raw_keep_policy)) {
     throw new Error(
       `Invalid --keep value: ${raw_keep_policy}. Expected oldest or newest.`,
@@ -190,6 +200,11 @@ function parse_cli_arguments(command_name) {
   if (!ACTIONS.has(raw_action)) {
     throw new Error(
       `Invalid --action value: ${raw_action}. Expected trash or delete.`,
+    );
+  }
+  if (!MODES.has(raw_mode)) {
+    throw new Error(
+      `Invalid --mode value: ${raw_mode}. Expected directory or everywhere.`,
     );
   }
 
@@ -205,6 +220,7 @@ function parse_cli_arguments(command_name) {
     patterns: patterns.length > 0 ? patterns : ["."],
     keep_policy: raw_keep_policy,
     action: raw_action,
+    mode: raw_mode,
     trash_dir: argv["trash-dir"] ? path.resolve(String(argv["trash-dir"])) : "",
     fclones_bin: argv["fclones-bin"]
       ? String(argv["fclones-bin"])
@@ -368,8 +384,7 @@ function parse_fclones_report(report_text) {
 }
 
 function compare_duplicate_age(left_entry, right_entry) {
-  const age_difference =
-    left_entry.stats.mtimeMs - right_entry.stats.mtimeMs;
+  const age_difference = left_entry.stats.mtimeMs - right_entry.stats.mtimeMs;
   if (age_difference !== 0) return age_difference;
   return left_entry.path.localeCompare(right_entry.path);
 }
@@ -404,7 +419,9 @@ async function load_group_entries(group_paths, options) {
 
     if (!stats.isFile()) {
       skipped_non_file += 1;
-      logger.warn(`Skip non-file duplicate candidate ${logger.path(resolved_path)}`);
+      logger.warn(
+        `Skip non-file duplicate candidate ${logger.path(resolved_path)}`,
+      );
       continue;
     }
 
@@ -448,11 +465,34 @@ async function apply_duplicate_action(entry, options) {
   return { deleted: 0, trashed: 1 };
 }
 
+function build_action_groups(entries, mode) {
+  if (mode === "everywhere") {
+    return entries.length >= 2 ? [entries] : [];
+  }
+
+  const entries_by_directory = new Map();
+  for (const entry of entries) {
+    const directory_path = path.dirname(entry.path);
+    const directory_entries = entries_by_directory.get(directory_path);
+    if (directory_entries) {
+      directory_entries.push(entry);
+      continue;
+    }
+
+    entries_by_directory.set(directory_path, [entry]);
+  }
+
+  return [...entries_by_directory.values()].filter(
+    (directory_entries) => directory_entries.length >= 2,
+  );
+}
+
 async function deduplicate_files(options) {
   const {
     target_paths,
     keep_policy,
     action,
+    mode,
     trash_dir,
     refresh,
     dry_run,
@@ -493,34 +533,33 @@ async function deduplicate_files(options) {
     summary.skipped_missing += group_result.skipped_missing;
     summary.skipped_non_file += group_result.skipped_non_file;
 
-    if (group_result.entries.length < 2) {
-      continue;
-    }
+    const action_groups = build_action_groups(group_result.entries, mode);
+    for (const action_group of action_groups) {
+      const sorted_entries = [...action_group].sort(compare_duplicate_age);
+      const keep_entry =
+        keep_policy === "newest"
+          ? sorted_entries[sorted_entries.length - 1]
+          : sorted_entries[0];
+      const redundant_entries = sorted_entries.filter(
+        (entry) => entry.path !== keep_entry.path,
+      );
 
-    const sorted_entries = [...group_result.entries].sort(compare_duplicate_age);
-    const keep_entry =
-      keep_policy === "newest"
-        ? sorted_entries[sorted_entries.length - 1]
-        : sorted_entries[0];
-    const redundant_entries = sorted_entries.filter(
-      (entry) => entry.path !== keep_entry.path,
-    );
+      summary.kept_files += 1;
+      summary.groups_changed += 1;
+      logger.info(
+        `Keep ${logger.path(keep_entry.path)} and ${action} ${redundant_entries.length} duplicate file(s).`,
+      );
 
-    summary.kept_files += 1;
-    summary.groups_changed += 1;
-    logger.info(
-      `Keep ${logger.path(keep_entry.path)} and ${action} ${redundant_entries.length} duplicate file(s).`,
-    );
-
-    for (const redundant_entry of redundant_entries) {
-      const action_result = await apply_duplicate_action(redundant_entry, {
-        action,
-        trash_dir,
-        dry_run,
-        logger,
-      });
-      summary.deleted_files += action_result.deleted;
-      summary.trashed_files += action_result.trashed;
+      for (const redundant_entry of redundant_entries) {
+        const action_result = await apply_duplicate_action(redundant_entry, {
+          action,
+          trash_dir,
+          dry_run,
+          logger,
+        });
+        summary.deleted_files += action_result.deleted;
+        summary.trashed_files += action_result.trashed;
+      }
     }
   }
 
@@ -555,6 +594,7 @@ async function main() {
     target_paths,
     keep_policy: cli_options.keep_policy,
     action: cli_options.action,
+    mode: cli_options.mode,
     trash_dir,
     refresh: cli_options.refresh,
     dry_run: cli_options.dry_run,
@@ -562,7 +602,8 @@ async function main() {
     fclones_bin: cli_options.fclones_bin,
   });
 
-  const action_label = cli_options.action === "delete" ? "deleted" : "moved to Trash";
+  const action_label =
+    cli_options.action === "delete" ? "deleted" : "moved to Trash";
   logger.success(
     `Done. Groups: ${summary.duplicate_groups}, updated: ${summary.groups_changed}, kept: ${summary.kept_files}, ${action_label}: ${
       cli_options.action === "delete"
@@ -576,7 +617,8 @@ main().catch((error) => {
   const message = error && error.message ? error.message : String(error);
   console.error(chalk.red(message));
   if (
-    (process.argv.includes("--debug") || process.argv.includes("--debug=true")) &&
+    (process.argv.includes("--debug") ||
+      process.argv.includes("--debug=true")) &&
     error &&
     error.stack
   ) {

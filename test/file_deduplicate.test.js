@@ -69,7 +69,7 @@ async function path_exists(target_path) {
 }
 
 describe("file_deduplicate CLI", () => {
-  it("keeps the oldest file and moves newer duplicates to Trash by default", async () => {
+  it("keeps the oldest file and moves newer duplicates to Trash in directory mode by default", async () => {
     const temp_root = await create_temp_dir();
     const scan_dir = path.join(temp_root, "scan");
     const trash_dir = path.join(temp_root, "trash");
@@ -80,8 +80,16 @@ describe("file_deduplicate CLI", () => {
     const newest_file = path.join(scan_dir, "beta.txt");
     await fs.writeFile(oldest_file, "same-content", "utf8");
     await fs.writeFile(newest_file, "same-content", "utf8");
-    await fs.utimes(oldest_file, new Date("2020-01-01T00:00:00.000Z"), new Date("2020-01-01T00:00:00.000Z"));
-    await fs.utimes(newest_file, new Date("2024-01-01T00:00:00.000Z"), new Date("2024-01-01T00:00:00.000Z"));
+    await fs.utimes(
+      oldest_file,
+      new Date("2020-01-01T00:00:00.000Z"),
+      new Date("2020-01-01T00:00:00.000Z"),
+    );
+    await fs.utimes(
+      newest_file,
+      new Date("2024-01-01T00:00:00.000Z"),
+      new Date("2024-01-01T00:00:00.000Z"),
+    );
 
     const report_text = [
       "# Report by fclones 0.35.0",
@@ -92,7 +100,10 @@ describe("file_deduplicate CLI", () => {
     ].join("\n");
 
     try {
-      const fake_fclones = await create_fake_fclones_bin(temp_root, report_text);
+      const fake_fclones = await create_fake_fclones_bin(
+        temp_root,
+        report_text,
+      );
       const result = await run_cli([scan_dir, "--trash-dir", trash_dir], {
         env: {
           PATH: `${fake_fclones.bin_dir}:${process.env.PATH || ""}`,
@@ -111,6 +122,120 @@ describe("file_deduplicate CLI", () => {
     }
   });
 
+  it("does not deduplicate matching files from different directories by default", async () => {
+    const temp_root = await create_temp_dir();
+    const scan_dir = path.join(temp_root, "scan");
+    const dir_a = path.join(scan_dir, "dir_a");
+    const dir_b = path.join(scan_dir, "dir_b");
+    const trash_dir = path.join(temp_root, "trash");
+    await fs.mkdir(dir_a, { recursive: true });
+    await fs.mkdir(dir_b, { recursive: true });
+    await fs.mkdir(trash_dir, { recursive: true });
+
+    const first_file = path.join(dir_a, "shared.txt");
+    const second_file = path.join(dir_b, "shared.txt");
+    await fs.writeFile(first_file, "same-content", "utf8");
+    await fs.writeFile(second_file, "same-content", "utf8");
+    await fs.utimes(
+      first_file,
+      new Date("2020-01-01T00:00:00.000Z"),
+      new Date("2020-01-01T00:00:00.000Z"),
+    );
+    await fs.utimes(
+      second_file,
+      new Date("2024-01-01T00:00:00.000Z"),
+      new Date("2024-01-01T00:00:00.000Z"),
+    );
+
+    const report_text = [
+      "# Report by fclones 0.35.0",
+      "duplicate-group, 12 B (12 B) * 2:",
+      `    ${first_file}`,
+      `    ${second_file}`,
+      "",
+    ].join("\n");
+
+    try {
+      const fake_fclones = await create_fake_fclones_bin(
+        temp_root,
+        report_text,
+      );
+      const result = await run_cli([scan_dir, "--trash-dir", trash_dir], {
+        env: {
+          PATH: `${fake_fclones.bin_dir}:${process.env.PATH || ""}`,
+          FCLONES_REPORT: fake_fclones.report_text,
+        },
+      });
+
+      expect(result.exit_code).toBe(0);
+      expect(await path_exists(first_file)).toBe(true);
+      expect(await path_exists(second_file)).toBe(true);
+      expect(await fs.readdir(trash_dir)).toEqual([]);
+      expect(result.stdout).toContain("Found 1 duplicate group");
+      expect(result.stdout).toContain("updated: 0");
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
+  });
+
+  it("deduplicates matching files across directories in everywhere mode", async () => {
+    const temp_root = await create_temp_dir();
+    const scan_dir = path.join(temp_root, "scan");
+    const dir_a = path.join(scan_dir, "dir_a");
+    const dir_b = path.join(scan_dir, "dir_b");
+    const trash_dir = path.join(temp_root, "trash");
+    await fs.mkdir(dir_a, { recursive: true });
+    await fs.mkdir(dir_b, { recursive: true });
+    await fs.mkdir(trash_dir, { recursive: true });
+
+    const oldest_file = path.join(dir_a, "shared.txt");
+    const newest_file = path.join(dir_b, "shared.txt");
+    await fs.writeFile(oldest_file, "same-content", "utf8");
+    await fs.writeFile(newest_file, "same-content", "utf8");
+    await fs.utimes(
+      oldest_file,
+      new Date("2020-01-01T00:00:00.000Z"),
+      new Date("2020-01-01T00:00:00.000Z"),
+    );
+    await fs.utimes(
+      newest_file,
+      new Date("2024-01-01T00:00:00.000Z"),
+      new Date("2024-01-01T00:00:00.000Z"),
+    );
+
+    const report_text = [
+      "# Report by fclones 0.35.0",
+      "duplicate-group, 12 B (12 B) * 2:",
+      `    ${oldest_file}`,
+      `    ${newest_file}`,
+      "",
+    ].join("\n");
+
+    try {
+      const fake_fclones = await create_fake_fclones_bin(
+        temp_root,
+        report_text,
+      );
+      const result = await run_cli(
+        [scan_dir, "--trash-dir", trash_dir, "--mode", "everywhere"],
+        {
+          env: {
+            PATH: `${fake_fclones.bin_dir}:${process.env.PATH || ""}`,
+            FCLONES_REPORT: fake_fclones.report_text,
+          },
+        },
+      );
+
+      expect(result.exit_code).toBe(0);
+      expect(await path_exists(oldest_file)).toBe(true);
+      expect(await path_exists(newest_file)).toBe(false);
+      expect(await path_exists(path.join(trash_dir, "shared.txt"))).toBe(true);
+      expect(result.stdout).toContain("moved to Trash: 1");
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
+  });
+
   it("respects dry-run mode and leaves duplicate files untouched", async () => {
     const temp_root = await create_temp_dir();
     const scan_dir = path.join(temp_root, "scan");
@@ -122,8 +247,16 @@ describe("file_deduplicate CLI", () => {
     const second_file = path.join(scan_dir, "two.txt");
     await fs.writeFile(first_file, "same-content", "utf8");
     await fs.writeFile(second_file, "same-content", "utf8");
-    await fs.utimes(first_file, new Date("2020-01-01T00:00:00.000Z"), new Date("2020-01-01T00:00:00.000Z"));
-    await fs.utimes(second_file, new Date("2024-01-01T00:00:00.000Z"), new Date("2024-01-01T00:00:00.000Z"));
+    await fs.utimes(
+      first_file,
+      new Date("2020-01-01T00:00:00.000Z"),
+      new Date("2020-01-01T00:00:00.000Z"),
+    );
+    await fs.utimes(
+      second_file,
+      new Date("2024-01-01T00:00:00.000Z"),
+      new Date("2024-01-01T00:00:00.000Z"),
+    );
 
     const report_text = [
       "# Report by fclones 0.35.0",
@@ -134,7 +267,10 @@ describe("file_deduplicate CLI", () => {
     ].join("\n");
 
     try {
-      const fake_fclones = await create_fake_fclones_bin(temp_root, report_text);
+      const fake_fclones = await create_fake_fclones_bin(
+        temp_root,
+        report_text,
+      );
       const result = await run_cli(
         [scan_dir, "--trash-dir", trash_dir, "--dry-run"],
         {
