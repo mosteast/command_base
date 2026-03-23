@@ -9,8 +9,11 @@ output_dir_provided=false
 VIDEO_URLS=()
 ONLY_AUDIO=false
 ONLY_SUBTITLE=false
+only_danmaku=false
 OVERWRITE=false
 REFRESH=false
+download_danmaku=true
+convert_danmaku_ass=true
 youtube_player_client="web,web_safari,web_embedded"
 fallback_player_client="android"
 debug_mode=false
@@ -22,9 +25,14 @@ youtube_cookie_browser="chrome"
 youtube_cookie_browser_provided=false
 youtube_cookie_file=""
 youtube_cookie_file_provided=false
-script_version="1.0.5"
+script_version="1.0.6"
 yt_dlp_color_policy="always"
 yt_dlp_color_opts=(--color "$yt_dlp_color_policy")
+default_video_subtitle_langs="en,en-US,zh-Hans,zh-Hant,zh-CN,zh"
+default_playlist_subtitle_langs="en,en-US,en-GB,zh-Hans,zh-Hant,zh-CN,zh"
+danmaku_subtitle_lang="danmaku"
+script_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd)
+danmaku_ass_converter_script="${script_dir}/../utility/danmaku_xml_to_ass.py"
 
 cleanup_ready=false
 cleanup_target_dirs=()
@@ -295,15 +303,20 @@ ${color_blue}Options:${color_reset}
   -r, --retry-count <n>   Retry attempts when yt-dlp fails (default: ${retry_attempt_limit})
       --only-audio        Download only audio files (default: false)
       --only-subtitle     Download only subtitle files (default: false)
+      --only-danmaku      Download only danmaku XML sidecars from supported platforms (default: false)
+      --danmaku           Download danmaku sidecars when available (default: true)
+      --no-danmaku        Disable danmaku sidecar download (default: false)
+      --danmaku-ass       Convert danmaku XML sidecars to ASS after download (default: true)
+      --no-danmaku-ass    Keep raw danmaku XML only; skip ASS conversion (default: false)
       --overwrite         Force overwrite existing files (default: false)
       --refresh           Clear cached archive for the provided URLs before downloading (default: false)
       --youtube-client    YouTube player clients for yt-dlp (comma-separated, default: ${youtube_player_client})
       --fallback-client   Fallback clients for YouTube format/player errors (default: ${fallback_player_client})
                          Use 'none' to disable fallback.
       --cookies-from-browser <value>
-                          Load YouTube cookies from a browser profile (default: ${youtube_cookie_browser})
-      --cookies <file>    Load YouTube cookies from a Netscape cookie file (default: disabled)
-      --no-cookies        Disable YouTube cookies (default: false)
+                          Load browser cookies for YouTube/Bilibili requests (default: ${youtube_cookie_browser})
+      --cookies <file>    Load cookies from a Netscape cookie file (default: disabled)
+      --no-cookies        Disable browser/cookie-file auth for supported sites (default: false)
       --insecure          Allow insecure SSL requests when needed (default: false)
       --                 Pass additional options to yt-dlp
 
@@ -326,11 +339,23 @@ ${color_blue}Examples:${color_reset}
   # Use a cookies.txt export for YouTube
   \$0 -l https://www.youtube.com/playlist?list=xxx --cookies ~/Downloads/youtube_cookies.txt
 
+  # Use browser cookies for Bilibili regular subtitles
+  \$0 -c https://space.bilibili.com/39449692 --cookies-from-browser chrome
+
   # Retry BitChute with insecure SSL fallback
   \$0 -c https://www.bitchute.com/channel/wnuZEpMvRZs6 --insecure
 
   # Download multiple videos into a custom folder
   \$0 https://youtu.be/xxx https://youtu.be/yyy ~/Downloads/YouTube
+
+  # Download only danmaku XML from a Bilibili video
+  \$0 --only-danmaku https://www.bilibili.com/video/BV1jL41167ZG/
+
+  # Disable danmaku sidecars for a Bilibili space
+  \$0 -c https://space.bilibili.com/39449692 --no-danmaku
+
+  # Keep raw danmaku XML only
+  \$0 -c https://space.bilibili.com/39449692 --no-danmaku-ass
 
 ${color_yellow}Note:${color_reset} Use exactly one input type (channel, playlist, or video URLs).
 EOF
@@ -376,6 +401,143 @@ resolve_default_output_dir() {
             printf "%s" "$default_output_dir"
             ;;
     esac
+}
+
+platform_supports_danmaku() {
+    local platform="$1"
+    [ "$platform" = "bilibili" ]
+}
+
+should_export_danmaku_for_platform() {
+    local platform="$1"
+    [ "$download_danmaku" = true ] && platform_supports_danmaku "$platform"
+}
+
+resolve_sidecar_archive_file() {
+    local archive_file="$1"
+    local sidecar_name="$2"
+
+    if [[ "$archive_file" == *.txt ]]; then
+        printf "%s" "${archive_file%.txt}.${sidecar_name}.txt"
+        return 0
+    fi
+
+    printf "%s.%s" "$archive_file" "$sidecar_name"
+}
+
+build_main_subtitle_lang_opts() {
+    local regular_langs="$1"
+    main_subtitle_lang_opts=()
+
+    if [ ${#WRITE_SUBS_OPTS[@]} -gt 0 ] && [ -n "$regular_langs" ]; then
+        main_subtitle_lang_opts=(--sub-langs "$regular_langs")
+    fi
+}
+
+resolve_python_binary() {
+    if command -v python3 >/dev/null 2>&1; then
+        command -v python3
+        return 0
+    fi
+    if command -v python >/dev/null 2>&1; then
+        command -v python
+        return 0
+    fi
+    return 1
+}
+
+resolve_cookie_mode_for_platform() {
+    local platform="$1"
+
+    if [ "$use_youtube_cookies" != true ]; then
+        printf "none"
+        return 0
+    fi
+
+    if [ "$youtube_cookie_file_provided" = true ]; then
+        printf "file"
+        return 0
+    fi
+
+    case "$platform" in
+        youtube|bilibili)
+            printf "browser"
+            ;;
+        *)
+            printf "none"
+            ;;
+    esac
+}
+
+convert_danmaku_xml_tree() {
+    local target_dir="$1"
+
+    if [ "$convert_danmaku_ass" != true ]; then
+        return 0
+    fi
+
+    if [ -z "$target_dir" ] || [ ! -d "$target_dir" ]; then
+        return 0
+    fi
+
+    if [ ! -f "$danmaku_ass_converter_script" ]; then
+        log_warn "Danmaku ASS conversion skipped: converter script not found at '${danmaku_ass_converter_script}'."
+        return 0
+    fi
+
+    local python_bin
+    if ! python_bin=$(resolve_python_binary); then
+        log_warn "Danmaku ASS conversion skipped: python3/python is not available."
+        return 0
+    fi
+
+    log_step "Convert danmaku XML to ASS"
+    log_io "scan danmaku XML files in ${target_dir}"
+
+    local converted_count=0
+    local skipped_count=0
+    local failed_count=0
+    local xml_file
+    while IFS= read -r -d '' xml_file; do
+        local ass_file="${xml_file%.xml}.ass"
+
+        if [ "$OVERWRITE" != true ] && [ "$REFRESH" != true ] && [ -f "$ass_file" ] && [ "$ass_file" -nt "$xml_file" ]; then
+            skipped_count=$((skipped_count + 1))
+            continue
+        fi
+
+        if [ "$dry_run" = true ]; then
+            log_info "Dry-run: $(format_command "$python_bin" "$danmaku_ass_converter_script" "$xml_file" "$ass_file")"
+            converted_count=$((converted_count + 1))
+            continue
+        fi
+
+        log_io "convert danmaku ${xml_file} -> ${ass_file}"
+        if "$python_bin" "$danmaku_ass_converter_script" "$xml_file" "$ass_file"; then
+            converted_count=$((converted_count + 1))
+        else
+            failed_count=$((failed_count + 1))
+            log_warn "Danmaku ASS conversion failed for '${xml_file}'."
+        fi
+    done < <(find "$target_dir" -type f -name '*.danmaku.xml' -print0 2>/dev/null)
+
+    if [ "$converted_count" -gt 0 ]; then
+        if [ "$dry_run" = true ]; then
+            log_info "Dry-run: would convert ${converted_count} danmaku XML file(s) in '${target_dir}'."
+        else
+            log_success "Converted ${converted_count} danmaku XML file(s) to ASS in '${target_dir}'."
+        fi
+    fi
+
+    if [ "$skipped_count" -gt 0 ]; then
+        log_debug "Danmaku ASS conversion skipped ${skipped_count} up-to-date file(s) in '${target_dir}'."
+    fi
+
+    if [ "$failed_count" -gt 0 ]; then
+        return 1
+    fi
+
+    return 0
 }
 
 normalize_channel_url() {
@@ -598,9 +760,11 @@ run_video_yt_dlp() {
     local url="$1"
     local archive_file="$2"
     local output_dir="$3"
-    local use_cookies="$4"
+    local cookie_mode="$4"
     local player_client="$5"
     local insecure_ssl="$6"
+
+    build_main_subtitle_lang_opts "$default_video_subtitle_langs"
 
     local -a yt_dlp_args
     yt_dlp_args=(
@@ -611,7 +775,7 @@ run_video_yt_dlp() {
         "${FORMAT_OPTS[@]}"
         "${WRITE_SUBS_OPTS[@]}"
         "${WRITE_META_OPTS[@]}"
-        --sub-langs "en,en-US,zh-Hans,zh-Hant,zh-CN,zh"
+        "${main_subtitle_lang_opts[@]}"
         --sleep-subtitles "$sleep_subtitles_seconds"
         --continue
     )
@@ -636,9 +800,14 @@ run_video_yt_dlp() {
         yt_dlp_args+=(--no-check-certificate)
     fi
 
-    if [ "$use_cookies" = true ]; then
-        yt_dlp_args+=(--cookies-from-browser chrome)
-    fi
+    case "$cookie_mode" in
+        browser)
+            yt_dlp_args+=(--cookies-from-browser "$youtube_cookie_browser")
+            ;;
+        file)
+            yt_dlp_args+=(--cookies "$youtube_cookie_file")
+            ;;
+    esac
 
     if [ -n "$player_client" ]; then
         yt_dlp_args+=(--extractor-args "youtube:player_client=${player_client}")
@@ -661,20 +830,250 @@ run_video_yt_dlp() {
     run_yt_dlp_with_log yt-dlp "${yt_dlp_args[@]}"
 }
 
+run_video_danmaku_yt_dlp() {
+    local url="$1"
+    local archive_file="$2"
+    local output_dir="$3"
+    local cookie_mode="$4"
+    local insecure_ssl="$5"
+
+    local -a yt_dlp_args
+    yt_dlp_args=(
+        "${yt_dlp_color_opts[@]}"
+        -o "$output_dir/%(uploader)s - Videos/%(title)s.%(ext)s"
+        -N 5
+        --skip-download
+        --write-subs
+        --sub-langs "$danmaku_subtitle_lang"
+        --sleep-subtitles "$sleep_subtitles_seconds"
+        --continue
+    )
+
+    if [ "$OVERWRITE" != true ]; then
+        yt_dlp_args+=(--download-archive "$archive_file" --no-overwrites)
+    else
+        yt_dlp_args+=(--force-overwrites)
+    fi
+
+    yt_dlp_args+=(
+        --sleep-interval "$sleep_interval_seconds"
+        --max-sleep-interval "$max_sleep_interval_seconds"
+        --retries 10
+        --extractor-retries 5
+        --file-access-retries 5
+        --fragment-retries 5
+        --exec after_move:"rm -f -- \"%(filepath)s.ytdl\""
+    )
+
+    case "$cookie_mode" in
+        browser)
+            yt_dlp_args+=(--cookies-from-browser "$youtube_cookie_browser")
+            ;;
+        file)
+            yt_dlp_args+=(--cookies "$youtube_cookie_file")
+            ;;
+    esac
+
+    if [ "$insecure_ssl" = true ]; then
+        yt_dlp_args+=(--no-check-certificate)
+    fi
+
+    if [ ${#match_filter_opts[@]} -gt 0 ]; then
+        yt_dlp_args+=("${match_filter_opts[@]}")
+    fi
+
+    yt_dlp_args+=(
+        --add-header "Accept:text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+        --add-header "Accept-Language:en-us,en;q=0.5"
+        --add-header "Accept-Encoding:gzip, deflate"
+        --add-header "Accept-Charset:ISO-8859-1,utf-8;q=0.7,*;q=0.7"
+        --add-header "User-Agent:Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+        "$url"
+    )
+
+    run_yt_dlp_with_log yt-dlp "${yt_dlp_args[@]}"
+}
+
+run_channel_danmaku_yt_dlp() {
+    local url="$1"
+    local archive_file="$2"
+    local output_template="$3"
+    local cookie_mode="$4"
+    local insecure_ssl="$5"
+    shift 5
+    local -a referer_opts=("$@")
+
+    local -a yt_dlp_args
+    yt_dlp_args=(
+        --playlist-reverse
+        "${yt_dlp_color_opts[@]}"
+        -o "$output_template"
+        -N 1
+        -i
+        --skip-download
+        --write-subs
+        --sub-langs "$danmaku_subtitle_lang"
+        --sleep-subtitles "$sleep_subtitles_seconds"
+        --continue
+    )
+
+    if [ "$OVERWRITE" != true ]; then
+        yt_dlp_args+=(--download-archive "$archive_file" --no-overwrites)
+    else
+        yt_dlp_args+=(--force-overwrites)
+    fi
+
+    yt_dlp_args+=(
+        --sleep-interval "$sleep_interval_seconds"
+        --max-sleep-interval "$max_sleep_interval_seconds"
+        --retries 10
+        --extractor-retries 5
+        --file-access-retries 5
+        --fragment-retries 5
+        --exec after_move:"rm -f -- \"%(filepath)s.ytdl\""
+    )
+
+    case "$cookie_mode" in
+        browser)
+            yt_dlp_args+=(--cookies-from-browser "$youtube_cookie_browser")
+            ;;
+        file)
+            yt_dlp_args+=(--cookies "$youtube_cookie_file")
+            ;;
+    esac
+
+    if [ "$insecure_ssl" = true ]; then
+        yt_dlp_args+=(--no-check-certificate)
+    fi
+
+    yt_dlp_args+=(
+        "${match_filter_opts[@]}"
+        --add-header "Accept:text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+        --add-header "Accept-Language:en-us,en;q=0.5"
+        --add-header "Accept-Encoding:gzip, deflate"
+        --add-header "Accept-Charset:ISO-8859-1,utf-8;q=0.7,*;q=0.7"
+        --add-header "User-Agent:Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+        "${referer_opts[@]}"
+        "$url"
+    )
+
+    run_yt_dlp_with_log yt-dlp "${yt_dlp_args[@]}"
+}
+
+run_playlist_danmaku_yt_dlp() {
+    local url="$1"
+    local archive_file="$2"
+    local output_template="$3"
+    local cookie_mode="$4"
+    local insecure_ssl="$5"
+
+    local -a yt_dlp_args
+    yt_dlp_args=(
+        --playlist-reverse
+        "${yt_dlp_color_opts[@]}"
+        -o "$output_template"
+        -N 1
+        -i
+        --skip-download
+        --write-subs
+        --sub-langs "$danmaku_subtitle_lang"
+        --sleep-subtitles "$sleep_subtitles_seconds"
+        --continue
+    )
+
+    if [ "$OVERWRITE" != true ]; then
+        yt_dlp_args+=(--download-archive "$archive_file" --no-overwrites)
+    else
+        yt_dlp_args+=(--force-overwrites)
+    fi
+
+    yt_dlp_args+=(
+        --yes-playlist
+        --sleep-interval "$sleep_interval_seconds"
+        --max-sleep-interval "$max_sleep_interval_seconds"
+        --retries 10
+        --extractor-retries 5
+        --file-access-retries 5
+        --fragment-retries 5
+        --exec after_move:"rm -f -- \"%(filepath)s.ytdl\""
+    )
+
+    case "$cookie_mode" in
+        browser)
+            yt_dlp_args+=(--cookies-from-browser "$youtube_cookie_browser")
+            ;;
+        file)
+            yt_dlp_args+=(--cookies "$youtube_cookie_file")
+            ;;
+    esac
+
+    if [ "$insecure_ssl" = true ]; then
+        yt_dlp_args+=(--no-check-certificate)
+    fi
+
+    yt_dlp_args+=(
+        "${match_filter_opts[@]}"
+        --add-header "Accept:text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+        --add-header "Accept-Language:en-us,en;q=0.5"
+        --add-header "Accept-Encoding:gzip, deflate"
+        --add-header "Accept-Charset:ISO-8859-1,utf-8;q=0.7,*;q=0.7"
+        --add-header "User-Agent:Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+        "$url"
+    )
+
+    run_yt_dlp_with_log yt-dlp "${yt_dlp_args[@]}"
+}
+
+run_danmaku_command() {
+    local description="$1"
+    shift
+
+    if [ "$dry_run" = true ]; then
+        log_info "Dry-run: ${description}"
+        "$@"
+        return $?
+    fi
+
+    retry_command "$description" "$@"
+}
+
+export_video_danmaku_if_enabled() {
+    local url="$1"
+    local archive_file="$2"
+    local output_dir="$3"
+    local platform="$4"
+    local cookie_mode="none"
+
+    if ! should_export_danmaku_for_platform "$platform"; then
+        return 0
+    fi
+
+    cookie_mode=$(resolve_cookie_mode_for_platform "$platform")
+    run_danmaku_command "Danmaku export: ${url}" run_video_danmaku_yt_dlp \
+        "$url" \
+        "$archive_file" \
+        "$output_dir" \
+        "$cookie_mode" \
+        "$allow_insecure_ssl"
+}
+
 download_video_with_fallback() {
     local url="$1"
     local archive_file="$2"
     local output_dir="$3"
     local platform="$4"
-    local use_cookies=false
+    local cookie_mode="none"
     local player_client=""
 
-    if [ "$platform" = "youtube" ]; then
-        use_cookies=true
+    if [ "$platform" = "youtube" ] || [ "$platform" = "bilibili" ]; then
+        cookie_mode=$(resolve_cookie_mode_for_platform "$platform")
+    fi
+
+    if [ "$platform" = "youtube" ] && [ "$cookie_mode" != "none" ]; then
         player_client="$youtube_cookie_player_client"
     fi
 
-    if run_video_yt_dlp "$url" "$archive_file" "$output_dir" "$use_cookies" "$player_client"; then
+    if run_video_yt_dlp "$url" "$archive_file" "$output_dir" "$cookie_mode" "$player_client"; then
         return 0
     fi
 
@@ -682,7 +1081,7 @@ download_video_with_fallback() {
     if [ "$platform" = "bitchute" ] && [ "$allow_insecure_ssl" = true ] && [ "$yt_dlp_last_ssl_error" = true ]; then
         log_warn "SSL errors detected; retrying with insecure TLS for BitChute."
         log_step "Retrying BitChute download with --no-check-certificate"
-        if run_video_yt_dlp "$url" "$archive_file" "$output_dir" "$use_cookies" "$player_client" true; then
+        if run_video_yt_dlp "$url" "$archive_file" "$output_dir" "$cookie_mode" "$player_client" true; then
             return 0
         fi
         primary_exit_code=$?
@@ -692,19 +1091,19 @@ download_video_with_fallback() {
             local cookie_fallback_label="${youtube_cookie_fallback_client:-default}"
             log_warn "Primary download failed due to YouTube player configuration; retrying with '${cookie_fallback_label}'."
             log_step "Fallback download with cookies using ${cookie_fallback_label}"
-            if run_video_yt_dlp "$url" "$archive_file" "$output_dir" true "$youtube_cookie_fallback_client"; then
+            if run_video_yt_dlp "$url" "$archive_file" "$output_dir" "$cookie_mode" "$youtube_cookie_fallback_client"; then
                 return 0
             fi
             log_warn "Fallback client '${cookie_fallback_label}' failed with cookies; retrying without cookies."
             log_step "Fallback download without cookies using ${fallback_player_client}"
-            run_video_yt_dlp "$url" "$archive_file" "$output_dir" false "$fallback_player_client"
+            run_video_yt_dlp "$url" "$archive_file" "$output_dir" none "$fallback_player_client"
             return $?
         fi
 
         if [ "$yt_dlp_last_format_error" = true ]; then
             log_warn "Primary download failed due to missing formats; retrying without cookies using '${fallback_player_client}'."
             log_step "Fallback download without cookies using ${fallback_player_client}"
-            run_video_yt_dlp "$url" "$archive_file" "$output_dir" false "$fallback_player_client"
+            run_video_yt_dlp "$url" "$archive_file" "$output_dir" none "$fallback_player_client"
             return $?
         fi
     fi
@@ -812,6 +1211,27 @@ while [[ $# -gt 0 ]]; do
             ;;
         --only-subtitle)
             ONLY_SUBTITLE=true
+            shift
+            ;;
+        --only-danmaku)
+            only_danmaku=true
+            download_danmaku=true
+            shift
+            ;;
+        --danmaku)
+            download_danmaku=true
+            shift
+            ;;
+        --no-danmaku)
+            download_danmaku=false
+            shift
+            ;;
+        --danmaku-ass)
+            convert_danmaku_ass=true
+            shift
+            ;;
+        --no-danmaku-ass)
+            convert_danmaku_ass=false
             shift
             ;;
         --overwrite)
@@ -952,6 +1372,21 @@ if [ "$ONLY_AUDIO" = true ] && [ "$ONLY_SUBTITLE" = true ]; then
     exit 1
 fi
 
+if [ "$ONLY_AUDIO" = true ] && [ "$only_danmaku" = true ]; then
+    log_error "Cannot use both --only-audio and --only-danmaku options together."
+    exit 1
+fi
+
+if [ "$ONLY_SUBTITLE" = true ] && [ "$only_danmaku" = true ]; then
+    log_error "Cannot use both --only-subtitle and --only-danmaku options together."
+    exit 1
+fi
+
+if [ "$download_danmaku" != true ] && [ "$only_danmaku" = true ]; then
+    log_error "Cannot use --only-danmaku together with --no-danmaku."
+    exit 1
+fi
+
 if [ "$fallback_player_client" = "none" ] || [ "$fallback_player_client" = "off" ]; then
     fallback_player_client=""
 fi
@@ -983,6 +1418,34 @@ elif [ $INPUT_COUNT -gt 1 ]; then
     [ -n "$PLAYLIST_URL" ] && log_info "  Playlist URL: '$PLAYLIST_URL'"
     [ ${#VIDEO_URLS[@]} -gt 0 ] && log_info "  Video URLs: '${VIDEO_URLS[*]}'"
     exit 1
+fi
+
+log_step "Validate danmaku options"
+if [ "$only_danmaku" = true ]; then
+    danmaku_validation_failed=false
+
+    if [ -n "$CHANNEL_URL" ]; then
+        if ! platform_supports_danmaku "$(detect_platform "$CHANNEL_URL")"; then
+            log_error "--only-danmaku supports only Bilibili inputs."
+            danmaku_validation_failed=true
+        fi
+    elif [ -n "$PLAYLIST_URL" ]; then
+        if ! platform_supports_danmaku "$(detect_platform "$PLAYLIST_URL")"; then
+            log_error "--only-danmaku supports only Bilibili inputs."
+            danmaku_validation_failed=true
+        fi
+    else
+        for video_url in "${VIDEO_URLS[@]}"; do
+            if ! platform_supports_danmaku "$(detect_platform "$video_url")"; then
+                log_error "--only-danmaku supports only Bilibili video URLs. Unsupported URL: '${video_url}'"
+                danmaku_validation_failed=true
+            fi
+        done
+    fi
+
+    if [ "$danmaku_validation_failed" = true ]; then
+        exit 1
+    fi
 fi
 
 # All remaining arguments will be passed to yt-dlp
@@ -1036,12 +1499,14 @@ fi
 
 # Define match filters that allow select extractors to bypass subscription checks.
 # Use multiple --match-filters entries for OR semantics; "&" is for AND.
+# `availability!=?needs_subscription` keeps videos whose availability field is
+# missing, which is common for Bilibili entries.
 MATCH_FILTERS=(
     "extractor='Rumble'"
     "extractor='RumbleEmbed'"
     "extractor='BitChute'"
     "extractor='BitChuteChannel'"
-    "extractor!='Rumble' & extractor!='RumbleEmbed' & extractor!='BitChute' & extractor!='BitChuteChannel' & availability!='needs_subscription'"
+    "extractor!='Rumble' & extractor!='RumbleEmbed' & extractor!='BitChute' & extractor!='BitChuteChannel' & availability!=?'needs_subscription'"
 )
 match_filter_opts=()
 for match_filter in "${MATCH_FILTERS[@]}"; do
@@ -1084,8 +1549,16 @@ if [ -n "$CHANNEL_URL" ]; then
     channel_cookie_opts=()
     channel_extractor_opts=()
     channel_fallback_extractor_opts=()
+    channel_cookie_mode=$(resolve_cookie_mode_for_platform "$channel_platform")
+    case "$channel_cookie_mode" in
+        browser)
+            channel_cookie_opts=(--cookies-from-browser "$youtube_cookie_browser")
+            ;;
+        file)
+            channel_cookie_opts=(--cookies "$youtube_cookie_file")
+            ;;
+    esac
     if [ "$channel_platform" = "youtube" ]; then
-        channel_cookie_opts=(--cookies-from-browser chrome)
         channel_extractor_opts=(--extractor-args youtubetab:skip=authcheck "${youtube_extractor_args[@]}")
         if [ -n "$fallback_player_client" ]; then
             channel_fallback_extractor_opts=(--extractor-args youtubetab:skip=authcheck "${youtube_fallback_extractor_args[@]}")
@@ -1096,21 +1569,55 @@ if [ -n "$CHANNEL_URL" ]; then
 
     # Generate a unique archive file name based on the channel URL
     ARCHIVE_FILE="${ARCHIVE_DIR}/$(echo "$CHANNEL_URL" | md5sum | cut -d' ' -f1).txt"
+    DANMAKU_ARCHIVE_FILE=$(resolve_sidecar_archive_file "$ARCHIVE_FILE" "danmaku")
 
     if [ "$REFRESH" = true ]; then
-        if [ -f "$ARCHIVE_FILE" ]; then
-            log_info "Refresh requested; clearing archive cache at '$ARCHIVE_FILE'."
-            if [ "$dry_run" = true ]; then
-                log_info "Dry-run: would remove archive cache at '${ARCHIVE_FILE}'."
+        if [ "$only_danmaku" != true ]; then
+            if [ -f "$ARCHIVE_FILE" ]; then
+                log_info "Refresh requested; clearing archive cache at '$ARCHIVE_FILE'."
+                if [ "$dry_run" = true ]; then
+                    log_info "Dry-run: would remove archive cache at '${ARCHIVE_FILE}'."
+                else
+                    log_io "remove archive cache ${ARCHIVE_FILE}"
+                    rm -f "$ARCHIVE_FILE"
+                fi
             else
-                log_io "remove archive cache ${ARCHIVE_FILE}"
-                rm -f "$ARCHIVE_FILE"
+                log_warn "Refresh requested but no archive cache found for '$CHANNEL_URL'."
             fi
-        else
-            log_warn "Refresh requested but no archive cache found for '$CHANNEL_URL'."
+        fi
+        if should_export_danmaku_for_platform "$channel_platform"; then
+            if [ -f "$DANMAKU_ARCHIVE_FILE" ]; then
+                log_info "Refresh requested; clearing danmaku archive cache at '$DANMAKU_ARCHIVE_FILE'."
+                if [ "$dry_run" = true ]; then
+                    log_info "Dry-run: would remove danmaku archive cache at '${DANMAKU_ARCHIVE_FILE}'."
+                else
+                    log_io "remove danmaku archive cache ${DANMAKU_ARCHIVE_FILE}"
+                    rm -f "$DANMAKU_ARCHIVE_FILE"
+                fi
+            else
+                log_warn "Refresh requested but no danmaku archive cache found for '$CHANNEL_URL'."
+            fi
         fi
     fi
 
+    if [ "$only_danmaku" = true ]; then
+        run_danmaku_command "Channel danmaku export: ${CHANNEL_URL}" run_channel_danmaku_yt_dlp \
+            "$CHANNEL_URL" \
+            "$DANMAKU_ARCHIVE_FILE" \
+            "$channel_output_template" \
+            "$channel_cookie_mode" \
+            "$allow_insecure_ssl" \
+            "${channel_referer_opts[@]}"
+        channel_status=$?
+        if [ "$channel_status" -eq 0 ]; then
+            if ! convert_danmaku_xml_tree "$(resolve_cleanup_root "$OUTPUT_DIR")"; then
+                channel_status=$?
+            fi
+        fi
+        exit "$channel_status"
+    fi
+
+    build_main_subtitle_lang_opts "$default_video_subtitle_langs"
     channel_base_args=(
         --playlist-reverse
         "${yt_dlp_color_opts[@]}"
@@ -1121,7 +1628,7 @@ if [ -n "$CHANNEL_URL" ]; then
         "${FORMAT_OPTS[@]}"
         "${WRITE_SUBS_OPTS[@]}"
         "${WRITE_META_OPTS[@]}"
-        --sub-langs "en,en-US,zh-Hans,zh-Hant,zh-CN,zh"
+        "${main_subtitle_lang_opts[@]}"
         --sleep-subtitles "$sleep_subtitles_seconds"
         --continue
     )
@@ -1221,6 +1728,22 @@ if [ -n "$CHANNEL_URL" ]; then
         fi
     fi
 
+    if [ "$channel_status" -eq 0 ] && should_export_danmaku_for_platform "$channel_platform"; then
+        run_danmaku_command "Channel danmaku export: ${CHANNEL_URL}" run_channel_danmaku_yt_dlp \
+            "$CHANNEL_URL" \
+            "$DANMAKU_ARCHIVE_FILE" \
+            "$channel_output_template" \
+            "$channel_cookie_mode" \
+            "$allow_insecure_ssl" \
+            "${channel_referer_opts[@]}"
+        danmaku_status=$?
+        if [ "$danmaku_status" -ne 0 ]; then
+            channel_status=$danmaku_status
+        elif ! convert_danmaku_xml_tree "$(resolve_cleanup_root "$OUTPUT_DIR")"; then
+            channel_status=$?
+        fi
+    fi
+
     exit "$channel_status"
 
 # Handle playlist URL mode
@@ -1250,8 +1773,16 @@ elif [ -n "$PLAYLIST_URL" ]; then
     playlist_cookie_opts=()
     playlist_extractor_opts=()
     playlist_fallback_extractor_opts=()
+    playlist_cookie_mode=$(resolve_cookie_mode_for_platform "$playlist_platform")
+    case "$playlist_cookie_mode" in
+        browser)
+            playlist_cookie_opts=(--cookies-from-browser "$youtube_cookie_browser")
+            ;;
+        file)
+            playlist_cookie_opts=(--cookies "$youtube_cookie_file")
+            ;;
+    esac
     if [ "$playlist_platform" = "youtube" ]; then
-        playlist_cookie_opts=(--cookies-from-browser chrome)
         playlist_extractor_opts=("${youtube_extractor_args[@]}")
         if [ -n "$fallback_player_client" ]; then
             playlist_fallback_extractor_opts=("${youtube_fallback_extractor_args[@]}")
@@ -1262,21 +1793,54 @@ elif [ -n "$PLAYLIST_URL" ]; then
 
     # Generate a unique archive file name based on the playlist URL
     ARCHIVE_FILE="${ARCHIVE_DIR}/$(echo "$PLAYLIST_URL" | md5sum | cut -d' ' -f1).txt"
+    DANMAKU_ARCHIVE_FILE=$(resolve_sidecar_archive_file "$ARCHIVE_FILE" "danmaku")
 
     if [ "$REFRESH" = true ]; then
-        if [ -f "$ARCHIVE_FILE" ]; then
-            log_info "Refresh requested; clearing archive cache at '$ARCHIVE_FILE'."
-            if [ "$dry_run" = true ]; then
-                log_info "Dry-run: would remove archive cache at '${ARCHIVE_FILE}'."
+        if [ "$only_danmaku" != true ]; then
+            if [ -f "$ARCHIVE_FILE" ]; then
+                log_info "Refresh requested; clearing archive cache at '$ARCHIVE_FILE'."
+                if [ "$dry_run" = true ]; then
+                    log_info "Dry-run: would remove archive cache at '${ARCHIVE_FILE}'."
+                else
+                    log_io "remove archive cache ${ARCHIVE_FILE}"
+                    rm -f "$ARCHIVE_FILE"
+                fi
             else
-                log_io "remove archive cache ${ARCHIVE_FILE}"
-                rm -f "$ARCHIVE_FILE"
+                log_warn "Refresh requested but no archive cache found for '$PLAYLIST_URL'."
             fi
-        else
-            log_warn "Refresh requested but no archive cache found for '$PLAYLIST_URL'."
+        fi
+        if should_export_danmaku_for_platform "$playlist_platform"; then
+            if [ -f "$DANMAKU_ARCHIVE_FILE" ]; then
+                log_info "Refresh requested; clearing danmaku archive cache at '$DANMAKU_ARCHIVE_FILE'."
+                if [ "$dry_run" = true ]; then
+                    log_info "Dry-run: would remove danmaku archive cache at '${DANMAKU_ARCHIVE_FILE}'."
+                else
+                    log_io "remove danmaku archive cache ${DANMAKU_ARCHIVE_FILE}"
+                    rm -f "$DANMAKU_ARCHIVE_FILE"
+                fi
+            else
+                log_warn "Refresh requested but no danmaku archive cache found for '$PLAYLIST_URL'."
+            fi
         fi
     fi
 
+    if [ "$only_danmaku" = true ]; then
+        run_danmaku_command "Playlist danmaku export: ${PLAYLIST_URL}" run_playlist_danmaku_yt_dlp \
+            "$PLAYLIST_URL" \
+            "$DANMAKU_ARCHIVE_FILE" \
+            "$playlist_output_template" \
+            "$playlist_cookie_mode" \
+            "$allow_insecure_ssl"
+        playlist_status=$?
+        if [ "$playlist_status" -eq 0 ]; then
+            if ! convert_danmaku_xml_tree "$(resolve_cleanup_root "$OUTPUT_DIR")"; then
+                playlist_status=$?
+            fi
+        fi
+        exit "$playlist_status"
+    fi
+
+    build_main_subtitle_lang_opts "$default_playlist_subtitle_langs"
     playlist_base_args=(
         --playlist-reverse
         "${yt_dlp_color_opts[@]}"
@@ -1287,7 +1851,7 @@ elif [ -n "$PLAYLIST_URL" ]; then
         "${FORMAT_OPTS[@]}"
         "${WRITE_SUBS_OPTS[@]}"
         "${WRITE_META_OPTS[@]}"
-        --sub-langs "en,en-US,en-GB,zh-Hans,zh-Hant,zh-CN,zh"
+        "${main_subtitle_lang_opts[@]}"
         --sleep-subtitles "$sleep_subtitles_seconds"
         --continue
     )
@@ -1383,6 +1947,21 @@ elif [ -n "$PLAYLIST_URL" ]; then
         fi
     fi
 
+    if [ "$playlist_status" -eq 0 ] && should_export_danmaku_for_platform "$playlist_platform"; then
+        run_danmaku_command "Playlist danmaku export: ${PLAYLIST_URL}" run_playlist_danmaku_yt_dlp \
+            "$PLAYLIST_URL" \
+            "$DANMAKU_ARCHIVE_FILE" \
+            "$playlist_output_template" \
+            "$playlist_cookie_mode" \
+            "$allow_insecure_ssl"
+        danmaku_status=$?
+        if [ "$danmaku_status" -ne 0 ]; then
+            playlist_status=$danmaku_status
+        elif ! convert_danmaku_xml_tree "$(resolve_cleanup_root "$OUTPUT_DIR")"; then
+            playlist_status=$?
+        fi
+    fi
+
     exit "$playlist_status"
 
 # Handle individual video URLs mode
@@ -1407,6 +1986,7 @@ else
     overall_exit_code=0
     failed_video_urls=()
     manual_archive_seen_dirs=()
+    manual_danmaku_target_dirs=()
 
     for url in "${VIDEO_URLS[@]}"; do
         url_platform=$(detect_platform "$url")
@@ -1414,40 +1994,77 @@ else
         if [ "$output_dir_provided" != true ]; then
             url_output_dir=$(resolve_default_output_dir "$url_platform")
         fi
-        add_cleanup_target_dir "$(resolve_cleanup_root "$url_output_dir")"
+        url_cleanup_root=$(resolve_cleanup_root "$url_output_dir")
+        add_cleanup_target_dir "$url_cleanup_root"
+        if should_export_danmaku_for_platform "$url_platform" && ! list_contains "$url_cleanup_root" "${manual_danmaku_target_dirs[@]}"; then
+            manual_danmaku_target_dirs+=("$url_cleanup_root")
+        fi
         expanded_output_dir="${url_output_dir/#\~/$HOME}"
         [ -z "$expanded_output_dir" ] && expanded_output_dir="manual_video_downloads"
         manual_archive_hash=$(printf "%s" "$expanded_output_dir" | md5sum | cut -d' ' -f1)
         manual_archive_file="${ARCHIVE_DIR}/manual_urls_${manual_archive_hash}.txt"
+        manual_danmaku_archive_file=$(resolve_sidecar_archive_file "$manual_archive_file" "danmaku")
+        active_manual_archive_file="$manual_archive_file"
+        if [ "$only_danmaku" = true ]; then
+            active_manual_archive_file="$manual_danmaku_archive_file"
+        fi
 
         if ! list_contains "$expanded_output_dir" "${manual_archive_seen_dirs[@]}"; then
             manual_archive_seen_dirs+=("$expanded_output_dir")
             if [ "$REFRESH" = true ]; then
-                if [ -f "$manual_archive_file" ]; then
-                    log_info "Refresh requested; clearing archive cache at '${manual_archive_file}'."
-                    if [ "$dry_run" = true ]; then
-                        log_info "Dry-run: would remove archive cache at '${manual_archive_file}'."
+                if [ "$only_danmaku" != true ]; then
+                    if [ -f "$manual_archive_file" ]; then
+                        log_info "Refresh requested; clearing archive cache at '${manual_archive_file}'."
+                        if [ "$dry_run" = true ]; then
+                            log_info "Dry-run: would remove archive cache at '${manual_archive_file}'."
+                        else
+                            log_io "remove archive cache ${manual_archive_file}"
+                            rm -f "$manual_archive_file"
+                        fi
                     else
-                        log_io "remove archive cache ${manual_archive_file}"
-                        rm -f "$manual_archive_file"
+                        log_warn "Refresh requested but no manual video archive found to clear."
                     fi
-                else
-                    log_warn "Refresh requested but no manual video archive found to clear."
+                fi
+                if should_export_danmaku_for_platform "$url_platform"; then
+                    if [ -f "$manual_danmaku_archive_file" ]; then
+                        log_info "Refresh requested; clearing danmaku archive cache at '${manual_danmaku_archive_file}'."
+                        if [ "$dry_run" = true ]; then
+                            log_info "Dry-run: would remove danmaku archive cache at '${manual_danmaku_archive_file}'."
+                        else
+                            log_io "remove danmaku archive cache ${manual_danmaku_archive_file}"
+                            rm -f "$manual_danmaku_archive_file"
+                        fi
+                    else
+                        log_warn "Refresh requested but no danmaku archive found to clear."
+                    fi
                 fi
             fi
 
             if [ "$OVERWRITE" != true ]; then
                 if [ "$dry_run" = true ]; then
-                    log_info "Dry-run: would create archive cache at '${manual_archive_file}'."
+                    log_info "Dry-run: would create archive cache at '${active_manual_archive_file}'."
                 else
-                    log_io "create archive cache ${manual_archive_file}"
-                    touch "$manual_archive_file"
+                    log_io "create archive cache ${active_manual_archive_file}"
+                    touch "$active_manual_archive_file"
                 fi
             fi
         fi
 
-        if retry_command "Video download: ${url}" download_video_with_fallback "$url" "$manual_archive_file" "$url_output_dir" "$url_platform"
-        then
+        if [ "$only_danmaku" = true ]; then
+            url_cookie_mode=$(resolve_cookie_mode_for_platform "$url_platform")
+            if run_danmaku_command "Danmaku export: ${url}" run_video_danmaku_yt_dlp "$url" "$manual_danmaku_archive_file" "$url_output_dir" "$url_cookie_mode" "$allow_insecure_ssl"; then
+                :
+            else
+                download_status=$?
+                log_error "Skipping ${url} after ${retry_attempt_limit} failed danmaku export attempts."
+                overall_exit_code=$download_status
+                failed_video_urls+=("$url")
+                continue
+            fi
+            continue
+        fi
+
+        if retry_command "Video download: ${url}" download_video_with_fallback "$url" "$manual_archive_file" "$url_output_dir" "$url_platform"; then
             :
         else
             download_status=$?
@@ -1456,7 +2073,24 @@ else
             failed_video_urls+=("$url")
             continue
         fi
+
+        if export_video_danmaku_if_enabled "$url" "$manual_danmaku_archive_file" "$url_output_dir" "$url_platform"; then
+            :
+        else
+            download_status=$?
+            log_error "Danmaku export failed for ${url} after ${retry_attempt_limit} attempts."
+            overall_exit_code=$download_status
+            failed_video_urls+=("$url")
+        fi
     done
+
+    if [ ${#manual_danmaku_target_dirs[@]} -gt 0 ]; then
+        for danmaku_target_dir in "${manual_danmaku_target_dirs[@]}"; do
+            if ! convert_danmaku_xml_tree "$danmaku_target_dir"; then
+                overall_exit_code=$?
+            fi
+        done
+    fi
 
     if [ ${#failed_video_urls[@]} -gt 0 ]; then
         log_warn "Failed videos after ${retry_attempt_limit} attempts:"
