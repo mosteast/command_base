@@ -46,6 +46,9 @@ async function write_config_file(temp_root) {
     "  youtube:",
     "    - name: Example YouTube channel",
     "      handle: https://www.youtube.com/@example",
+    "  bilibili:",
+    "    - name: Example Bilibili creator",
+    "      handle: 39449692",
     "  rumble:",
     "    - name: Example Rumble channel",
     "      handle: https://rumble.com/c/example",
@@ -136,7 +139,7 @@ describe("gather CLI platform selection", () => {
       ]);
 
       expect(result.exit_code).toBe(0);
-      expect(extract_total_jobs(result.stdout)).toBe(2);
+      expect(extract_total_jobs(result.stdout)).toBe(3);
     } finally {
       await fs.rm(temp_root, { recursive: true, force: true });
     }
@@ -164,6 +167,31 @@ describe("gather CLI platform selection", () => {
     }
   });
 
+  it("supports bilibili sources in config and builds an xsave_yt_dlp command", async () => {
+    const temp_root = await create_temp_dir();
+    const state_file = path.join(temp_root, "gather.state.json");
+
+    try {
+      const config_path = await write_config_file(temp_root);
+      const result = await run_cli([
+        "--dry-run",
+        "--state-file",
+        state_file,
+        "--platform",
+        "bilibili",
+        config_path,
+      ]);
+
+      expect(result.exit_code).toBe(0);
+      expect(extract_total_jobs(result.stdout)).toBe(1);
+      expect(result.stdout).toContain(
+        "xsave_yt_dlp -c https://space.bilibili.com/39449692",
+      );
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
+  });
+
   it("treats a path-like platform token as config when platform value is missing", async () => {
     const temp_root = await create_temp_dir();
     const state_file = path.join(temp_root, "gather.state.json");
@@ -179,7 +207,7 @@ describe("gather CLI platform selection", () => {
       ]);
 
       expect(result.exit_code).toBe(0);
-      expect(extract_total_jobs(result.stdout)).toBe(2);
+      expect(extract_total_jobs(result.stdout)).toBe(3);
     } finally {
       await fs.rm(temp_root, { recursive: true, force: true });
     }
