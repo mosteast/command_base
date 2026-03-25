@@ -12,6 +12,7 @@ const { spawn } = require("child_process");
 const { extractAudio } = require("../lib/live_media/extract_audio");
 const {
   transcribeWithWhisper,
+  get_default_whisper_model,
 } = require("../lib/live_media/whisper_transcribe");
 const { compressVideo } = require("../lib/live_media/compress_video");
 const { resolveExecutable } = require("../lib/live_media/process_utils");
@@ -550,7 +551,7 @@ const VIDEO_EXTENSIONS = new Set([
   ".webm",
   ".avi",
 ]);
-const DEFAULT_WHISPER_MODEL = process.env.WHISPER_DEFAULT_MODEL || "turbo";
+const DEFAULT_WHISPER_MODEL = get_default_whisper_model();
 const DEFAULT_TRANSCRIPT_FORMATS = ["srt", "vtt"];
 const DEFAULT_SOURCE_TYPE = "raw";
 const SOURCE_TYPE_VALUES = new Set(["raw", "compressed"]);
@@ -637,7 +638,7 @@ function showHelp() {
   );
   print_help_line(
     palette.dim(
-      `      --whisper-model NAME       Whisper model (default: ${DEFAULT_WHISPER_MODEL})`,
+      `      --whisper-model NAME       Whisper model (default: ${DEFAULT_WHISPER_MODEL}; aliases: best, latest, fast)`,
     ),
   );
   print_help_line(

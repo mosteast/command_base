@@ -9,9 +9,10 @@ const { spawn } = require("child_process");
 
 const {
   transcribeWithWhisper: transcribe_with_whisper,
+  get_default_whisper_model,
 } = require("../lib/live_media/whisper_transcribe");
 
-const DEFAULT_WHISPER_MODEL = process.env.WHISPER_DEFAULT_MODEL || "turbo";
+const DEFAULT_WHISPER_MODEL = get_default_whisper_model();
 const DEFAULT_TRANSCRIPT_FORMATS = ["srt", "vtt"];
 const DEFAULT_CONCURRENCY = 3;
 
@@ -173,7 +174,7 @@ function show_help() {
     "      --format FORMAT       Output format(s) (repeat or comma-separated, default: srt,vtt)",
   );
   console.log(
-    `      --model NAME          Whisper model (default: ${DEFAULT_WHISPER_MODEL})`,
+    `      --model NAME          Whisper model (default: ${DEFAULT_WHISPER_MODEL}; aliases: best, latest, fast)`,
   );
   console.log(
     "      --language CODE       Force language (auto-detect if omitted)",
