@@ -4,7 +4,10 @@
 # You can source this file in ~/.zshrc:
 # source '/path/to/this/file/zshrc_custom.sh'
 
-export PATH="$HOME/dev_lib/flutter/bin:$HOME/bin:$HOME/code_base/command_base/bin:$HOME/code_base/mosteast/giao/bin:/usr/local/mysql/bin:/opt/homebrew/bin:$PATH"
+export COMMAND_BASE_ASR_RUNTIME="$HOME/.local/share/command_base/asr_runtime"
+export PYTHON_BIN="$COMMAND_BASE_ASR_RUNTIME/bin/python"
+export HF_HUB_DISABLE_XET=1
+export PATH="$COMMAND_BASE_ASR_RUNTIME/bin:$HOME/dev_lib/flutter/bin:$HOME/bin:$HOME/code_base/command_base/bin:$HOME/code_base/mosteast/giao/bin:/usr/local/mysql/bin:/opt/homebrew/bin:$PATH"
 export ZPLUG_HOME=/opt/homebrew/opt/zplug
 
 export GOOGLE_CLOUD_PROJECT="inme-395708"

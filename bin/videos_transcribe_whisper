@@ -13,7 +13,7 @@ const {
 } = require("../lib/live_media/whisper_transcribe");
 
 const DEFAULT_WHISPER_MODEL = get_default_whisper_model();
-const DEFAULT_TRANSCRIPT_FORMATS = ["srt", "vtt"];
+const DEFAULT_TRANSCRIPT_FORMATS = ["vtt"];
 const DEFAULT_CONCURRENCY = 3;
 
 const extra_bin_dirs = [];
@@ -117,10 +117,10 @@ async function run_vtt2txt(vtt_path, runtime_flags) {
 }
 
 async function ensure_text_sidecars(outputs, runtime_flags, source_label) {
-  if (runtime_flags.should_skip_txt_conversion) {
+  if (!runtime_flags.should_generate_txt_conversion) {
     if (runtime_flags.is_debug_enabled) {
       console.log(
-        `${label_debug} Skipping VTT to TXT conversion for ${source_label || "current file"} (flag enabled).`,
+        `${label_debug} Skipping VTT to TXT conversion for ${source_label || "current file"} (default behavior).`,
       );
     }
     return;
@@ -156,57 +156,42 @@ async function ensure_text_sidecars(outputs, runtime_flags, source_label) {
   }
 }
 
+function build_help_text(command_name = "videos_transcribe_whisper") {
+  return [
+    chalk.bold("Usage:"),
+    `  ${chalk.cyan(command_name)} ${chalk.yellow("<audio-or-video-file> [...more files]")} [options]`,
+    "",
+    chalk.bold("Description:"),
+    "  Transcribe audio or video sources with Whisper, supporting globs and batches.",
+    "",
+    chalk.bold("Options:"),
+    "  -o, --output-dir DIR      Directory for transcript outputs",
+    "      --format FORMAT       Output format(s) (repeat or comma-separated, default: vtt)",
+    `      --model NAME          Whisper model (default: ${DEFAULT_WHISPER_MODEL}; aliases: best, latest, fast)`,
+    "      --language CODE       Force language (auto-detect if omitted)",
+    "      --task TASK           transcribe (default) or translate",
+    "      --temperature VALUE   Sampling temperature",
+    "      --beam-size N         Beam search size",
+    "      --best-of N           Best-of parameter",
+    "      --device DEVICE       cpu, cuda, etc.",
+    "      --compute-type TYPE   Only for faster-whisper (e.g. float16)",
+    "      --whisper-bin PATH    Path to whisper executable",
+    "      --concurrency N       Number of files to process in parallel (default: 3)",
+    "      --extra ARG           Additional CLI args (repeatable)",
+    "      --vtt2txt             Convert VTT outputs to TXT sidecars (default: false)",
+    "  -h, --help                Show this help message",
+    "",
+    chalk.bold("Examples:"),
+    `  ${chalk.cyan(command_name)} ${chalk.yellow('"input/*.mp4"')} --output-dir transcripts`,
+    `  ${chalk.cyan(command_name)} ${chalk.yellow("episode.m4a lesson.mp4")} --format srt --concurrency 4`,
+    `  ${chalk.cyan(command_name)} ${chalk.yellow("video.mov")} --vtt2txt`,
+    `  ${chalk.cyan(command_name)} ${chalk.yellow("video.mov")} --extra --max_line_width --extra 120`,
+  ].join("\n");
+}
+
 function show_help() {
   const cmd = path.basename(process.argv[1] || "videos_transcribe_whisper");
-  console.log(chalk.bold("Usage:"));
-  console.log(
-    `  ${chalk.cyan(cmd)} ${chalk.yellow("<audio-or-video-file> [...more files]")} [options]`,
-  );
-  console.log("");
-  console.log(chalk.bold("Description:"));
-  console.log(
-    "  Transcribe audio or video sources with Whisper, supporting globs and batches.",
-  );
-  console.log("");
-  console.log(chalk.bold("Options:"));
-  console.log("  -o, --output-dir DIR      Directory for transcript outputs");
-  console.log(
-    "      --format FORMAT       Output format(s) (repeat or comma-separated, default: srt,vtt)",
-  );
-  console.log(
-    `      --model NAME          Whisper model (default: ${DEFAULT_WHISPER_MODEL}; aliases: best, latest, fast)`,
-  );
-  console.log(
-    "      --language CODE       Force language (auto-detect if omitted)",
-  );
-  console.log("      --task TASK           transcribe (default) or translate");
-  console.log("      --temperature VALUE   Sampling temperature");
-  console.log("      --beam-size N         Beam search size");
-  console.log("      --best-of N           Best-of parameter");
-  console.log("      --device DEVICE       cpu, cuda, etc.");
-  console.log(
-    "      --compute-type TYPE   Only for faster-whisper (e.g. float16)",
-  );
-  console.log("      --whisper-bin PATH    Path to whisper executable");
-  console.log(
-    "      --concurrency N       Number of files to process in parallel (default: 3)",
-  );
-  console.log("      --extra ARG           Additional CLI args (repeatable)");
-  console.log(
-    "      --skip-vtt2txt        Skip converting VTT outputs to TXT sidecars (default: false)",
-  );
-  console.log("  -h, --help                Show this help message");
-  console.log("");
-  console.log(chalk.bold("Examples:"));
-  console.log(
-    `  ${chalk.cyan(cmd)} ${chalk.yellow('"input/*.mp4"')} --output-dir transcripts`,
-  );
-  console.log(
-    `  ${chalk.cyan(cmd)} ${chalk.yellow("episode.m4a lesson.mp4")} --format srt --concurrency 4`,
-  );
-  console.log(
-    `  ${chalk.cyan(cmd)} ${chalk.yellow("video.mov")} --extra --max_line_width --extra 120`,
-  );
+  console.log(build_help_text(cmd));
 }
 
 function parse_number(value, label) {
@@ -236,6 +221,19 @@ function normalize_formats(raw_value) {
     formats = ["txt", "vtt", "srt", "tsv", "json"];
   }
   return Array.from(new Set(formats));
+}
+
+function should_generate_txt_sidecars(argv = {}) {
+  return Boolean(argv.vtt2txt);
+}
+
+function build_runtime_flags(argv = {}) {
+  return {
+    is_debug_enabled: Boolean(argv.debug),
+    is_quiet_mode: Boolean(argv.quiet),
+    is_dry_run_enabled: Boolean(argv["dry-run"] || argv.dryRun),
+    should_generate_txt_conversion: should_generate_txt_sidecars(argv),
+  };
 }
 
 function expand_input_patterns(patterns) {
@@ -323,7 +321,7 @@ async function main() {
       "extra",
       "concurrency",
     ],
-    boolean: ["help", "debug", "quiet", "dry-run", "dryRun", "skip-vtt2txt"],
+    boolean: ["help", "debug", "quiet", "dry-run", "dryRun", "vtt2txt"],
     alias: {
       o: "output-dir",
       h: "help",
@@ -355,12 +353,7 @@ async function main() {
 
     const { files: input_paths, unmatched } = expand_input_patterns(raw_inputs);
 
-    const runtime_flags = {
-      is_debug_enabled: Boolean(argv.debug),
-      is_quiet_mode: Boolean(argv.quiet),
-      is_dry_run_enabled: Boolean(argv["dry-run"] || argv.dryRun),
-      should_skip_txt_conversion: Boolean(argv["skip-vtt2txt"]),
-    };
+    const runtime_flags = build_runtime_flags(argv);
 
     if (unmatched.length) {
       unmatched.forEach((pattern) => {
@@ -492,4 +485,18 @@ async function main() {
   }
 }
 
-main();
+if (require.main === module) {
+  main();
+}
+
+module.exports = {
+  build_help_text,
+  build_runtime_flags,
+  expand_input_patterns,
+  main,
+  normalize_formats,
+  parse_number,
+  parse_repeatable,
+  run_with_concurrency,
+  should_generate_txt_sidecars,
+};

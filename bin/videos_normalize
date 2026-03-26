@@ -4,16 +4,28 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 const yargs = require("yargs/yargs");
+const { globSync, hasMagic } = require("glob");
 const chalk = require("chalk");
 const readline = require("readline");
 const util = require("util");
 const { spawn } = require("child_process");
+const { version: package_version } = require("../package.json");
 
 const { extractAudio } = require("../lib/live_media/extract_audio");
 const {
-  transcribeWithWhisper,
-  resolve_model_for_flavor,
-} = require("../lib/live_media/whisper_transcribe");
+  format_stage_failure_message,
+  resolve_error_message,
+} = require("../lib/live_media/error_utils");
+const {
+  DEFAULT_QWEN_ALIGNER_MODEL,
+  transcribe_media,
+  get_default_model_for_provider,
+  list_transcript_providers,
+  resolve_transcript_outputs,
+  resolve_model_for_provider,
+  resolve_transcript_provider_strategy,
+  resolve_transcript_provider,
+} = require("../lib/live_media/transcribe_media");
 const { compressVideo } = require("../lib/live_media/compress_video");
 const { resolveExecutable } = require("../lib/live_media/process_utils");
 
@@ -83,12 +95,19 @@ const terminal_state = {
 
 const original_console = {
   log: console.log.bind(console),
+  info: console.info.bind(console),
+  debug: console.debug.bind(console),
   warn: console.warn.bind(console),
   error: console.error.bind(console),
 };
 
 let progress_tracker = null;
 let cleanup_keypress_listener = null;
+const app_state = {
+  debug: false,
+  quiet: false,
+  dry_run: false,
+};
 
 function truncate_middle(value, max_length = 60) {
   if (!value) return "";
@@ -143,8 +162,12 @@ function replay_log_history() {
 function emit_line(level, line, force = false) {
   const resolved_level = level === "info" ? "log" : level;
   const text = line;
-  const should_print = terminal_state.logs_visible || force;
-  const should_store = !terminal_state.logs_visible && Boolean(text);
+  const suppress_info_output =
+    app_state.quiet && resolved_level === "log" && !force;
+  const should_print =
+    !suppress_info_output && (terminal_state.logs_visible || force);
+  const should_store =
+    !suppress_info_output && !terminal_state.logs_visible && Boolean(text);
 
   if (text) {
     record_log_history(resolved_level, text);
@@ -183,6 +206,11 @@ function process_output(level, message, options = {}) {
     if (isTrailingEmpty) continue;
     emit_line(resolved_level, part, force);
   }
+}
+
+function debug_log(message) {
+  if (!app_state.debug || app_state.quiet) return;
+  process_output("log", palette.dim(`[debug] ${message}`), { force: true });
 }
 
 function handle_child_stream(level, chunk) {
@@ -369,6 +397,7 @@ function handle_console_output(level, args) {
 
 console.log = (...args) => handle_console_output("log", args);
 console.info = (...args) => handle_console_output("log", args);
+console.debug = (...args) => handle_console_output("log", args);
 console.warn = (...args) => handle_console_output("warn", args);
 console.error = (...args) => handle_console_output("error", args);
 
@@ -551,15 +580,16 @@ const VIDEO_EXTENSIONS = new Set([
   ".webm",
   ".avi",
 ]);
-const DEFAULT_WHISPER_MODEL =
-  process.env.VIDEOS_NORMALIZE_WHISPER_MODEL ||
-  process.env.WHISPER_DEFAULT_MODEL ||
-  "latest";
-const DEFAULT_WHISPER_MODEL_DISPLAY =
-  DEFAULT_WHISPER_MODEL === "latest"
-    ? `${DEFAULT_WHISPER_MODEL} -> ${resolve_model_for_flavor(DEFAULT_WHISPER_MODEL)}`
-    : DEFAULT_WHISPER_MODEL;
-const DEFAULT_TRANSCRIPT_FORMATS = ["srt", "vtt"];
+const DEFAULT_TRANSCRIPT_PROVIDER = resolve_transcript_provider(
+  process.env.VIDEOS_NORMALIZE_TRANSCRIPT_PROVIDER ||
+    process.env.TRANSCRIPT_DEFAULT_PROVIDER ||
+    "whisper",
+);
+const DEFAULT_TRANSCRIPT_MODEL = get_default_model_for_provider(
+  DEFAULT_TRANSCRIPT_PROVIDER,
+);
+const DEFAULT_WHISPER_MODEL = get_default_model_for_provider("whisper");
+const DEFAULT_TRANSCRIPT_FORMATS = ["vtt"];
 const DEFAULT_SOURCE_TYPE = "raw";
 const SOURCE_TYPE_VALUES = new Set(["raw", "compressed"]);
 const JOB_MODE_STEP = "step";
@@ -596,92 +626,176 @@ function print_help_line(message = "") {
   process_output("log", `${message}`, { force: true });
 }
 
+function format_transcript_model_display(provider_name, model_name) {
+  const resolved_provider = resolve_transcript_provider(provider_name);
+  const requested_model = `${model_name || ""}`.trim();
+  const resolved_model = resolve_model_for_provider(
+    resolved_provider,
+    requested_model,
+  );
+  if (!requested_model) {
+    return resolved_model;
+  }
+  if (requested_model === resolved_model) {
+    return requested_model;
+  }
+  return `${requested_model} -> ${resolved_model}`;
+}
+
+const DEFAULT_TRANSCRIPT_MODEL_DISPLAY = format_transcript_model_display(
+  DEFAULT_TRANSCRIPT_PROVIDER,
+  DEFAULT_TRANSCRIPT_MODEL,
+);
+const DEFAULT_WHISPER_MODEL_DISPLAY = format_transcript_model_display(
+  "whisper",
+  DEFAULT_WHISPER_MODEL,
+);
+
 function showHelp() {
   const cmd = path.basename(process.argv[1] || "videos_normalize");
   print_help_line(palette.headline("Usage:"));
   print_help_line(`  ${palette.stage(cmd)} <video-file> [options]`);
   print_help_line("");
-  print_help_line(palette.headline("Audio extraction options:"));
-  print_help_line(
-    palette.dim("      --audio-output PATH        Audio output path"),
-  );
-  print_help_line(
-    palette.dim("      --audio-format EXT         Audio extension override"),
-  );
+  print_help_line(palette.headline("Description:"));
   print_help_line(
     palette.dim(
-      "      --audio-stream INDEX       Audio stream index (default: 0)",
+      "  Extract audio, generate transcripts, and create compressed video outputs for one or more videos.",
     ),
   );
   print_help_line(
     palette.dim(
-      "      --audio-bitrate RATE       Fallback transcode bitrate (default: 192k)",
-    ),
-  );
-  print_help_line(
-    palette.dim(
-      "      --audio-sample-rate HZ     Fallback transcode sample rate",
-    ),
-  );
-  print_help_line(
-    palette.dim(
-      "      --audio-source PATH        Use existing audio file (skip extraction)",
+      "  Inputs can be files, directories, or quoted glob patterns. Existing outputs are skipped unless --force or --refresh is used.",
     ),
   );
   print_help_line("");
-  print_help_line(palette.headline("Transcription options:"));
+  print_help_line(palette.headline("Audio Options:"));
   print_help_line(
-    palette.dim("      --transcript-dir DIR       Directory for transcripts"),
+    palette.dim("      --audio-output PATH         Audio output path"),
+  );
+  print_help_line(
+    palette.dim("      --audio-format EXT          Audio extension override"),
   );
   print_help_line(
     palette.dim(
-      "      --transcript-output PATH   Desired transcript file path",
+      "      --audio-stream INDEX        Audio stream index (default: 0)",
     ),
   );
   print_help_line(
     palette.dim(
-      "      --transcript-format FORMAT Transcript format(s), repeat or comma-separated (default: srt,vtt)",
+      "      --audio-bitrate RATE        Fallback transcode bitrate (default: 192k)",
     ),
   );
   print_help_line(
     palette.dim(
-      `      --whisper-model NAME       Whisper model (default: ${DEFAULT_WHISPER_MODEL_DISPLAY}; use best for highest accuracy)`,
+      "      --audio-sample-rate HZ      Fallback transcode sample rate",
     ),
   );
   print_help_line(
-    palette.dim("      --whisper-language CODE    Force language"),
-  );
-  print_help_line(
     palette.dim(
-      "      --whisper-task TASK        transcribe (default) or translate",
-    ),
-  );
-  print_help_line(
-    palette.dim("      --whisper-device DEVICE    Device, e.g. cpu or cuda"),
-  );
-  print_help_line(
-    palette.dim(
-      "      --whisper-compute-type VAL Compute type for faster-whisper",
-    ),
-  );
-  print_help_line(
-    palette.dim("      --whisper-bin PATH         Path to whisper executable"),
-  );
-  print_help_line(
-    palette.dim(
-      "      --whisper-extra ARG        Extra whisper CLI args (repeatable)",
+      "      --audio-source PATH         Use an existing audio file and skip extraction",
     ),
   );
   print_help_line("");
-  print_help_line(palette.headline("Compression options:"));
+  print_help_line(palette.headline("Transcription Options:"));
   print_help_line(
-    palette.dim("      --compress-output PATH     Output video path"),
+    palette.dim("      --transcript-dir DIR        Directory for transcripts"),
   );
   print_help_line(
-    palette.dim("      --compress-crf VALUE       CRF value (default: 23)"),
+    palette.dim(
+      "      --transcript-output PATH    Desired transcript file path",
+    ),
   );
   print_help_line(
-    palette.dim("      --compress-preset NAME     Preset (default: medium)"),
+    palette.dim(
+      "      --transcript-format FORMAT  Transcript format(s), repeat or comma-separated (default: vtt)",
+    ),
+  );
+  print_help_line(
+    palette.dim(
+      `      --transcript-provider NAME  Provider (default: ${DEFAULT_TRANSCRIPT_PROVIDER}; supported: ${list_transcript_providers().join(", ")})`,
+    ),
+  );
+  print_help_line(
+    palette.dim(
+      `      --transcript-model NAME     Provider model (default: ${DEFAULT_TRANSCRIPT_PROVIDER} -> ${DEFAULT_TRANSCRIPT_MODEL_DISPLAY})`,
+    ),
+  );
+  print_help_line(
+    palette.dim(
+      "      --transcript-language CODE  Force language/provider hint",
+    ),
+  );
+  print_help_line(
+    palette.dim(
+      "      --transcript-task TASK      transcribe (default); translate only for whisper",
+    ),
+  );
+  print_help_line(
+    palette.dim(
+      "      --transcript-device DEVICE  Device hint, e.g. auto, cpu, cuda:0, mps",
+    ),
+  );
+  print_help_line(
+    palette.dim(
+      "      --transcript-python-bin PATH Python runtime for qwen3_asr or sensevoice",
+    ),
+  );
+  print_help_line(
+    palette.dim(
+      "      --transcript-extra ARG      Extra provider runner args (repeatable)",
+    ),
+  );
+  print_help_line(
+    palette.dim(
+      `      --qwen-aligner-model NAME   Qwen aligner for timestamps (default: ${DEFAULT_QWEN_ALIGNER_MODEL})`,
+    ),
+  );
+  print_help_line(
+    palette.dim(
+      "      --qwen-backend NAME         Qwen backend: transformers (default) or vllm",
+    ),
+  );
+  print_help_line(
+    palette.dim(
+      `      --whisper-model NAME        Whisper model (default: ${DEFAULT_WHISPER_MODEL_DISPLAY}; whisper only)`,
+    ),
+  );
+  print_help_line(
+    palette.dim("      --whisper-language CODE     Force language for whisper"),
+  );
+  print_help_line(
+    palette.dim(
+      "      --whisper-task TASK         transcribe (default) or translate",
+    ),
+  );
+  print_help_line(
+    palette.dim(
+      "      --whisper-device DEVICE     Device for whisper, e.g. cpu or cuda",
+    ),
+  );
+  print_help_line(
+    palette.dim(
+      "      --whisper-compute-type VAL  Compute type for faster-whisper",
+    ),
+  );
+  print_help_line(
+    palette.dim("      --whisper-bin PATH          Path to whisper executable"),
+  );
+  print_help_line(
+    palette.dim(
+      "      --whisper-extra ARG         Extra whisper CLI args (repeatable)",
+    ),
+  );
+  print_help_line("");
+  print_help_line(palette.headline("Compression Options:"));
+  print_help_line(
+    palette.dim("      --compress-output PATH      Output video path"),
+  );
+  print_help_line(
+    palette.dim("      --compress-crf VALUE        CRF value (default: 23)"),
+  );
+  print_help_line(
+    palette.dim("      --compress-preset NAME      Preset (default: medium)"),
   );
   print_help_line(
     palette.dim(
@@ -690,45 +804,49 @@ function showHelp() {
   );
   print_help_line(
     palette.dim(
-      "      --compress-video-codec NAME Video codec (default: libx264)",
-    ),
-  );
-  print_help_line(
-    palette.dim("      --compress-audio-codec NAME Audio codec (default: aac)"),
-  );
-  print_help_line(
-    palette.dim(
-      "      --compress-pix-format NAME Pixel format (default: yuv420p)",
+      "      --compress-video-codec NAME  Video codec (default: libx264)",
     ),
   );
   print_help_line(
     palette.dim(
-      "      --compress-max-height PX   Downscale max height (default: 1080)",
-    ),
-  );
-  print_help_line(
-    palette.dim("      --compress-keep-resolution Keep original resolution"),
-  );
-  print_help_line(
-    palette.dim(
-      "      --compress-tune NAME       Optional tune (film, animation, etc.)",
+      "      --compress-audio-codec NAME  Audio codec (default: aac)",
     ),
   );
   print_help_line(
     palette.dim(
-      "      --compress-extra ARG       Extra ffmpeg args (repeatable)",
+      "      --compress-pix-format NAME   Pixel format (default: yuv420p)",
+    ),
+  );
+  print_help_line(
+    palette.dim(
+      "      --compress-max-height PX    Downscale max height (default: 1080)",
+    ),
+  );
+  print_help_line(
+    palette.dim(
+      "      --compress-keep-resolution  Keep original resolution (default: false)",
+    ),
+  );
+  print_help_line(
+    palette.dim(
+      "      --compress-tune NAME        Optional tune (film, animation, etc.)",
+    ),
+  );
+  print_help_line(
+    palette.dim(
+      "      --compress-extra ARG        Extra ffmpeg args (repeatable)",
     ),
   );
   print_help_line("");
-  print_help_line(palette.headline("Shared options:"));
+  print_help_line(palette.headline("Shared Options:"));
   print_help_line(
     palette.dim(
-      "      --skip STAGE[...]          Skip stages (audio, transcript, compression). Repeat or comma-separated",
+      "      --skip STAGE[...]           Skip stages (audio, transcript, compression). Repeat or comma-separated",
     ),
   );
   print_help_line(
     palette.dim(
-      "      --only STAGE[...]          Run only specific stages (audio, transcript, compression). Repeat or comma-separated",
+      "      --only STAGE[...]           Run only specific stages (audio, transcript, compression). Repeat or comma-separated",
     ),
   );
   print_help_line(
@@ -736,30 +854,53 @@ function showHelp() {
   );
   print_help_line(
     palette.dim(
-      "      --source-type TYPE         Source type: raw (default) or compressed (include .compressed inputs)",
+      "      --source-type TYPE          Source type: raw (default) or compressed (include .compressed inputs)",
     ),
   );
   print_help_line(
-    palette.dim("      --ffmpeg PATH              Path to ffmpeg"),
+    palette.dim("      --ffmpeg PATH               Path to ffmpeg"),
   );
   print_help_line(
-    palette.dim("      --ffprobe PATH             Path to ffprobe"),
+    palette.dim("      --ffprobe PATH              Path to ffprobe"),
   );
   print_help_line(
     palette.dim(
-      "      --trash-input              Move processed input videos to trash",
+      "      --trash-input               Move processed input videos to trash (default: false)",
     ),
   );
   print_help_line(
     palette.dim(
-      "      --job-mode MODE           Processing strategy: step (default) or file",
+      "      --job-mode MODE            Processing strategy: step (default) or file",
     ),
   );
   print_help_line(
-    palette.dim("      --force                    Overwrite existing outputs"),
+    palette.dim(
+      "      --debug                     Print verbose debug logs before stages and IO operations",
+    ),
   );
   print_help_line(
-    palette.dim("  -h, --help                     Show this help message"),
+    palette.dim(
+      "      --quiet                     Print warnings and errors only",
+    ),
+  );
+  print_help_line(
+    palette.dim(
+      "  -d, --dry-run                  Print what would run without changing files",
+    ),
+  );
+  print_help_line(
+    palette.dim(
+      "      --refresh                   Reprocess files that already have outputs",
+    ),
+  );
+  print_help_line(
+    palette.dim("      --force                     Overwrite existing outputs"),
+  );
+  print_help_line(
+    palette.dim("  -h, --help                      Show this help message"),
+  );
+  print_help_line(
+    palette.dim("  -v, --version                   Show version number only"),
   );
   print_help_line("");
   print_help_line(palette.headline("Notes:"));
@@ -770,33 +911,28 @@ function showHelp() {
   );
   print_help_line("");
   print_help_line(palette.headline("Examples:"));
+  print_help_line(
+    palette.dim("  # Normalize one file and overwrite existing outputs"),
+  );
   print_help_line(palette.stage(`  ${cmd} --force ~/videos/raw.mp4`));
+  print_help_line("");
+  print_help_line(
+    palette.dim("  # Process a directory but skip transcription"),
+  );
   print_help_line(palette.stage(`  ${cmd} --skip transcript ~/videos/project`));
+  print_help_line("");
+  print_help_line(palette.dim("  # Only generate transcripts for one file"));
   print_help_line(palette.stage(`  ${cmd} --only transcript ~/videos/raw.mp4`));
+  print_help_line("");
+  print_help_line(palette.dim("  # Preview actions for a quoted glob pattern"));
+  print_help_line(palette.stage(`  ${cmd} --dry-run '~/videos/**/*.mp4'`));
+  print_help_line("");
+  print_help_line(
+    palette.dim("  # Write the compressed output to a custom location"),
+  );
   print_help_line(
     palette.stage(
       `  ${cmd} --compress-output ~/videos/raw.compressed.medium.mp4 ~/videos/raw.mp4`,
-    ),
-  );
-  print_help_line(palette.stage(`  ${cmd} --skip compression ~/videos/*.mp4`));
-  print_help_line(
-    palette.stage(
-      `  ${cmd} --job-mode file --skip transcript ~/videos/**/*.mp4`,
-    ),
-  );
-  print_help_line(
-    palette.stage(
-      `  ${cmd} --job-mode file ~/videos/**/*.{mp4,ts,webm,mkv,mov,avi,m4v}(N)`,
-    ),
-  );
-  print_help_line(
-    palette.stage(
-      `  ${cmd} --compress-output ~/archive/normalized.mp4 ~/videos/**/*.{mp4,ts,webm,mkv,mov,avi,m4v}(N)`,
-    ),
-  );
-  print_help_line(
-    palette.stage(
-      `  ${cmd} --job-mode file a/b/{2025-10-{01,02,03,04},2025-09-28}/**/*.{mp4,ts,webm,mkv}(N)`,
     ),
   );
 }
@@ -863,6 +999,44 @@ async function pathExists(filePath) {
     if (err.code === "ENOENT") return false;
     throw err;
   }
+}
+
+function expand_input_pattern(raw_input) {
+  if (!raw_input || !hasMagic(raw_input)) {
+    return [];
+  }
+
+  return globSync(raw_input, {
+    absolute: true,
+    cwd: process.cwd(),
+    dot: false,
+    nodir: false,
+  }).sort((left, right) => left.localeCompare(right));
+}
+
+async function resolve_input_candidates(raw_inputs) {
+  const resolved_candidates = [];
+
+  for (const raw_input of raw_inputs) {
+    const literal_candidate = path.resolve(raw_input);
+    if (await pathExists(literal_candidate)) {
+      resolved_candidates.push(literal_candidate);
+      continue;
+    }
+
+    const expanded_candidates = expand_input_pattern(`${raw_input}`);
+    if (expanded_candidates.length) {
+      debug_log(
+        `Expanded input pattern '${raw_input}' to ${expanded_candidates.length} path(s).`,
+      );
+      resolved_candidates.push(...expanded_candidates);
+      continue;
+    }
+
+    resolved_candidates.push(literal_candidate);
+  }
+
+  return resolved_candidates;
 }
 
 async function listVideoFilesRecursive(rootDir) {
@@ -1032,6 +1206,8 @@ function is_compressed_video_path(file_path) {
 function describeSkipReason(reason) {
   if (!reason) return "";
   if (reason === "whisper-not-found") return "whisper CLI missing";
+  if (reason === "transcript-provider-missing")
+    return "transcription provider missing";
   if (reason === "exists") return "already exists";
   if (reason === "compressed-input") return "compressed input";
   return reason;
@@ -1352,23 +1528,6 @@ async function updateRunLog(options = {}) {
   await writeRunLog(currentRunEntries, options);
 }
 
-function resolveErrorMessage(err, fallback = "Unknown error") {
-  if (!err) return fallback;
-  if (typeof err === "string") {
-    return err || fallback;
-  }
-  if (err.stderr && typeof err.stderr === "string" && err.stderr.trim()) {
-    return err.stderr.trim();
-  }
-  if (err.stdout && typeof err.stdout === "string" && err.stdout.trim()) {
-    return err.stdout.trim();
-  }
-  if (typeof err.message === "string" && err.message.trim()) {
-    return err.message.trim();
-  }
-  return fallback;
-}
-
 function recordStageSuccess(stageKey) {
   if (!stageKey) return;
   const bucket = runStatistics.stages[stageKey];
@@ -1413,6 +1572,47 @@ function normalizeTranscriptFormats(rawValue) {
     formats = ["txt", "vtt", "srt", "tsv", "json"];
   }
   return Array.from(new Set(formats));
+}
+
+function hasWhisperSpecificTranscriptOption(argv) {
+  return [
+    "whisper-model",
+    "whisper-language",
+    "whisper-task",
+    "whisper-device",
+    "whisper-compute-type",
+    "whisper-bin",
+    "whisper-extra",
+  ].some((name) => optionProvided(argv, name));
+}
+
+function resolve_transcript_provider_from_argv(argv) {
+  if (optionProvided(argv, "transcript-provider")) {
+    return resolve_transcript_provider(argv["transcript-provider"]);
+  }
+  if (hasWhisperSpecificTranscriptOption(argv)) {
+    return "whisper";
+  }
+  return DEFAULT_TRANSCRIPT_PROVIDER;
+}
+
+function build_transcript_provider_missing_message(error, provider_name) {
+  const resolved_provider =
+    error && error.provider && error.provider !== "python"
+      ? error.provider
+      : provider_name;
+  if (resolved_provider === "whisper") {
+    return "    ⚠ Whisper CLI not found; transcription skipped. Install openai-whisper (pip install -U openai-whisper) or faster-whisper (pip install faster-whisper), or pass --skip transcript to silence this message.";
+  }
+  if (error && error.install_hint) {
+    return `    ⚠ ${resolved_provider} is not available; transcription skipped. ${error.install_hint} Pass --skip transcript to silence this message.`;
+  }
+  return `    ⚠ ${resolved_provider} is not available; transcription skipped. Pass --skip transcript to silence this message.`;
+}
+
+function emit_forced_warning(message) {
+  if (message === undefined || message === null) return;
+  process_output("warn", `${message}`, { force: true });
 }
 
 async function ensureReadable(filePath, label) {
@@ -1518,17 +1718,27 @@ async function processAudioStage(entries, argv, force) {
                 ffmpegPath: argv.ffmpeg,
                 ffprobePath: argv.ffprobe,
                 logger: console,
+                debug: app_state.debug,
+                dryRun: app_state.dry_run,
                 commandSilent: true,
                 onCommandStdout: child_stdout_handler,
                 onCommandStderr: child_stderr_handler,
               });
               entry.audioForTranscription = audioResult.outputPath;
               entry.summary.audio = audioResult;
-              console.log(
-                `${palette.success("    ✓ Audio saved to ")}${highlightPath(
-                  audioResult.outputPath,
-                )}`,
-              );
+              if (app_state.dry_run) {
+                console.log(
+                  `${palette.dim("    • Audio would be saved to ")}${highlightPath(
+                    audioResult.outputPath,
+                  )}`,
+                );
+              } else {
+                console.log(
+                  `${palette.success("    ✓ Audio saved to ")}${highlightPath(
+                    audioResult.outputPath,
+                  )}`,
+                );
+              }
               recordStageSuccess("audio");
             } catch (err) {
               if (err && err.code === "OUTPUT_EXISTS" && !force) {
@@ -1546,24 +1756,29 @@ async function processAudioStage(entries, argv, force) {
                   console.log(
                     `${palette.dim("    • Audio already exists at ")}${highlightPath(
                       resolvedExisting,
-                    )}${palette.dim("; skipping (use --force to regenerate).")}`,
+                    )}${palette.dim(
+                      "; skipping (use --force or --refresh to regenerate).",
+                    )}`,
                   );
                 } else {
                   entry.summary.audio.source = fallbackSource;
                   console.log(
                     palette.dim(
-                      "    • Audio output already exists; skipping (use --force to regenerate).",
+                      "    • Audio output already exists; skipping (use --force or --refresh to regenerate).",
                     ),
                   );
                 }
                 recordStageSuccess("audio");
               } else {
-                const message = resolveErrorMessage(
-                  err,
-                  `Audio extraction failed for ${displayPath}`,
-                );
+                const message = resolve_error_message(err);
                 console.error(
-                  palette.error(`    ✗ Audio extraction failed: ${message}`),
+                  palette.error(
+                    `    ✗ ${format_stage_failure_message(
+                      "Audio extraction",
+                      displayPath,
+                      message,
+                    )}`,
+                  ),
                 );
                 recordStageFailure(entry, "audio", message);
                 entry.audioForTranscription = null;
@@ -1586,19 +1801,22 @@ async function processAudioStage(entries, argv, force) {
           };
         }
 
-        if (entry.audioForTranscription) {
+        if (entry.audioForTranscription && !app_state.dry_run) {
           await ensureReadable(
             entry.audioForTranscription,
             "Audio source for transcription",
           );
         }
       } catch (err) {
-        const message = resolveErrorMessage(
-          err,
-          `Audio processing failed for ${displayPath}`,
-        );
+        const message = resolve_error_message(err);
         console.error(
-          palette.error(`    ✗ Audio processing failed: ${message}`),
+          palette.error(
+            `    ✗ ${format_stage_failure_message(
+              "Audio processing",
+              displayPath,
+              message,
+            )}`,
+          ),
         );
         recordStageFailure(entry, "audio", message);
         entry.audioForTranscription = null;
@@ -1644,10 +1862,68 @@ async function processTranscriptionStage(entries, argv, force) {
     (transcriptOutputArg
       ? path.dirname(path.resolve(transcriptOutputArg))
       : undefined);
+  const transcriptProviderRequested =
+    resolve_transcript_provider_from_argv(argv);
+  const transcriptProviderExplicit =
+    optionProvided(argv, "transcript-provider") ||
+    hasWhisperSpecificTranscriptOption(argv);
+  const transcriptExtraArgs = parseRepeatable(argv["transcript-extra"]);
   const whisperExtraArgs = parseRepeatable(argv["whisper-extra"]);
+  const providerStrategy = app_state.dry_run
+    ? {
+        available: true,
+        provider: transcriptProviderRequested,
+        requestedProvider: transcriptProviderRequested,
+        explicitProvider: transcriptProviderExplicit,
+        fallbackFrom: "",
+        probe: null,
+      }
+    : await resolve_transcript_provider_strategy({
+        provider: transcriptProviderRequested,
+        explicitProvider: transcriptProviderExplicit,
+        pythonBin: argv["transcript-python-bin"],
+        whisperPath: argv["whisper-bin"],
+      });
+  const transcriptProvider = providerStrategy.provider;
+  const providerExtraArgs =
+    transcriptProvider === "whisper"
+      ? [...transcriptExtraArgs, ...whisperExtraArgs]
+      : transcriptExtraArgs;
   const transcriptFormats = normalizeTranscriptFormats(
     argv["transcript-format"],
   );
+
+  if (!providerStrategy.available) {
+    emit_forced_warning(
+      palette.warn(
+        build_transcript_provider_missing_message(
+          providerStrategy.probe,
+          transcriptProviderRequested,
+        ),
+      ),
+    );
+    stage_entries.forEach((entry) => {
+      recordStageFailure(
+        entry,
+        "transcript",
+        `${transcriptProviderRequested} is not available`,
+        {
+          reason: "transcript-provider-missing",
+        },
+      );
+    });
+    await updateRunLog();
+    return;
+  }
+
+  if (providerStrategy.fallbackFrom) {
+    emit_forced_warning(
+      palette.warn(
+        `    ⚠ ${providerStrategy.fallbackFrom} is not available; falling back to ${transcriptProvider}.`,
+      ),
+    );
+  }
+  let provider_missing_notice_displayed = false;
 
   progress_tracker.start_stage({
     stage_label: "Transcription",
@@ -1686,59 +1962,81 @@ async function processTranscriptionStage(entries, argv, force) {
           ? path.parse(resolvedTranscriptOutput).name
           : entry.targetBaseName;
 
-        const transcriptTargets = transcriptFormats.map((format) => ({
-          format,
-          path: path.join(targetBaseDir, `${transcriptBaseName}.${format}`),
-        }));
+        const transcriptTargets = resolve_transcript_outputs({
+          inputPath: audioForTranscription,
+          outputDir: targetBaseDir,
+          outputFormats: transcriptFormats,
+          outputBaseName: transcriptBaseName,
+        }).outputs;
 
-        let missingTargets = transcriptTargets;
+        let existing_target_count = 0;
         if (!force) {
           const checks = await Promise.all(
             transcriptTargets.map((target) => pathExists(target.path)),
           );
-          missingTargets = transcriptTargets.filter(
-            (_, index) => !checks[index],
-          );
-        }
+          existing_target_count = checks.filter(Boolean).length;
 
-        if (!force && missingTargets.length === 0) {
-          transcriptTargets.forEach((target) => {
-            console.log(
-              `${palette.dim("    • Transcript already exists at ")}${highlightPath(
-                target.path,
-              )}${palette.dim("; skipping (delete or use --force to regenerate).")}`,
-            );
-          });
-          entry.summary.transcript = {
-            outputs: transcriptTargets.map((target) => ({
-              format: target.format,
-              path: target.path,
+          if (existing_target_count === transcriptTargets.length) {
+            transcriptTargets.forEach((target) => {
+              console.log(
+                `${palette.dim("    • Transcript already exists at ")}${highlightPath(
+                  target.path,
+                )}${palette.dim(
+                  "; skipping (delete or use --force/--refresh to regenerate).",
+                )}`,
+              );
+            });
+            entry.summary.transcript = {
+              outputs: transcriptTargets.map((target) => ({
+                format: target.format,
+                path: target.path,
+                skipped: true,
+                reason: "exists",
+              })),
               skipped: true,
               reason: "exists",
-            })),
-            skipped: true,
-            reason: "exists",
-            path: transcriptTargets.length
-              ? transcriptTargets[0].path
-              : undefined,
-          };
-          recordStageSuccess("transcript");
-          continue;
+              path: transcriptTargets.length
+                ? transcriptTargets[0].path
+                : undefined,
+            };
+            recordStageSuccess("transcript");
+            continue;
+          }
         }
 
         try {
-          const transcriptResult = await transcribeWithWhisper({
+          if (!force && existing_target_count > 0) {
+            console.log(
+              palette.dim(
+                `    • Partial transcript outputs detected (${existing_target_count}/${transcriptTargets.length}); regenerating all requested transcript formats to keep one consistent result.`,
+              ),
+            );
+          }
+
+          const transcriptResult = await transcribe_media({
+            provider: transcriptProvider,
             inputPath: audioForTranscription,
-            outputDir: transcriptDirOption,
+            outputDir: targetBaseDir,
+            outputBaseName: transcriptBaseName,
             outputFormats: transcriptFormats,
-            model: argv["whisper-model"] || DEFAULT_WHISPER_MODEL,
-            language: argv["whisper-language"],
-            task: argv["whisper-task"],
-            device: argv["whisper-device"],
+            model:
+              argv["transcript-model"] ||
+              (transcriptProvider === "whisper"
+                ? argv["whisper-model"]
+                : undefined) ||
+              get_default_model_for_provider(transcriptProvider),
+            language: argv["transcript-language"] || argv["whisper-language"],
+            task: argv["transcript-task"] || argv["whisper-task"],
+            device: argv["transcript-device"] || argv["whisper-device"],
+            pythonBin: argv["transcript-python-bin"],
+            qwenAlignerModel: argv["qwen-aligner-model"],
+            qwenBackend: argv["qwen-backend"],
             computeType: argv["whisper-compute-type"],
             whisperPath: argv["whisper-bin"],
-            extraArgs: whisperExtraArgs,
+            extraArgs: providerExtraArgs,
             logger: console,
+            debug: app_state.debug,
+            dryRun: app_state.dry_run,
             commandSilent: true,
             onCommandStdout: child_stdout_handler,
             onCommandStderr: child_stderr_handler,
@@ -1746,53 +2044,42 @@ async function processTranscriptionStage(entries, argv, force) {
 
           const finalOutputs = [];
           for (const target of transcriptTargets) {
+            const resolvedTargetPath = path.resolve(target.path);
+            if (app_state.dry_run) {
+              finalOutputs.push({
+                format: target.format,
+                path: resolvedTargetPath,
+              });
+              continue;
+            }
             const produced = (transcriptResult.outputs || []).find(
               (item) => item.format === target.format,
             );
-            let producedPath = produced
-              ? produced.path
-              : path.join(
-                  baseDirForTranscript,
-                  `${transcriptBaseName}.${target.format}`,
-                );
-            const resolvedProducedPath = path.resolve(producedPath);
-            const resolvedTargetPath = path.resolve(target.path);
+            const producedPath = produced ? path.resolve(produced.path) : "";
 
-            if (resolvedProducedPath !== resolvedTargetPath) {
-              await fs.promises.mkdir(path.dirname(resolvedTargetPath), {
-                recursive: true,
-              });
-              if (force) {
-                try {
-                  await fs.promises.unlink(resolvedTargetPath);
-                } catch (unlinkErr) {
-                  if (unlinkErr.code !== "ENOENT") throw unlinkErr;
-                }
-              }
-              if (await pathExists(resolvedProducedPath)) {
-                await fs.promises.rename(
-                  resolvedProducedPath,
-                  resolvedTargetPath,
-                );
-                producedPath = resolvedTargetPath;
-              }
-            }
-
-            if (await pathExists(path.resolve(producedPath))) {
+            if (producedPath && (await pathExists(producedPath))) {
               finalOutputs.push({
                 format: target.format,
-                path: path.resolve(producedPath),
+                path: producedPath,
               });
             }
           }
 
           finalOutputs.forEach((output, index) => {
             if (index === 0) {
-              console.log(
-                `${palette.success("    ✓ Transcript saved to ")}${highlightPath(
-                  output.path,
-                )}${palette.success(` [${output.format}]`)}`,
-              );
+              if (app_state.dry_run) {
+                console.log(
+                  `${palette.dim("    • Transcript would be saved to ")}${highlightPath(
+                    output.path,
+                  )}${palette.dim(` [${output.format}]`)}`,
+                );
+              } else {
+                console.log(
+                  `${palette.success("    ✓ Transcript saved to ")}${highlightPath(
+                    output.path,
+                  )}${palette.success(` [${output.format}]`)}`,
+                );
+              }
             } else {
               console.log(
                 `${palette.dim("      • ")}${highlightPath(output.path)}${palette.dim(
@@ -1805,29 +2092,51 @@ async function processTranscriptionStage(entries, argv, force) {
           entry.summary.transcript = {
             outputs: finalOutputs,
             flavor: transcriptResult.flavor,
+            provider: transcriptResult.provider,
+            model: transcriptResult.model,
             path: finalOutputs.length ? finalOutputs[0].path : undefined,
           };
           recordStageSuccess("transcript");
         } catch (err) {
-          if (err && err.code === "WHISPER_NOT_FOUND") {
-            console.warn(
-              palette.warn(
-                "    ⚠ Whisper CLI not found; transcription skipped. Install openai-whisper (pip install -U openai-whisper) or faster-whisper (pip install faster-whisper), or pass --skip transcript to silence this message.",
-              ),
+          if (
+            err &&
+            (err.code === "WHISPER_NOT_FOUND" ||
+              err.code === "TRANSCRIPT_PROVIDER_NOT_FOUND")
+          ) {
+            if (!provider_missing_notice_displayed) {
+              emit_forced_warning(
+                palette.warn(
+                  build_transcript_provider_missing_message(
+                    err,
+                    transcriptProvider,
+                  ),
+                ),
+              );
+              provider_missing_notice_displayed = true;
+            }
+            recordStageFailure(
+              entry,
+              "transcript",
+              `${transcriptProvider} is not available`,
+              {
+                reason: "transcript-provider-missing",
+              },
             );
-            recordStageFailure(entry, "transcript", "Whisper CLI not found", {
-              reason: "whisper-not-found",
-            });
           } else {
             throw err;
           }
         }
       } catch (err) {
-        const resolved = resolveErrorMessage(
-          err,
-          `Transcription failed for ${displayPath}`,
+        const resolved = resolve_error_message(err);
+        console.error(
+          palette.error(
+            `    ✗ ${format_stage_failure_message(
+              "Transcription",
+              displayPath,
+              resolved,
+            )}`,
+          ),
         );
-        console.error(palette.error(`    ✗ Transcription failed: ${resolved}`));
         recordStageFailure(entry, "transcript", resolved);
         continue;
       } finally {
@@ -1927,23 +2236,33 @@ async function processCompressionStage(entries, argv, force) {
               audioBitrate: argv["compress-audio-bitrate"] || "128k",
               videoCodec: argv["compress-video-codec"] || "libx264",
               audioCodec: argv["compress-audio-codec"] || "aac",
-              pixelFormat: argv["compress-pix-format"] || "yuv420p",
+              pixFormat: argv["compress-pix-format"] || "yuv420p",
               keepResolution: Boolean(argv["compress-keep-resolution"]),
               maxHeight: maxHeightValue,
               tune: argv["compress-tune"],
               extraArgs: compressExtraArgs,
               ffmpegPath: argv.ffmpeg,
               logger: console,
+              debug: app_state.debug,
+              dryRun: app_state.dry_run,
               commandSilent: true,
               onCommandStdout: child_stdout_handler,
               onCommandStderr: child_stderr_handler,
             });
             entry.summary.compression = compressResult;
-            console.log(
-              `${palette.success("    ✓ Video saved to ")}${highlightPath(
-                compressResult.outputPath,
-              )}`,
-            );
+            if (app_state.dry_run) {
+              console.log(
+                `${palette.dim("    • Video would be saved to ")}${highlightPath(
+                  compressResult.outputPath,
+                )}`,
+              );
+            } else {
+              console.log(
+                `${palette.success("    ✓ Video saved to ")}${highlightPath(
+                  compressResult.outputPath,
+                )}`,
+              );
+            }
             recordStageSuccess("compression");
           } catch (err) {
             if (err && err.code === "OUTPUT_EXISTS" && !force) {
@@ -1957,12 +2276,14 @@ async function processCompressionStage(entries, argv, force) {
                 console.log(
                   `${palette.dim("    • Compressed video already exists at ")}${highlightPath(
                     existingOutput,
-                  )}${palette.dim("; skipping (use --force to regenerate).")}`,
+                  )}${palette.dim(
+                    "; skipping (use --force or --refresh to regenerate).",
+                  )}`,
                 );
               } else {
                 console.log(
                   palette.dim(
-                    "    • Compressed video output already exists; skipping (use --force to regenerate).",
+                    "    • Compressed video output already exists; skipping (use --force or --refresh to regenerate).",
                   ),
                 );
               }
@@ -1973,11 +2294,16 @@ async function processCompressionStage(entries, argv, force) {
           }
         }
       } catch (err) {
-        const resolved = resolveErrorMessage(
-          err,
-          `Compression failed for ${displayPath}`,
+        const resolved = resolve_error_message(err);
+        console.error(
+          palette.error(
+            `    ✗ ${format_stage_failure_message(
+              "Compression",
+              displayPath,
+              resolved,
+            )}`,
+          ),
         );
-        console.error(palette.error(`    ✗ Compression failed: ${resolved}`));
         recordStageFailure(entry, "compression", resolved);
         continue;
       } finally {
@@ -1999,7 +2325,7 @@ async function processEntrySequentially(entry, argv, force) {
 async function writeRunLog(entries, options = {}) {
   const { fatalError } = options;
   if (fatalError) {
-    runStatistics.fatalError = resolveErrorMessage(
+    runStatistics.fatalError = resolve_error_message(
       fatalError,
       fatalError && fatalError.message
         ? fatalError.message
@@ -2042,7 +2368,7 @@ async function writeRunLog(entries, options = {}) {
     );
   } catch (err) {
     console.error(
-      `⚠ Failed to write log file at ${runLogFilePath}: ${resolveErrorMessage(err)}`,
+      `⚠ Failed to write log file at ${runLogFilePath}: ${resolve_error_message(err)}`,
     );
   }
 }
@@ -2065,7 +2391,14 @@ async function main() {
     })
     .help(false)
     .version(false)
+    .strict()
+    .exitProcess(false)
+    .fail((message, error) => {
+      throw error || new Error(message || "Invalid arguments.");
+    })
     .alias("help", "h")
+    .alias("version", "v")
+    .alias("dry-run", "d")
     .option("audio-output", { type: "string" })
     .option("audio-format", { type: "string" })
     .option("audio-stream", { type: "string" })
@@ -2075,6 +2408,15 @@ async function main() {
     .option("transcript-dir", { type: "string" })
     .option("transcript-output", { type: "string" })
     .option("transcript-format", { type: "string" })
+    .option("transcript-provider", { type: "string" })
+    .option("transcript-model", { type: "string" })
+    .option("transcript-language", { type: "string" })
+    .option("transcript-task", { type: "string" })
+    .option("transcript-device", { type: "string" })
+    .option("transcript-python-bin", { type: "string" })
+    .option("transcript-extra", { type: "array" })
+    .option("qwen-aligner-model", { type: "string" })
+    .option("qwen-backend", { type: "string" })
     .option("whisper-model", { type: "string" })
     .option("whisper-language", { type: "string" })
     .option("whisper-task", { type: "string" })
@@ -2099,8 +2441,18 @@ async function main() {
     .option("input", { type: "string" })
     .option("skip", { type: "array" })
     .option("only", { type: "array" })
+    .option("debug", { type: "boolean" })
+    .option("quiet", { type: "boolean" })
+    .option("dry-run", { type: "boolean" })
+    .option("refresh", { type: "boolean" })
+    .option("version", { type: "boolean" })
     .boolean([
       "help",
+      "version",
+      "debug",
+      "quiet",
+      "dry-run",
+      "refresh",
       "skip-audio",
       "skip-transcript",
       "skip-compress",
@@ -2108,17 +2460,36 @@ async function main() {
       "compress-keep-resolution",
       "trash-input",
     ])
+    .coerce("transcript-extra", coerceArrayOfStrings)
     .coerce("whisper-extra", coerceArrayOfStrings)
     .coerce("compress-extra", coerceArrayOfStrings)
     .coerce("skip", coerceArrayOfStrings)
     .coerce("only", coerceArrayOfStrings)
     .wrap(null);
 
-  const argv = parser.parse();
+  let argv;
+  try {
+    argv = parser.parse();
+  } catch (err) {
+    console.error(
+      palette.error(resolve_error_message(err, "Invalid command options.")),
+    );
+    process.exit(1);
+  }
+
+  app_state.debug = Boolean(argv.debug);
+  app_state.quiet = Boolean(argv.quiet);
+  app_state.dry_run = Boolean(argv["dry-run"] || argv.dryRun);
 
   if (argv.help) {
     teardown_keypress_listener();
     showHelp();
+    return;
+  }
+
+  if (argv.version) {
+    teardown_keypress_listener();
+    original_console.log(`${package_version}`);
     return;
   }
 
@@ -2177,7 +2548,15 @@ async function main() {
     process.exit(1);
   }
 
-  const resolvedInputs = rawInputs.map((item) => path.resolve(item));
+  const resolvedInputs = await resolve_input_candidates(rawInputs);
+  debug_log(`Resolved ${resolvedInputs.length} input candidate(s).`);
+  if (app_state.dry_run) {
+    console.warn(
+      palette.warn(
+        "Dry-run mode enabled; no files will be created or modified.",
+      ),
+    );
+  }
   if (runLogFilePath) {
     console.log(
       `${palette.dim("Run log will be written to ")}${highlightPath(
@@ -2292,7 +2671,7 @@ async function main() {
     }
   }
 
-  const force = Boolean(argv.force);
+  const force = Boolean(argv.force || argv.refresh);
   const trashInput = Boolean(argv["trash-input"] || argv.trashInput);
 
   const entries = [];
@@ -2429,28 +2808,42 @@ async function main() {
   for (const entry of entries) {
     const summary = entry.summary;
     if (trashInput) {
-      try {
-        const trashedPath = await moveToTrash(entry.inputVideo);
-        const displayPath = formatDisplayPath(trashedPath);
-        summary.original = {
-          trashed: true,
-          trashPath: trashedPath,
-        };
-        console.log(
-          `${palette.dim("  Original:   moved to trash -> ")}${highlightPath(
-            displayPath,
-          )}`,
-        );
-      } catch (trashErr) {
-        console.warn(
-          palette.warn(
-            `  ⚠ Failed to move original video to trash: ${trashErr.message}`,
-          ),
-        );
+      if (app_state.dry_run) {
         summary.original = {
           trashed: false,
-          error: trashErr.message,
+          dryRun: true,
+          sourcePath: entry.inputVideo,
+          plannedTrashPath: await resolveTrashDirectory(),
         };
+        console.log(
+          `${palette.dim("  Original:   would move to trash -> ")}${highlightPath(
+            formatDisplayPath(entry.inputVideo),
+          )}`,
+        );
+      } else {
+        try {
+          const trashedPath = await moveToTrash(entry.inputVideo);
+          const displayPath = formatDisplayPath(trashedPath);
+          summary.original = {
+            trashed: true,
+            trashPath: trashedPath,
+          };
+          console.log(
+            `${palette.dim("  Original:   moved to trash -> ")}${highlightPath(
+              displayPath,
+            )}`,
+          );
+        } catch (trashErr) {
+          console.warn(
+            palette.warn(
+              `  ⚠ Failed to move original video to trash: ${trashErr.message}`,
+            ),
+          );
+          summary.original = {
+            trashed: false,
+            error: trashErr.message,
+          };
+        }
       }
     }
     summaries.push(summary);
@@ -2472,10 +2865,12 @@ async function main() {
       }
       if (item.audio && item.audio.outputPath) {
         const audioDisplay = formatDisplayPath(item.audio.outputPath);
-        const suffix =
-          item.audio.skipped && item.audio.reason === "exists"
-            ? palette.dim(" (already exists)")
-            : "";
+        let suffix = "";
+        if (item.audio.skipped && item.audio.reason === "exists") {
+          suffix = palette.dim(" (already exists)");
+        } else if (item.audio.dryRun) {
+          suffix = palette.dim(" (dry-run)");
+        }
         console.log(
           `${palette.success("      Audio: ")}${highlightPath(
             audioDisplay,
@@ -2497,10 +2892,12 @@ async function main() {
       ) {
         const parts = item.transcript.outputs.map((output) => {
           const transcriptDisplay = formatDisplayPath(output.path);
-          const suffix =
-            output.skipped && output.reason === "exists"
-              ? palette.dim(" (already exists)")
-              : "";
+          let suffix = "";
+          if (output.skipped && output.reason === "exists") {
+            suffix = palette.dim(" (already exists)");
+          } else if (item.transcript && item.transcript.dryRun) {
+            suffix = palette.dim(" (dry-run)");
+          }
           const label = output.format ? palette.dim(` [${output.format}]`) : "";
           return `${highlightPath(transcriptDisplay)}${suffix}${label}`;
         });
@@ -2510,10 +2907,12 @@ async function main() {
         );
       } else if (item.transcript && item.transcript.path) {
         const transcriptDisplay = formatDisplayPath(item.transcript.path);
-        const suffix =
-          item.transcript.skipped && item.transcript.reason === "exists"
-            ? palette.dim(" (already exists)")
-            : "";
+        let suffix = "";
+        if (item.transcript.skipped && item.transcript.reason === "exists") {
+          suffix = palette.dim(" (already exists)");
+        } else if (item.transcript.dryRun) {
+          suffix = palette.dim(" (dry-run)");
+        }
         console.log(
           `${palette.success("      Transcript: ")}${highlightPath(
             transcriptDisplay,
@@ -2528,10 +2927,12 @@ async function main() {
       }
       if (item.compression && item.compression.outputPath) {
         const videoDisplay = formatDisplayPath(item.compression.outputPath);
-        const suffix =
-          item.compression.skipped && item.compression.reason === "exists"
-            ? palette.dim(" (already exists)")
-            : "";
+        let suffix = "";
+        if (item.compression.skipped && item.compression.reason === "exists") {
+          suffix = palette.dim(" (already exists)");
+        } else if (item.compression.dryRun) {
+          suffix = palette.dim(" (dry-run)");
+        }
         console.log(
           `${palette.success("      Video: ")}${highlightPath(
             videoDisplay,
@@ -2556,6 +2957,12 @@ async function main() {
               trashDisplay,
             )}`,
           );
+        } else if (item.original.dryRun && item.original.sourcePath) {
+          console.log(
+            `${palette.dim("      Original: would trash -> ")}${highlightPath(
+              formatDisplayPath(item.original.sourcePath),
+            )}`,
+          );
         } else if (item.original.error) {
           console.log(
             palette.warn(
@@ -2569,8 +2976,16 @@ async function main() {
 
   await writeRunLog(entries);
 
-  await play_completion_sound();
+  if (!app_state.dry_run) {
+    await play_completion_sound();
+  }
   teardown_keypress_listener();
 }
 
-main();
+main().catch((error) => {
+  console.error(
+    palette.error(resolve_error_message(error, "videos_normalize failed.")),
+  );
+  teardown_keypress_listener();
+  process.exit(1);
+});

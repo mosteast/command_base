@@ -75,6 +75,7 @@ Must Support
 - `-h, --help`
 - `-v, --version`: should only show version number and nothing else
 - `--debug`: print verbose output and debug logs
+- Throw if a non-existing option is passed
 
 Support following options if possible:
 
