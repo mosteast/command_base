@@ -1,0 +1,491 @@
+#!/usr/bin/env node
+
+const fs = require("fs");
+const path = require("path");
+const chalk = require("chalk");
+const yargs = require("yargs/yargs");
+const { globSync } = require("glob");
+const { version: package_version } = require("../package.json");
+
+const {
+  DEFAULT_LANGUAGE,
+  DEFAULT_MERGE_GAP_SECONDS,
+  DEFAULT_MIN_CONFIDENCE,
+  DEFAULT_MIN_DURATION_SECONDS,
+  DEFAULT_OCR_CONCURRENCY,
+  DEFAULT_OCR_PSM,
+  DEFAULT_OUTPUT_FORMAT,
+  DEFAULT_REGION_PRESET,
+  DEFAULT_SAMPLE_FPS,
+  DEFAULT_SCALE_MULTIPLIER,
+  DEFAULT_TEXT_SIMILARITY,
+  REGION_PRESETS,
+  SUPPORTED_OUTPUT_FORMATS,
+  extract_burnt_subtitles,
+  parse_crop_box,
+  parse_number,
+  parse_output_format,
+} = require("../lib/live_media/extract_burnt_subtitles");
+
+const DEFAULT_FILE_CONCURRENCY = 1;
+
+const palette = {
+  title: chalk.cyanBright.bold,
+  label: chalk.cyanBright,
+  success: chalk.greenBright.bold,
+  warn: chalk.yellowBright.bold,
+  error: chalk.redBright.bold,
+  debug: chalk.magentaBright.bold,
+  dim: chalk.gray,
+  path: chalk.cyan,
+};
+
+function build_help_text(command_name = "videos_extract_burnt_subtitles") {
+  return [
+    palette.title("Usage:"),
+    `  ${chalk.cyan(command_name)} ${chalk.yellow("<video-file> [...more files]")} [options]`,
+    "",
+    palette.title("Description:"),
+    "  OCR burnt-in subtitles from videos and write subtitle sidecar files.",
+    "  Supports glob patterns by default and skips existing outputs unless --refresh is used.",
+    "",
+    palette.title("Options:"),
+    "  -o, --output PATH           Explicit output subtitle path for a single input file",
+    "      --output-dir DIR        Directory for generated subtitle files",
+    `  -f, --format FORMAT        Subtitle output format (default: ${DEFAULT_OUTPUT_FORMAT})`,
+    `                              Options: ${SUPPORTED_OUTPUT_FORMATS.join(", ")}`,
+    `      --region NAME          Subtitle region preset (default: ${DEFAULT_REGION_PRESET})`,
+    `                              Options: ${Object.keys(REGION_PRESETS).join(", ")}`,
+    "      --crop BOX             Override region with normalized x,y,width,height values",
+    `      --fps VALUE            Frame sampling rate in FPS (default: ${DEFAULT_SAMPLE_FPS})`,
+    `      --scale VALUE          Subtitle crop scale multiplier before OCR (default: ${DEFAULT_SCALE_MULTIPLIER})`,
+    `      --language LANG        Tesseract OCR language(s) (default: ${DEFAULT_LANGUAGE})`,
+    `      --ocr-psm MODE         Tesseract page segmentation mode (default: ${DEFAULT_OCR_PSM})`,
+    `      --min-confidence VALUE Minimum OCR confidence to keep text (default: ${DEFAULT_MIN_CONFIDENCE})`,
+    `      --min-duration SEC     Minimum subtitle duration in seconds (default: ${DEFAULT_MIN_DURATION_SECONDS})`,
+    `      --merge-gap SEC        Merge same subtitle across short OCR gaps (default: ${DEFAULT_MERGE_GAP_SECONDS})`,
+    `      --similarity VALUE     Similarity threshold for merging OCR text (default: ${DEFAULT_TEXT_SIMILARITY})`,
+    `      --ocr-concurrency N    OCR worker count per video (default: ${DEFAULT_OCR_CONCURRENCY})`,
+    `      --concurrency N        Number of videos to process in parallel (default: ${DEFAULT_FILE_CONCURRENCY})`,
+    "      --ffmpeg PATH          Path to ffmpeg executable",
+    "      --tesseract PATH       Path to tesseract executable",
+    "      --refresh              Reprocess even if the output subtitle file already exists",
+    "      --keep-artifacts       Keep extracted OCR frame images for inspection",
+    "      --quiet                Print only warnings and errors",
+    "  -d, --dry-run             Print the planned work without running ffmpeg or tesseract",
+    "      --debug                Print verbose stage and command diagnostics",
+    "  -v, --version              Show version number only",
+    "  -h, --help                 Show this help message",
+    "",
+    palette.title("Examples:"),
+    "  # Extract sidecar .srt files for every matching MP4 file",
+    `  ${chalk.cyan(command_name)} ${chalk.yellow('"lesson/*.mp4"')}`,
+    "",
+    "  # OCR subtitles from the top of the frame and overwrite existing output",
+    `  ${chalk.cyan(command_name)} ${chalk.yellow("episode.mkv")} --region top --refresh`,
+    "",
+    "  # Preview the OCR plan and crop box without running external tools",
+    `  ${chalk.cyan(command_name)} ${chalk.yellow("movie.mp4")} --dry-run --debug`,
+  ].join("\n");
+}
+
+function show_help() {
+  const command_name = path.basename(
+    process.argv[1] || "videos_extract_burnt_subtitles",
+  );
+  console.log(build_help_text(command_name));
+}
+
+function coerce_array_of_strings(value) {
+  if (value === undefined || value === null) return [];
+  const values = Array.isArray(value) ? value : [value];
+  return values
+    .filter((entry) => entry !== undefined && entry !== null)
+    .map((entry) => `${entry}`);
+}
+
+function create_parser(argv_input = process.argv.slice(2)) {
+  return yargs(argv_input)
+    .parserConfiguration({
+      "camel-case-expansion": true,
+      "duplicate-arguments-array": true,
+      "flatten-duplicate-arrays": false,
+      "strip-aliased": true,
+    })
+    .help(false)
+    .version(false)
+    .strict()
+    .exitProcess(false)
+    .fail((message, error) => {
+      throw error || new Error(message || "Invalid arguments.");
+    })
+    .alias("output", "o")
+    .alias("format", "f")
+    .alias("help", "h")
+    .alias("version", "v")
+    .alias("dry-run", "d")
+    .option("output", { type: "string" })
+    .option("output-dir", { type: "string" })
+    .option("format", { type: "string" })
+    .option("region", { type: "string" })
+    .option("crop", { type: "string" })
+    .option("fps", { type: "string" })
+    .option("scale", { type: "string" })
+    .option("language", { type: "string" })
+    .option("ocr-psm", { type: "string" })
+    .option("min-confidence", { type: "string" })
+    .option("min-duration", { type: "string" })
+    .option("merge-gap", { type: "string" })
+    .option("similarity", { type: "string" })
+    .option("ocr-concurrency", { type: "string" })
+    .option("concurrency", { type: "string" })
+    .option("ffmpeg", { type: "string" })
+    .option("tesseract", { type: "string" })
+    .option("input", { type: "array" })
+    .option("debug", { type: "boolean" })
+    .option("quiet", { type: "boolean" })
+    .option("dry-run", { type: "boolean" })
+    .option("refresh", { type: "boolean" })
+    .option("keep-artifacts", { type: "boolean" })
+    .option("version", { type: "boolean" })
+    .option("help", { type: "boolean" })
+    .coerce("input", coerce_array_of_strings)
+    .wrap(null);
+}
+
+function create_logger(runtime_flags = {}) {
+  const { debug = false, quiet = false } = runtime_flags;
+
+  return {
+    log(message) {
+      if (quiet) return;
+      console.log(message);
+    },
+    info(message) {
+      if (quiet) return;
+      console.log(message);
+    },
+    warn(message) {
+      console.warn(message);
+    },
+    error(message) {
+      console.error(message);
+    },
+    debug(message) {
+      if (!debug || quiet) return;
+      console.log(`${palette.debug("DEBUG")} ${palette.dim(message)}`);
+    },
+  };
+}
+
+function expand_input_patterns(patterns) {
+  const unique_paths = new Set();
+  const resolved_files = [];
+  const unmatched_patterns = [];
+
+  patterns.forEach((pattern) => {
+    const matches = globSync(pattern, { nodir: true, dot: true });
+    if (!matches.length) {
+      try {
+        const stats = fs.statSync(pattern);
+        if (stats.isFile()) {
+          const absolute_path = path.resolve(pattern);
+          if (!unique_paths.has(absolute_path)) {
+            unique_paths.add(absolute_path);
+            resolved_files.push(absolute_path);
+          }
+          return;
+        }
+      } catch (error) {
+        // Fall through to unmatched pattern reporting.
+      }
+      unmatched_patterns.push(pattern);
+      return;
+    }
+
+    matches.forEach((match_path) => {
+      const absolute_path = path.resolve(match_path);
+      if (unique_paths.has(absolute_path)) return;
+      unique_paths.add(absolute_path);
+      resolved_files.push(absolute_path);
+    });
+  });
+
+  return {
+    files: resolved_files,
+    unmatched_patterns,
+  };
+}
+
+async function run_with_concurrency(items, concurrency_limit, runner) {
+  const limited_concurrency = Math.max(
+    1,
+    Math.min(concurrency_limit, items.length || 1),
+  );
+  const results = new Array(items.length);
+  const failures = [];
+  let next_index = 0;
+
+  async function worker() {
+    for (;;) {
+      if (next_index >= items.length) return;
+      const current_index = next_index;
+      next_index += 1;
+      try {
+        results[current_index] = await runner(items[current_index], current_index);
+      } catch (error) {
+        failures.push({
+          index: current_index,
+          item: items[current_index],
+          error,
+        });
+      }
+    }
+  }
+
+  await Promise.all(
+    Array.from({ length: limited_concurrency }, () => worker()),
+  );
+
+  return {
+    results,
+    failures,
+  };
+}
+
+function build_runtime_options(argv) {
+  const raw_inputs = [
+    ...(Array.isArray(argv._) ? argv._ : []),
+    ...(Array.isArray(argv.input) ? argv.input : []),
+  ]
+    .filter((entry) => typeof entry === "string")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+
+  if (!raw_inputs.length) {
+    throw new Error("At least one input video file or glob pattern is required.");
+  }
+
+  const output_format = parse_output_format(argv.format || DEFAULT_OUTPUT_FORMAT);
+  const crop = argv.crop ? parse_crop_box(argv.crop) : undefined;
+  const file_concurrency =
+    parse_number(argv.concurrency, "--concurrency") ??
+    DEFAULT_FILE_CONCURRENCY;
+  const ocr_concurrency =
+    parse_number(argv["ocr-concurrency"], "--ocr-concurrency") ??
+    DEFAULT_OCR_CONCURRENCY;
+  const sample_fps =
+    parse_number(argv.fps, "--fps") ?? DEFAULT_SAMPLE_FPS;
+  const scale_multiplier =
+    parse_number(argv.scale, "--scale") ?? DEFAULT_SCALE_MULTIPLIER;
+  const ocr_psm =
+    parse_number(argv["ocr-psm"], "--ocr-psm") ?? DEFAULT_OCR_PSM;
+  const min_confidence =
+    parse_number(argv["min-confidence"], "--min-confidence") ??
+    DEFAULT_MIN_CONFIDENCE;
+  const min_duration_seconds =
+    parse_number(argv["min-duration"], "--min-duration") ??
+    DEFAULT_MIN_DURATION_SECONDS;
+  const merge_gap_seconds =
+    parse_number(argv["merge-gap"], "--merge-gap") ??
+    DEFAULT_MERGE_GAP_SECONDS;
+  const similarity_threshold =
+    parse_number(argv.similarity, "--similarity") ?? DEFAULT_TEXT_SIMILARITY;
+
+  if (!Number.isFinite(file_concurrency) || file_concurrency < 1) {
+    throw new Error("--concurrency must be a positive integer.");
+  }
+  if (!Number.isFinite(ocr_concurrency) || ocr_concurrency < 1) {
+    throw new Error("--ocr-concurrency must be a positive integer.");
+  }
+  if (similarity_threshold <= 0 || similarity_threshold > 1) {
+    throw new Error("--similarity must be greater than 0 and at most 1.");
+  }
+  if (argv.output && raw_inputs.length > 1) {
+    throw new Error("--output can only be used with a single input file.");
+  }
+
+  return {
+    raw_inputs,
+    output_path: argv.output,
+    output_dir: argv["output-dir"] || argv.outputDir,
+    output_format,
+    region: argv.region || DEFAULT_REGION_PRESET,
+    crop,
+    sample_fps,
+    scale_multiplier,
+    language: argv.language || DEFAULT_LANGUAGE,
+    ocr_psm,
+    min_confidence,
+    min_duration_seconds,
+    merge_gap_seconds,
+    similarity_threshold,
+    ocr_concurrency,
+    file_concurrency,
+    ffmpeg_path: argv.ffmpeg,
+    tesseract_path: argv.tesseract,
+    refresh: Boolean(argv.refresh),
+    keep_artifacts: Boolean(argv["keep-artifacts"] || argv.keepArtifacts),
+    dry_run: Boolean(argv["dry-run"] || argv.dryRun),
+    debug: Boolean(argv.debug),
+    quiet: Boolean(argv.quiet),
+  };
+}
+
+async function main() {
+  let argv;
+  try {
+    argv = create_parser().parse();
+  } catch (error) {
+    console.error(palette.error(error.message || "Invalid command options."));
+    process.exit(1);
+  }
+
+  if (argv.help) {
+    show_help();
+    return;
+  }
+
+  if (argv.version) {
+    console.log(`${package_version}`);
+    return;
+  }
+
+  let runtime_options;
+  try {
+    runtime_options = build_runtime_options(argv);
+  } catch (error) {
+    console.error(palette.error(error.message || "Invalid runtime options."));
+    process.exit(1);
+  }
+
+  const logger = create_logger(runtime_options);
+  logger.debug("Stage 1/3: expanding input file patterns.");
+  const { files: input_paths, unmatched_patterns } = expand_input_patterns(
+    runtime_options.raw_inputs,
+  );
+
+  unmatched_patterns.forEach((pattern) => {
+    logger.warn(
+      `${palette.warn("WARN")} No files matched pattern: ${chalk.yellow(pattern)}`,
+    );
+  });
+
+  if (!input_paths.length) {
+    console.error(palette.error("No input files could be resolved."));
+    process.exit(1);
+  }
+
+  logger.debug(
+    `Stage 2/3: processing ${input_paths.length} video file(s) with concurrency ${runtime_options.file_concurrency}.`,
+  );
+
+  const summary = {
+    completed: 0,
+    skipped: 0,
+    failed: 0,
+  };
+
+  const { failures } = await run_with_concurrency(
+    input_paths,
+    runtime_options.file_concurrency,
+    async (input_path) => {
+      const file_label = chalk.white.bold(path.basename(input_path));
+      if (!runtime_options.quiet) {
+        console.log(`${palette.label("START")} ${file_label}`);
+      }
+
+      const result = await extract_burnt_subtitles({
+        input_path,
+        output_path: runtime_options.output_path,
+        output_dir: runtime_options.output_dir,
+        output_format: runtime_options.output_format,
+        ffmpeg_path: runtime_options.ffmpeg_path,
+        tesseract_path: runtime_options.tesseract_path,
+        sample_fps: runtime_options.sample_fps,
+        region: runtime_options.region,
+        crop: runtime_options.crop,
+        scale_multiplier: runtime_options.scale_multiplier,
+        language: runtime_options.language,
+        ocr_psm: runtime_options.ocr_psm,
+        min_confidence: runtime_options.min_confidence,
+        min_duration_seconds: runtime_options.min_duration_seconds,
+        merge_gap_seconds: runtime_options.merge_gap_seconds,
+        similarity_threshold: runtime_options.similarity_threshold,
+        ocr_concurrency: runtime_options.ocr_concurrency,
+        refresh: runtime_options.refresh,
+        keep_artifacts: runtime_options.keep_artifacts,
+        dry_run: runtime_options.dry_run,
+        logger,
+        debug: runtime_options.debug,
+      });
+
+      if (result.skipped) {
+        summary.skipped += 1;
+        logger.log(
+          `${palette.warn("SKIP")} ${file_label} ${palette.dim("->")} ${palette.path(result.output_path)} ${palette.dim("(already exists; use --refresh to reprocess)")}`,
+        );
+        return result;
+      }
+
+      if (result.dry_run) {
+        summary.completed += 1;
+        logger.log(
+          `${palette.label("PLAN")} ${file_label} ${palette.dim("->")} ${palette.path(result.output_path)}`,
+        );
+        logger.log(
+          `  ${palette.dim(`fps=${result.sample_fps}, region=${runtime_options.region}, crop=${JSON.stringify(result.crop_box)}`)}`,
+        );
+        logger.log(`  ${palette.dim(result.frame_filter)}`);
+        return result;
+      }
+
+      summary.completed += 1;
+      logger.log(
+        `${palette.success("DONE")} ${file_label} ${palette.dim("->")} ${palette.path(result.output_path)}`,
+      );
+      logger.log(
+        `  ${palette.dim(`${result.subtitle_count} subtitle block(s), ${result.frame_count} sampled frame(s)`)}`,
+      );
+      return result;
+    },
+  );
+
+  if (failures.length) {
+    summary.failed = failures.length;
+    failures.forEach((failure) => {
+      const file_name = failure.item || "<unknown>";
+      const message =
+        failure.error && failure.error.message
+          ? failure.error.message
+          : "Unknown error";
+      console.error(
+        `${palette.error("FAIL")} ${chalk.white.bold(path.basename(file_name))} ${palette.dim("->")} ${chalk.red(message)}`,
+      );
+    });
+    process.exit(1);
+  }
+
+  logger.debug("Stage 3/3: final summary.");
+  if (!runtime_options.quiet) {
+    console.log(
+      palette.success(
+        `Completed ${summary.completed} file(s); skipped ${summary.skipped}; failed ${summary.failed}.`,
+      ),
+    );
+  }
+}
+
+if (require.main === module) {
+  main();
+}
+
+module.exports = {
+  build_help_text,
+  build_runtime_options,
+  create_parser,
+  create_logger,
+  expand_input_patterns,
+  main,
+  run_with_concurrency,
+};

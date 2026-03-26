@@ -38,7 +38,7 @@ describe("live_media output path utils", () => {
     });
     const temp_base_name = path.basename(temp_path);
 
-    expect(temp_base_name.startsWith(".compress-")).toBe(true);
+    expect(temp_base_name.startsWith("__in_progress-compress-")).toBe(true);
     expect(temp_base_name.endsWith(".mp4")).toBe(true);
     expect(Buffer.byteLength(temp_base_name, "utf8")).toBeLessThanOrEqual(
       MAX_FILE_NAME_BYTES,

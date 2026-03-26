@@ -7,10 +7,8 @@ import output_path_utils_module from "../lib/live_media/output_path_utils";
 import temporary_artifact_utils_module from "../lib/live_media/temporary_artifact_utils";
 
 const { create_short_temporary_output_path } = output_path_utils_module;
-const {
-  cleanup_stale_temporary_artifacts,
-  create_temporary_directory_prefix,
-} = temporary_artifact_utils_module;
+const { cleanup_stale_temporary_artifacts, create_temporary_directory_prefix } =
+  temporary_artifact_utils_module;
 
 const temporary_directories = [];
 
@@ -69,9 +67,10 @@ describe("temporary artifact recovery", () => {
     const prefix = create_temporary_directory_prefix(output_key_path, {
       label: "transcribe",
     });
+    expect(path.basename(prefix)).toMatch(/^__in_progress-transcribe-/);
     const stale_a_path = `${prefix}old_a`;
     const stale_b_path = `${prefix}old_b`;
-    const unrelated_path = path.join(directory, ".whisper-other");
+    const unrelated_path = path.join(directory, "__in_progress-whisper-other");
 
     await fs.mkdir(stale_a_path, { recursive: true });
     await fs.mkdir(stale_b_path, { recursive: true });
