@@ -1,0 +1,427 @@
+#!/usr/bin/env node
+
+const axios = require("axios");
+const chalk = require("chalk");
+const crypto = require("crypto");
+const fs = require("fs-extra");
+const path = require("path");
+const { globSync } = require("glob");
+const yargs = require("yargs");
+
+const package_json = require("../package.json");
+
+const REMOTE_IMAGE_REGEX = /!\[[^\]]*\]\((https?:\/\/[^\s)]+)\)/g;
+
+function create_logger({ quiet_mode, debug_mode }) {
+  const prefix = chalk.dim("md_normalize");
+
+  function format_message(message) {
+    return `${prefix} ${message}`;
+  }
+
+  return {
+    info(message) {
+      if (quiet_mode) return;
+      console.log(format_message(chalk.blue(message)));
+    },
+    success(message) {
+      if (quiet_mode) return;
+      console.log(format_message(chalk.green(message)));
+    },
+    warn(message) {
+      if (quiet_mode) return;
+      console.warn(format_message(chalk.yellow(message)));
+    },
+    error(message, error) {
+      console.error(format_message(chalk.red(message)));
+
+      if (debug_mode && error) {
+        console.error(chalk.red(error.stack || String(error)));
+      }
+    },
+    debug(message) {
+      if (!debug_mode || quiet_mode) return;
+      console.log(format_message(chalk.cyan(`[debug] ${message}`)));
+    },
+  };
+}
+
+function build_help_text(script_name) {
+  return [
+    `${chalk.bold("Usage")}`,
+    `  ${script_name} [options] <file_or_glob ...>`,
+    "",
+    `${chalk.bold("Description")}`,
+    "  Normalize markdown files by moving each file into a sibling directory",
+    "  named after the file, then localizing remote markdown image assets into",
+    "  asset/image/ under that directory.",
+    "",
+    `${chalk.bold("Options")}`,
+    "  -r, --refresh           Reprocess markdown files that already look normalized",
+    "  -d, --dry-run           Print planned actions without writing files",
+    "  --quiet                 Suppress non-error logs",
+    "  --debug                 Print verbose debug logs before each stage and IO step",
+    "  -v, --version           Show version number and exit",
+    "  -h, --help              Show this help message",
+    "",
+    `${chalk.bold("Examples")}`,
+    "  # Normalize one markdown file",
+    `  ${script_name} note.md`,
+    "",
+    "  # Normalize all markdown files in a folder",
+    `  ${script_name} "docs/*.md"`,
+    "",
+    "  # Preview normalization without changing files",
+    `  ${script_name} --dry-run "docs/**/*.md"`,
+    "",
+    "  # Reprocess files that are already inside normalized folders",
+    `  ${script_name} --refresh "docs/**/*.md"`,
+  ].join("\n");
+}
+
+function parse_cli_arguments() {
+  const parser = yargs(process.argv.slice(2))
+    .scriptName("md_normalize")
+    .help(false)
+    .version(false)
+    .parserConfiguration({
+      "camel-case-expansion": false,
+      "strip-dashed": false,
+    })
+    .option("refresh", {
+      alias: "r",
+      type: "boolean",
+      default: false,
+      describe: "Reprocess markdown files that already appear normalized",
+    })
+    .option("dry-run", {
+      alias: "d",
+      type: "boolean",
+      default: false,
+      describe: "Print planned actions without writing files",
+    })
+    .option("quiet", {
+      type: "boolean",
+      default: false,
+      describe: "Suppress non-error logs",
+    })
+    .option("debug", {
+      type: "boolean",
+      default: false,
+      describe: "Print verbose debug logs",
+    })
+    .option("version", {
+      alias: "v",
+      type: "boolean",
+      describe: "Show version number and exit",
+    })
+    .option("help", {
+      alias: "h",
+      type: "boolean",
+      describe: "Show help message",
+    })
+    .strict()
+    .usage(build_help_text("md_normalize"))
+    .wrap(Math.min(yargs.terminalWidth(), 100));
+
+  const argv = parser.parse();
+
+  if (argv.help) {
+    console.log(build_help_text(argv.$0 || "md_normalize"));
+    process.exit(0);
+  }
+
+  if (argv.version) {
+    console.log(package_json.version);
+    process.exit(0);
+  }
+
+  const patterns = (argv._ || []).map(String);
+
+  if (patterns.length === 0) {
+    console.error(chalk.red("Error: At least one file path or glob pattern is required."));
+    console.log(build_help_text(argv.$0 || "md_normalize"));
+    process.exit(1);
+  }
+
+  return {
+    patterns,
+    refresh_mode: Boolean(argv.refresh),
+    dry_run: Boolean(argv["dry-run"]),
+    quiet_mode: Boolean(argv.quiet),
+    debug_mode: Boolean(argv.debug),
+  };
+}
+
+function expand_patterns(patterns, logger) {
+  const resolved_paths = new Set();
+
+  logger.debug("Starting pattern expansion.");
+
+  for (const pattern of patterns) {
+    logger.debug(`Expanding pattern: ${pattern}`);
+
+    const matches = globSync(pattern, {
+      absolute: true,
+      nodir: true,
+      windowsPathsNoEscape: true,
+    });
+
+    if (matches.length === 0) {
+      const literal_path = path.resolve(pattern);
+      logger.debug(`Pattern matched no files; treating as literal path: ${literal_path}`);
+      resolved_paths.add(literal_path);
+      continue;
+    }
+
+    for (const match of matches) {
+      resolved_paths.add(path.resolve(match));
+    }
+  }
+
+  return Array.from(resolved_paths).sort((left_path, right_path) =>
+    left_path.localeCompare(right_path),
+  );
+}
+
+async function file_has_content(file_path) {
+  try {
+    const file_stats = await fs.stat(file_path);
+    return file_stats.isFile() && file_stats.size > 0;
+  } catch (error) {
+    if (error && error.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+function normalize_markdown_path(file_path) {
+  return file_path.split(path.sep).join("/");
+}
+
+function replace_all(text, search_text, replacement_text) {
+  return text.split(search_text).join(replacement_text);
+}
+
+function collect_remote_image_urls(markdown_text) {
+  const unique_urls = new Set();
+
+  for (const match of markdown_text.matchAll(REMOTE_IMAGE_REGEX)) {
+    unique_urls.add(match[1]);
+  }
+
+  return Array.from(unique_urls);
+}
+
+function infer_extension(image_url) {
+  try {
+    const parsed_url = new URL(image_url);
+    const detected_extension = path.extname(parsed_url.pathname);
+    return detected_extension || ".png";
+  } catch (error) {
+    return ".png";
+  }
+}
+
+async function localize_remote_images({
+  markdown_text,
+  target_dir,
+  dry_run,
+  logger,
+}) {
+  const remote_image_urls = collect_remote_image_urls(markdown_text);
+
+  if (remote_image_urls.length === 0) {
+    logger.debug("No remote markdown images found.");
+    return {
+      markdown_text,
+      localized_image_count: 0,
+    };
+  }
+
+  const asset_dir = path.join(target_dir, "asset", "image");
+  let next_markdown_text = markdown_text;
+  let localized_image_count = 0;
+
+  logger.debug(`Found ${remote_image_urls.length} remote image URL(s).`);
+
+  if (!dry_run) {
+    logger.debug(`Ensuring asset directory exists: ${asset_dir}`);
+    await fs.ensureDir(asset_dir);
+  }
+
+  for (const image_url of remote_image_urls) {
+    logger.debug(`Preparing image download: ${image_url}`);
+
+    if (dry_run) {
+      logger.info(`Would localize remote image: ${image_url}`);
+      localized_image_count += 1;
+      continue;
+    }
+
+    try {
+      logger.debug(`Downloading remote image: ${image_url}`);
+      const response = await axios.get(image_url, {
+        responseType: "arraybuffer",
+      });
+
+      const extension = infer_extension(image_url);
+      const content_hash = crypto
+        .createHash("sha256")
+        .update(response.data)
+        .digest("hex");
+      const file_name = `${content_hash.slice(0, 7)}${extension}`;
+      const local_image_path = path.join(asset_dir, file_name);
+
+      logger.debug(`Writing localized image: ${local_image_path}`);
+      await fs.writeFile(local_image_path, response.data);
+
+      const relative_path = normalize_markdown_path(
+        path.relative(target_dir, local_image_path),
+      );
+
+      next_markdown_text = replace_all(next_markdown_text, image_url, relative_path);
+      localized_image_count += 1;
+      logger.success(`Localized ${image_url} -> ${relative_path}`);
+    } catch (error) {
+      logger.error(`Failed to download ${image_url}: ${error.message}`, error);
+    }
+  }
+
+  return {
+    markdown_text: next_markdown_text,
+    localized_image_count,
+  };
+}
+
+async function normalize_file({
+  file_path,
+  refresh_mode,
+  dry_run,
+  logger,
+}) {
+  const resolved_file_path = path.resolve(file_path);
+  const file_name = path.basename(resolved_file_path);
+
+  logger.info(`Processing ${resolved_file_path}`);
+
+  if (path.extname(file_name).toLowerCase() !== ".md") {
+    logger.warn(`Skipping non-markdown file: ${resolved_file_path}`);
+    return { status: "skipped" };
+  }
+
+  logger.debug(`Checking file existence and size: ${resolved_file_path}`);
+  const has_content = await file_has_content(resolved_file_path);
+
+  if (!has_content) {
+    logger.warn(`Skipping missing or empty file: ${resolved_file_path}`);
+    return { status: "skipped" };
+  }
+
+  const original_dir = path.dirname(resolved_file_path);
+  const base_name = path.basename(file_name, ".md");
+  const already_normalized = path.basename(original_dir) === base_name;
+  const target_dir = already_normalized
+    ? original_dir
+    : path.join(original_dir, base_name);
+  const target_md_file_path = path.join(target_dir, file_name);
+
+  if (already_normalized && !refresh_mode) {
+    logger.warn(
+      `Skipping already normalized file: ${resolved_file_path}. Use --refresh to reprocess.`,
+    );
+    return { status: "skipped" };
+  }
+
+  if (!already_normalized && (await fs.pathExists(target_md_file_path))) {
+    logger.warn(
+      `Skipping because normalized target already exists: ${target_md_file_path}`,
+    );
+    return { status: "skipped" };
+  }
+
+  logger.debug(`Reading markdown file: ${resolved_file_path}`);
+  const markdown_text = await fs.readFile(resolved_file_path, "utf8");
+
+  const { markdown_text: normalized_text } = await localize_remote_images({
+    markdown_text,
+    target_dir,
+    dry_run,
+    logger,
+  });
+
+  if (dry_run) {
+    if (!already_normalized) {
+      logger.info(`Would create directory: ${target_dir}`);
+      logger.info(`Would write normalized file: ${target_md_file_path}`);
+      logger.info(`Would remove original file: ${resolved_file_path}`);
+    } else {
+      logger.info(`Would rewrite normalized file in place: ${target_md_file_path}`);
+    }
+
+    return { status: "dry_run" };
+  }
+
+  logger.debug(`Ensuring target directory exists: ${target_dir}`);
+  await fs.ensureDir(target_dir);
+
+  logger.debug(`Writing normalized markdown file: ${target_md_file_path}`);
+  await fs.writeFile(target_md_file_path, normalized_text, "utf8");
+
+  if (!already_normalized) {
+    logger.debug(`Removing original markdown file: ${resolved_file_path}`);
+    await fs.unlink(resolved_file_path);
+  }
+
+  logger.success(`Normalized markdown file: ${target_md_file_path}`);
+  return { status: "processed" };
+}
+
+async function main() {
+  const cli_options = parse_cli_arguments();
+  const logger = create_logger(cli_options);
+
+  logger.debug("Starting markdown normalization command.");
+
+  const markdown_paths = expand_patterns(cli_options.patterns, logger);
+
+  if (markdown_paths.length === 0) {
+    logger.warn("No files matched the provided patterns.");
+    return;
+  }
+
+  let processed_count = 0;
+  let skipped_count = 0;
+  let dry_run_count = 0;
+  let failure_count = 0;
+
+  for (const file_path of markdown_paths) {
+    try {
+      const result = await normalize_file({
+        file_path,
+        refresh_mode: cli_options.refresh_mode,
+        dry_run: cli_options.dry_run,
+        logger,
+      });
+
+      if (result.status === "processed") processed_count += 1;
+      if (result.status === "skipped") skipped_count += 1;
+      if (result.status === "dry_run") dry_run_count += 1;
+    } catch (error) {
+      failure_count += 1;
+      logger.error(`Failed to process ${file_path}: ${error.message}`, error);
+    }
+  }
+
+  logger.info(
+    `Summary: processed=${processed_count}, dry_run=${dry_run_count}, skipped=${skipped_count}, failed=${failure_count}`,
+  );
+
+  if (failure_count > 0) {
+    process.exit(1);
+  }
+}
+
+main().catch((error) => {
+  console.error(chalk.red(`md_normalize failed: ${error.stack || error.message}`));
+  process.exit(1);
+});
