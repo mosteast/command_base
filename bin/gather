@@ -50,6 +50,7 @@ const RANGE_VALUES = ["all", "source", "command"];
 const PLATFORM_ALIASES = {
   bili: "bilibili",
   dy: "douyin",
+  douyin_f2: "douyin",
   tiktok: "douyin",
   twitter: "x_f2",
   tw: "x_f2",
@@ -274,6 +275,8 @@ function build_help_text(script_name) {
     "  running platform-specific export commands.",
     "  Resumes from the last successful job using the state file pointer.",
     "  X export options: x_f2 uses f2, x_gallery_dl uses xsave_gallery_dl.",
+    "  Platform aliases: yt -> youtube, bili -> bilibili, dy/tiktok/douyin_f2 -> douyin, x/tw/twitter -> x_f2.",
+    "  Platform filters apply to source jobs and custom commands with declared or inferred platforms.",
     "",
     `${chalk.bold("Commands")}`,
     "  init                        Create a scaffold config file if empty.",
@@ -353,7 +356,8 @@ function build_help_text(script_name) {
     "        handle: https://www.youtube.com/@user1",
     "  command:",
     "    - name: Example custom command",
-    "      command: f2 x -M like -u user1",
+    "      platform: douyin",
+    "      command: f2 dy -M like -u user1",
   ].join("\n");
 }
 
@@ -416,6 +420,26 @@ function normalize_platform_key(value) {
     .toLowerCase();
   if (!text) return "";
   return PLATFORM_ALIASES[text] || text;
+}
+
+function is_supported_platform(platform_key) {
+  return Boolean(PLATFORM_COMMANDS[platform_key]);
+}
+
+function exit_with_invalid_platform_value(
+  option_name,
+  raw_value,
+  command_name,
+) {
+  console.error(
+    chalk.red(
+      `Invalid ${option_name} value: ${raw_value}. Supported platforms: ${Object.keys(
+        PLATFORM_COMMANDS,
+      ).join(", ")}`,
+    ),
+  );
+  console.log(build_help_text(command_name));
+  process.exit(1);
 }
 
 function normalize_refresh_mode(raw_value) {
@@ -657,22 +681,36 @@ function parse_cli_arguments() {
 
   const include_platforms = [];
   for (const raw_value of raw_include_platforms) {
-    const normalized_platform = normalize_platform_key(raw_value);
-    if (!normalized_platform) continue;
     if (looks_like_config_path(raw_value)) {
       config_patterns.push(raw_value);
       continue;
+    }
+    const normalized_platform = normalize_platform_key(raw_value);
+    if (!normalized_platform) continue;
+    if (!is_supported_platform(normalized_platform)) {
+      exit_with_invalid_platform_value(
+        "--platform",
+        raw_value,
+        argv.$0 || "batch_exporter",
+      );
     }
     include_platforms.push(normalized_platform);
   }
 
   const exclude_platforms = [];
   for (const raw_value of raw_exclude_platforms) {
-    const normalized_platform = normalize_platform_key(raw_value);
-    if (!normalized_platform) continue;
     if (looks_like_config_path(raw_value)) {
       config_patterns.push(raw_value);
       continue;
+    }
+    const normalized_platform = normalize_platform_key(raw_value);
+    if (!normalized_platform) continue;
+    if (!is_supported_platform(normalized_platform)) {
+      exit_with_invalid_platform_value(
+        "--exclude-platform",
+        raw_value,
+        argv.$0 || "batch_exporter",
+      );
     }
     exclude_platforms.push(normalized_platform);
   }
@@ -1043,6 +1081,100 @@ function normalize_source_items(raw_value, logger, source_label, platform_key) {
   return items;
 }
 
+function infer_command_platform_keys(command_text) {
+  const normalized_command = String(command_text || "")
+    .trim()
+    .toLowerCase();
+  if (!normalized_command) return [];
+
+  const platform_keys = new Set();
+
+  function add_platform(platform_key) {
+    const normalized_platform = normalize_platform_key(platform_key);
+    if (!normalized_platform) return;
+    if (!is_supported_platform(normalized_platform)) return;
+    platform_keys.add(normalized_platform);
+  }
+
+  if (
+    /\bf2\s+dy\b/.test(normalized_command) ||
+    normalized_command.includes("douyin.com") ||
+    normalized_command.includes("v.douyin.com")
+  ) {
+    add_platform("douyin");
+  }
+
+  if (
+    /\bf2\s+x\b/.test(normalized_command) ||
+    normalized_command.includes(" x.com/") ||
+    normalized_command.includes("https://x.com/") ||
+    normalized_command.includes("http://x.com/") ||
+    normalized_command.includes("twitter.com/")
+  ) {
+    add_platform("x_f2");
+  }
+
+  if (
+    normalized_command.includes("xsave_gallery_dl") &&
+    (normalized_command.includes("x.com/") ||
+      normalized_command.includes("twitter.com/"))
+  ) {
+    add_platform("x_gallery_dl");
+  }
+
+  if (
+    normalized_command.includes("youtube.com") ||
+    normalized_command.includes("youtu.be")
+  ) {
+    add_platform("youtube");
+  }
+
+  if (normalized_command.includes("bilibili.com")) {
+    add_platform("bilibili");
+  }
+
+  if (normalized_command.includes("rumble.com")) {
+    add_platform("rumble");
+  }
+
+  if (normalized_command.includes("bitchute.com")) {
+    add_platform("bitchute");
+  }
+
+  return Array.from(platform_keys);
+}
+
+function resolve_command_platform_keys(
+  entry,
+  command_text,
+  logger,
+  source_label,
+  entry_label,
+) {
+  const raw_platform_values = normalize_list(
+    entry.platforms !== undefined ? entry.platforms : entry.platform,
+  );
+  const platform_keys = new Set();
+
+  for (const raw_platform_value of raw_platform_values) {
+    const normalized_platform = normalize_platform_key(raw_platform_value);
+    if (!normalized_platform) continue;
+    if (!is_supported_platform(normalized_platform)) {
+      logger.warn(
+        `Config ${source_label} ${entry_label} in command has unsupported platform ${raw_platform_value}; ignoring it.`,
+      );
+      continue;
+    }
+    platform_keys.add(normalized_platform);
+  }
+
+  if (platform_keys.size > 0) {
+    return Array.from(platform_keys);
+  }
+
+  return infer_command_platform_keys(command_text);
+}
+
 function has_valid_source_items(source_map) {
   if (!source_map || typeof source_map !== "object") return false;
   return Object.values(source_map).some(
@@ -1079,6 +1211,13 @@ function normalize_command_list(raw_config, logger, source_label) {
     command_list.push({
       name: name_text,
       command_text,
+      platform_keys: resolve_command_platform_keys(
+        entry,
+        command_text,
+        logger,
+        source_label,
+        entry_label,
+      ),
     });
   }
 
@@ -1383,12 +1522,67 @@ function build_jobs_from_commands(command_maps) {
       job_list.push({
         name: String(item.name || "").trim(),
         command_text: String(item.command_text || "").trim(),
+        platform_keys: Array.isArray(item.platform_keys)
+          ? [...item.platform_keys]
+          : [],
         source_file,
       });
     }
   }
 
   return job_list;
+}
+
+function filter_command_jobs(job_list, options) {
+  if (
+    options.include_platforms.length === 0 &&
+    options.exclude_platforms.length === 0
+  ) {
+    return {
+      filtered_jobs: job_list,
+      skipped_without_platform: 0,
+      skipped_by_filter: 0,
+    };
+  }
+
+  const filtered_jobs = [];
+  let skipped_without_platform = 0;
+  let skipped_by_filter = 0;
+
+  for (const job of job_list) {
+    const platform_keys = Array.isArray(job.platform_keys)
+      ? job.platform_keys
+      : [];
+
+    if (platform_keys.length === 0) {
+      skipped_without_platform += 1;
+      continue;
+    }
+
+    const matches_include =
+      options.include_platforms.length === 0 ||
+      platform_keys.some((platform_key) =>
+        options.include_platforms.includes(platform_key),
+      );
+    const matches_exclude =
+      options.exclude_platforms.length > 0 &&
+      platform_keys.some((platform_key) =>
+        options.exclude_platforms.includes(platform_key),
+      );
+
+    if (!matches_include || matches_exclude) {
+      skipped_by_filter += 1;
+      continue;
+    }
+
+    filtered_jobs.push(job);
+  }
+
+  return {
+    filtered_jobs,
+    skipped_without_platform,
+    skipped_by_filter,
+  };
 }
 
 async function run_export_job(job, command_config, options, logger) {
@@ -1547,14 +1741,37 @@ async function run_custom_command_jobs(
 ) {
   const warn_when_empty = run_settings.warn_when_empty !== false;
   logger.debug("Step: build custom command list");
-  const command_jobs = build_jobs_from_commands(command_maps);
+  const all_command_jobs = build_jobs_from_commands(command_maps);
 
-  if (command_jobs.length === 0) {
+  if (all_command_jobs.length === 0) {
     if (warn_when_empty) {
       logger.warn('No entries found in config "command" section.');
     } else {
       logger.debug('No entries found in config "command" section; skipping.');
     }
+    return { failed: 0, executed: 0, dry_run: 0, aborted: 0, has_jobs: false };
+  }
+
+  logger.debug("Step: filter custom command jobs by platform");
+  const {
+    filtered_jobs: command_jobs,
+    skipped_without_platform,
+    skipped_by_filter,
+  } = filter_command_jobs(all_command_jobs, options);
+
+  if (skipped_without_platform > 0) {
+    logger.warn(
+      `Skipped ${skipped_without_platform} command entries without declared or inferred platform because platform filters are active.`,
+    );
+  }
+  if (skipped_by_filter > 0) {
+    logger.info(
+      `Skipped ${skipped_by_filter} command entries by platform filter.`,
+    );
+  }
+
+  if (command_jobs.length === 0) {
+    logger.warn("No command jobs matched the provided platform filters.");
     return { failed: 0, executed: 0, dry_run: 0, aborted: 0, has_jobs: false };
   }
 
@@ -1626,11 +1843,12 @@ async function run_export_command() {
   logger.debug("Step: register signal handlers");
   register_signal_handlers(logger);
 
-  if (!options.run_source_jobs && options.include_platforms.length > 0) {
-    logger.warn("Ignore --platform when source range is not selected.");
-  }
-  if (!options.run_source_jobs && options.exclude_platforms.length > 0) {
-    logger.warn("Ignore --exclude-platform when source range is not selected.");
+  if (
+    !options.run_source_jobs &&
+    (options.include_platforms.length > 0 ||
+      options.exclude_platforms.length > 0)
+  ) {
+    logger.debug("Platform filter will apply to custom command jobs.");
   }
   if (!options.run_source_jobs && options.refresh_mode_explicit) {
     logger.warn("Ignore --refresh when source range is not selected.");

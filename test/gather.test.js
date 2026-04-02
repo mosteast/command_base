@@ -58,6 +58,22 @@ async function write_config_file(temp_root) {
   return config_path;
 }
 
+async function write_douyin_config_file(temp_root) {
+  const config_path = path.join(temp_root, "gather.douyin.config.yaml");
+  const config_text = [
+    "source:",
+    "  youtube:",
+    "    - name: Example YouTube channel",
+    "      handle: https://www.youtube.com/@example",
+    "  douyin:",
+    "    - name: Example Douyin user",
+    "      handle: https://www.douyin.com/user/EXAMPLE_ID",
+    "",
+  ].join("\n");
+  await fs.writeFile(config_path, config_text, "utf8");
+  return config_path;
+}
+
 async function write_command_range_config_file(temp_root, marker_file_path) {
   const config_path = path.join(temp_root, "gather.command_range.config.yaml");
   const first_command = `printf "first\\n" >> "${marker_file_path}"`;
@@ -88,6 +104,27 @@ async function write_source_and_command_config_file(temp_root) {
     "command:",
     "  - name: Echo marker",
     '    command: "printf \\"marker\\\\n\\""',
+    "",
+  ].join("\n");
+  await fs.writeFile(config_path, config_text, "utf8");
+  return config_path;
+}
+
+async function write_platform_filtered_command_config_file(temp_root) {
+  const config_path = path.join(
+    temp_root,
+    "gather.platform_filtered_command.yaml",
+  );
+  const config_text = [
+    "source:",
+    "  douyin_f2:",
+    "    - name: Example Douyin user",
+    "      handle: https://www.douyin.com/user/EXAMPLE_ID",
+    "command:",
+    "  - name: Douyin Likes",
+    '    command: "f2 dy -M like -u https://v.douyin.com/EXAMPLE/"',
+    "  - name: YouTube Playlist",
+    '    command: "videos_download -l \\"https://www.youtube.com/playlist?list=PLexample\\""',
     "",
   ].join("\n");
   await fs.writeFile(config_path, config_text, "utf8");
@@ -192,6 +229,62 @@ describe("gather CLI platform selection", () => {
     }
   });
 
+  it("supports douyin_f2 as an alias for douyin", async () => {
+    const temp_root = await create_temp_dir();
+    const state_file = path.join(temp_root, "gather.state.json");
+
+    try {
+      const config_path = await write_douyin_config_file(temp_root);
+      const result = await run_cli([
+        "--dry-run",
+        "--state-file",
+        state_file,
+        "--platform",
+        "douyin_f2",
+        config_path,
+      ]);
+
+      expect(result.exit_code).toBe(0);
+      expect(extract_total_jobs(result.stdout)).toBe(1);
+      expect(result.stdout).toContain(
+        "f2 dy -M post -u https://www.douyin.com/user/EXAMPLE_ID",
+      );
+      expect(result.stdout).not.toContain("https://www.youtube.com/@example");
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
+  });
+
+  it("filters custom commands by inferred platform when platform is set", async () => {
+    const temp_root = await create_temp_dir();
+    const state_file = path.join(temp_root, "gather.state.json");
+
+    try {
+      const config_path =
+        await write_platform_filtered_command_config_file(temp_root);
+      const result = await run_cli([
+        "--dry-run",
+        "--state-file",
+        state_file,
+        "--platform",
+        "douyin_f2",
+        config_path,
+      ]);
+
+      expect(result.exit_code).toBe(0);
+      expect(extract_total_jobs(result.stdout)).toBe(1);
+      expect(extract_total_commands(result.stdout)).toBe(1);
+      expect(result.stdout).toContain(
+        "f2 dy -M like -u https://v.douyin.com/EXAMPLE/",
+      );
+      expect(result.stdout).not.toContain(
+        "https://www.youtube.com/playlist?list=PLexample",
+      );
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
+  });
+
   it("keeps comments in yt-dlp info refresh commands", async () => {
     const temp_root = await create_temp_dir();
     const state_file = path.join(temp_root, "gather.state.json");
@@ -238,6 +331,29 @@ describe("gather CLI platform selection", () => {
 
       expect(result.exit_code).toBe(0);
       expect(extract_total_jobs(result.stdout)).toBe(3);
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
+  });
+
+  it("fails fast when platform is unknown", async () => {
+    const temp_root = await create_temp_dir();
+    const state_file = path.join(temp_root, "gather.state.json");
+
+    try {
+      const config_path = await write_config_file(temp_root);
+      await expect(
+        run_cli([
+          "--dry-run",
+          "--state-file",
+          state_file,
+          "--platform",
+          "unknown_platform",
+          config_path,
+        ]),
+      ).rejects.toMatchObject({
+        exit_code: 1,
+      });
     } finally {
       await fs.rm(temp_root, { recursive: true, force: true });
     }
