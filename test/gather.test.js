@@ -192,6 +192,36 @@ describe("gather CLI platform selection", () => {
     }
   });
 
+  it("keeps comments in yt-dlp info refresh commands", async () => {
+    const temp_root = await create_temp_dir();
+    const state_file = path.join(temp_root, "gather.state.json");
+
+    try {
+      const config_path = await write_config_file(temp_root);
+      const result = await run_cli([
+        "--dry-run",
+        "--refresh",
+        "info",
+        "--state-file",
+        state_file,
+        "--platform",
+        "youtube",
+        config_path,
+      ]);
+
+      expect(result.exit_code).toBe(0);
+      expect(extract_total_jobs(result.stdout)).toBe(1);
+      expect(result.stdout).toContain(
+        "xsave_yt_dlp -c https://www.youtube.com/@example --refresh --overwrite -- --skip-download",
+      );
+      expect(result.stdout).not.toContain("--no-write-comments");
+      expect(result.stdout).toContain("--no-write-subs");
+      expect(result.stdout).toContain("--no-write-auto-subs");
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
+  });
+
   it("treats a path-like platform token as config when platform value is missing", async () => {
     const temp_root = await create_temp_dir();
     const state_file = path.join(temp_root, "gather.state.json");

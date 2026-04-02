@@ -287,7 +287,7 @@ function build_help_text(script_name) {
     `      --f2-output-dir <path>   f2 download output directory (default: ${chalk.gray(
       DEFAULT_F2_OUTPUT_DIR,
     )})`,
-    "  -r, --refresh [mode]         Refresh yt-dlp output (youtube, bilibili, rumble, bitchute; media, info, all; info skips subs/comments)",
+    "  -r, --refresh [mode]         Refresh yt-dlp output (youtube, bilibili, rumble, bitchute; media, info, all; info skips media/subtitles)",
     "      --stop-on-error          Stop on first failed export (default: false)",
     "  -d, --dry-run                Print commands without executing (default: false)",
     "      --quiet                  Print only warnings and errors (default: false)",
@@ -317,7 +317,7 @@ function build_help_text(script_name) {
     "  # Run both source and command ranges explicitly",
     `  ${example_cmd} --range source command source/exporter.yaml`,
     "",
-    "  # Refresh metadata only (skip media downloads)",
+    "  # Refresh metadata and comments only (skip media downloads)",
     `  ${example_cmd} --refresh info source/exporter.yaml`,
     "",
     "  # Refresh media only",
@@ -578,7 +578,7 @@ function parse_cli_arguments() {
       alias: "r",
       type: "string",
       describe:
-        "Refresh yt-dlp output (youtube, bilibili, rumble, bitchute; media, info, all; default: info)",
+        "Refresh yt-dlp output (youtube, bilibili, rumble, bitchute; media, info, all; default: info; info skips media/subtitles)",
     })
     .option("stop-on-error", {
       type: "boolean",
@@ -1128,7 +1128,6 @@ function build_xsave_yt_dlp_refresh_args(refresh_mode) {
     case "info":
       ytdlp_args = [
         "--skip-download",
-        "--no-write-comments",
         "--no-write-subs",
         "--no-write-auto-subs",
       ];

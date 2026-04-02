@@ -25,7 +25,7 @@ youtube_cookie_browser="chrome"
 youtube_cookie_browser_provided=false
 youtube_cookie_file=""
 youtube_cookie_file_provided=false
-script_version="1.0.6"
+script_version="1.0.7"
 yt_dlp_color_policy="always"
 yt_dlp_color_opts=(--color "$yt_dlp_color_policy")
 default_video_subtitle_langs="en,en-US,zh-Hans,zh-Hant,zh-CN,zh"
@@ -288,8 +288,9 @@ ${color_blue}Usage:${color_reset}
 ${color_blue}Description:${color_reset}
   Download videos with yt-dlp from YouTube, Bilibili, BitChute, or Rumble channels,
   playlists, or individual video URLs. Additional yt-dlp options can be passed after "--".
-  Metadata sidecars (info JSON, comments, descriptions, thumbnails, playlist meta) are
-  written by default; disable any of them via "--" and yt-dlp's --no-write-* flags.
+  Metadata sidecars (info JSON, comments, descriptions, playlist meta, link files) are
+  written after the media/subtitle phase by default; disable any of them via "--" and
+  yt-dlp's --no-write-* flags.
 
 ${color_blue}Options:${color_reset}
   -h, --help              Show this help message and exit
@@ -774,7 +775,6 @@ run_video_yt_dlp() {
         -N 5
         "${FORMAT_OPTS[@]}"
         "${WRITE_SUBS_OPTS[@]}"
-        "${WRITE_META_OPTS[@]}"
         "${main_subtitle_lang_opts[@]}"
         --sleep-subtitles "$sleep_subtitles_seconds"
         --continue
@@ -794,6 +794,73 @@ run_video_yt_dlp() {
         --file-access-retries 5
         --fragment-retries 5
         --exec after_move:"rm -f -- \"%(filepath)s.ytdl\""
+    )
+
+    if [ "$insecure_ssl" = true ]; then
+        yt_dlp_args+=(--no-check-certificate)
+    fi
+
+    case "$cookie_mode" in
+        browser)
+            yt_dlp_args+=(--cookies-from-browser "$youtube_cookie_browser")
+            ;;
+        file)
+            yt_dlp_args+=(--cookies "$youtube_cookie_file")
+            ;;
+    esac
+
+    if [ -n "$player_client" ]; then
+        yt_dlp_args+=(--extractor-args "youtube:player_client=${player_client}")
+    fi
+
+    if [ ${#match_filter_opts[@]} -gt 0 ]; then
+        yt_dlp_args+=("${match_filter_opts[@]}")
+    fi
+
+    yt_dlp_args+=(
+        --add-header "Accept:text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+        --add-header "Accept-Language:en-us,en;q=0.5"
+        --add-header "Accept-Encoding:gzip, deflate"
+        --add-header "Accept-Charset:ISO-8859-1,utf-8;q=0.7,*;q=0.7"
+        --add-header "User-Agent:Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+        "${EXTRA_OPTS[@]}"
+        "$url"
+    )
+
+    run_yt_dlp_with_log yt-dlp "${yt_dlp_args[@]}"
+}
+
+run_video_metadata_yt_dlp() {
+    local url="$1"
+    local archive_file="$2"
+    local output_dir="$3"
+    local cookie_mode="$4"
+    local player_client="$5"
+    local insecure_ssl="$6"
+
+    local -a yt_dlp_args
+    yt_dlp_args=(
+        "${yt_dlp_color_opts[@]}"
+        -o "$output_dir/%(uploader)s - Videos/%(title)s.%(ext)s"
+        -N 5
+        --skip-download
+        "${WRITE_META_OPTS[@]}"
+        --continue
+    )
+
+    if [ "$OVERWRITE" != true ]; then
+        yt_dlp_args+=(--download-archive "$archive_file" --no-overwrites)
+    else
+        yt_dlp_args+=(--force-overwrites)
+    fi
+
+    yt_dlp_args+=(
+        --sleep-interval "$sleep_interval_seconds"
+        --max-sleep-interval "$max_sleep_interval_seconds"
+        --retries 10
+        --extractor-retries 5
+        --file-access-retries 5
+        --fragment-retries 5
     )
 
     if [ "$insecure_ssl" = true ]; then
@@ -1106,6 +1173,52 @@ download_video_with_fallback() {
             run_video_yt_dlp "$url" "$archive_file" "$output_dir" none "$fallback_player_client"
             return $?
         fi
+    fi
+
+    return "$primary_exit_code"
+}
+
+download_video_metadata_with_fallback() {
+    local url="$1"
+    local archive_file="$2"
+    local output_dir="$3"
+    local platform="$4"
+    local cookie_mode="none"
+    local player_client=""
+
+    if [ "$platform" = "youtube" ] || [ "$platform" = "bilibili" ]; then
+        cookie_mode=$(resolve_cookie_mode_for_platform "$platform")
+    fi
+
+    if [ "$platform" = "youtube" ] && [ "$cookie_mode" != "none" ]; then
+        player_client="$youtube_cookie_player_client"
+    fi
+
+    if run_video_metadata_yt_dlp "$url" "$archive_file" "$output_dir" "$cookie_mode" "$player_client"; then
+        return 0
+    fi
+
+    local primary_exit_code=$?
+    if [ "$platform" = "bitchute" ] && [ "$allow_insecure_ssl" = true ] && [ "$yt_dlp_last_ssl_error" = true ]; then
+        log_warn "SSL errors detected during metadata export; retrying with insecure TLS for BitChute."
+        log_step "Retrying BitChute metadata export with --no-check-certificate"
+        if run_video_metadata_yt_dlp "$url" "$archive_file" "$output_dir" "$cookie_mode" "$player_client" true; then
+            return 0
+        fi
+        primary_exit_code=$?
+    fi
+
+    if [ "$platform" = "youtube" ] && [ -n "$fallback_player_client" ] && [ "$yt_dlp_last_player_error" = true ]; then
+        local cookie_fallback_label="${youtube_cookie_fallback_client:-default}"
+        log_warn "Metadata export failed due to YouTube player configuration; retrying with '${cookie_fallback_label}'."
+        log_step "Fallback metadata export with cookies using ${cookie_fallback_label}"
+        if run_video_metadata_yt_dlp "$url" "$archive_file" "$output_dir" "$cookie_mode" "$youtube_cookie_fallback_client"; then
+            return 0
+        fi
+        log_warn "Fallback client '${cookie_fallback_label}' failed with cookies; retrying metadata export without cookies."
+        log_step "Fallback metadata export without cookies using ${fallback_player_client}"
+        run_video_metadata_yt_dlp "$url" "$archive_file" "$output_dir" none "$fallback_player_client"
+        return $?
     fi
 
     return "$primary_exit_code"
@@ -1570,6 +1683,7 @@ if [ -n "$CHANNEL_URL" ]; then
     # Generate a unique archive file name based on the channel URL
     ARCHIVE_FILE="${ARCHIVE_DIR}/$(echo "$CHANNEL_URL" | md5sum | cut -d' ' -f1).txt"
     DANMAKU_ARCHIVE_FILE=$(resolve_sidecar_archive_file "$ARCHIVE_FILE" "danmaku")
+    METADATA_ARCHIVE_FILE=$(resolve_sidecar_archive_file "$ARCHIVE_FILE" "metadata")
 
     if [ "$REFRESH" = true ]; then
         if [ "$only_danmaku" != true ]; then
@@ -1583,6 +1697,17 @@ if [ -n "$CHANNEL_URL" ]; then
                 fi
             else
                 log_warn "Refresh requested but no archive cache found for '$CHANNEL_URL'."
+            fi
+            if [ -f "$METADATA_ARCHIVE_FILE" ]; then
+                log_info "Refresh requested; clearing metadata archive cache at '$METADATA_ARCHIVE_FILE'."
+                if [ "$dry_run" = true ]; then
+                    log_info "Dry-run: would remove metadata archive cache at '${METADATA_ARCHIVE_FILE}'."
+                else
+                    log_io "remove metadata archive cache ${METADATA_ARCHIVE_FILE}"
+                    rm -f "$METADATA_ARCHIVE_FILE"
+                fi
+            else
+                log_warn "Refresh requested but no metadata archive cache found for '$CHANNEL_URL'."
             fi
         fi
         if should_export_danmaku_for_platform "$channel_platform"; then
@@ -1627,7 +1752,6 @@ if [ -n "$CHANNEL_URL" ]; then
         -i
         "${FORMAT_OPTS[@]}"
         "${WRITE_SUBS_OPTS[@]}"
-        "${WRITE_META_OPTS[@]}"
         "${main_subtitle_lang_opts[@]}"
         --sleep-subtitles "$sleep_subtitles_seconds"
         --continue
@@ -1653,6 +1777,21 @@ if [ -n "$CHANNEL_URL" ]; then
         --add-header "User-Agent:Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
         "${EXTRA_OPTS[@]}"
     )
+    channel_metadata_base_args=(
+        --playlist-reverse
+        "${yt_dlp_color_opts[@]}"
+        -o "$channel_output_template"
+        -N 1
+        -i
+        --skip-download
+        "${WRITE_META_OPTS[@]}"
+        --continue
+    )
+    if [ "$OVERWRITE" != true ]; then
+        channel_metadata_base_args+=(--download-archive "$METADATA_ARCHIVE_FILE" --no-overwrites)
+    else
+        channel_metadata_base_args+=(--force-overwrites)
+    fi
 
     retry_command "Channel download: ${CHANNEL_URL}" run_yt_dlp_with_log_capture yt-dlp \
         "${channel_base_args[@]}" \
@@ -1744,6 +1883,69 @@ if [ -n "$CHANNEL_URL" ]; then
         fi
     fi
 
+    if [ "$channel_status" -eq 0 ]; then
+        retry_command "Channel metadata export: ${CHANNEL_URL}" run_yt_dlp_with_log_capture yt-dlp \
+            "${channel_metadata_base_args[@]}" \
+            "${channel_cookie_opts[@]}" \
+            "${channel_extractor_opts[@]}" \
+            "${channel_referer_opts[@]}" \
+            "${channel_tail_args[@]}" \
+            "$CHANNEL_URL"
+        channel_metadata_status=$?
+        channel_metadata_player_error=$yt_dlp_last_player_error
+        channel_metadata_ssl_error=$yt_dlp_last_ssl_error
+
+        if [ "$channel_platform" = "bitchute" ] && [ "$allow_insecure_ssl" = true ] && [ "$channel_metadata_ssl_error" = true ]; then
+            log_warn "SSL errors detected; retrying BitChute channel metadata export with insecure TLS."
+            log_step "Channel metadata fallback with --no-check-certificate"
+            retry_command "Channel metadata fallback (insecure TLS): ${CHANNEL_URL}" run_yt_dlp_with_log_capture yt-dlp \
+                "${channel_metadata_base_args[@]}" \
+                "${channel_cookie_opts[@]}" \
+                "${channel_extractor_opts[@]}" \
+                "${channel_referer_opts[@]}" \
+                --no-check-certificate \
+                "${channel_tail_args[@]}" \
+                "$CHANNEL_URL"
+            fallback_status=$?
+            if [ "$fallback_status" -ne 0 ]; then
+                channel_metadata_status=$fallback_status
+            fi
+        elif [ "$channel_platform" = "youtube" ] && [ -n "$fallback_player_client" ] && [ "$channel_metadata_player_error" = true ]; then
+            channel_cookie_fallback_label="${youtube_cookie_fallback_client:-default}"
+            log_warn "YouTube player errors detected during metadata export; retrying failed items with '${channel_cookie_fallback_label}'."
+            log_step "Channel metadata fallback with cookies using ${channel_cookie_fallback_label}"
+            retry_command "Channel metadata fallback: ${CHANNEL_URL}" run_yt_dlp_with_log_capture yt-dlp \
+                "${channel_metadata_base_args[@]}" \
+                "${channel_cookie_opts[@]}" \
+                "${channel_fallback_extractor_opts[@]}" \
+                "${channel_referer_opts[@]}" \
+                "${channel_tail_args[@]}" \
+                "$CHANNEL_URL"
+            fallback_status=$?
+            if [ "$fallback_status" -ne 0 ]; then
+                channel_metadata_status=$fallback_status
+            fi
+            if [ "$yt_dlp_last_player_error" = true ]; then
+                log_warn "Fallback client '${channel_cookie_fallback_label}' still hit player errors; retrying metadata export without cookies."
+                log_step "Channel metadata fallback without cookies using ${fallback_player_client}"
+                retry_command "Channel metadata fallback without cookies: ${CHANNEL_URL}" run_yt_dlp_with_log_capture yt-dlp \
+                    "${channel_metadata_base_args[@]}" \
+                    "${channel_fallback_extractor_opts[@]}" \
+                    "${channel_referer_opts[@]}" \
+                    "${channel_tail_args[@]}" \
+                    "$CHANNEL_URL"
+                fallback_status=$?
+                if [ "$fallback_status" -ne 0 ]; then
+                    channel_metadata_status=$fallback_status
+                fi
+            fi
+        fi
+
+        if [ "$channel_metadata_status" -ne 0 ]; then
+            channel_status=$channel_metadata_status
+        fi
+    fi
+
     exit "$channel_status"
 
 # Handle playlist URL mode
@@ -1794,6 +1996,7 @@ elif [ -n "$PLAYLIST_URL" ]; then
     # Generate a unique archive file name based on the playlist URL
     ARCHIVE_FILE="${ARCHIVE_DIR}/$(echo "$PLAYLIST_URL" | md5sum | cut -d' ' -f1).txt"
     DANMAKU_ARCHIVE_FILE=$(resolve_sidecar_archive_file "$ARCHIVE_FILE" "danmaku")
+    METADATA_ARCHIVE_FILE=$(resolve_sidecar_archive_file "$ARCHIVE_FILE" "metadata")
 
     if [ "$REFRESH" = true ]; then
         if [ "$only_danmaku" != true ]; then
@@ -1807,6 +2010,17 @@ elif [ -n "$PLAYLIST_URL" ]; then
                 fi
             else
                 log_warn "Refresh requested but no archive cache found for '$PLAYLIST_URL'."
+            fi
+            if [ -f "$METADATA_ARCHIVE_FILE" ]; then
+                log_info "Refresh requested; clearing metadata archive cache at '$METADATA_ARCHIVE_FILE'."
+                if [ "$dry_run" = true ]; then
+                    log_info "Dry-run: would remove metadata archive cache at '${METADATA_ARCHIVE_FILE}'."
+                else
+                    log_io "remove metadata archive cache ${METADATA_ARCHIVE_FILE}"
+                    rm -f "$METADATA_ARCHIVE_FILE"
+                fi
+            else
+                log_warn "Refresh requested but no metadata archive cache found for '$PLAYLIST_URL'."
             fi
         fi
         if should_export_danmaku_for_platform "$playlist_platform"; then
@@ -1850,7 +2064,6 @@ elif [ -n "$PLAYLIST_URL" ]; then
         -i
         "${FORMAT_OPTS[@]}"
         "${WRITE_SUBS_OPTS[@]}"
-        "${WRITE_META_OPTS[@]}"
         "${main_subtitle_lang_opts[@]}"
         --sleep-subtitles "$sleep_subtitles_seconds"
         --continue
@@ -1877,6 +2090,21 @@ elif [ -n "$PLAYLIST_URL" ]; then
         --add-header "User-Agent:Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
         "${EXTRA_OPTS[@]}"
     )
+    playlist_metadata_base_args=(
+        --playlist-reverse
+        "${yt_dlp_color_opts[@]}"
+        -o "$playlist_output_template"
+        -N 1
+        -i
+        --skip-download
+        "${WRITE_META_OPTS[@]}"
+        --continue
+    )
+    if [ "$OVERWRITE" != true ]; then
+        playlist_metadata_base_args+=(--download-archive "$METADATA_ARCHIVE_FILE" --no-overwrites)
+    else
+        playlist_metadata_base_args+=(--force-overwrites)
+    fi
 
     retry_command "Playlist download: ${PLAYLIST_URL}" run_yt_dlp_with_log_capture yt-dlp \
         "${playlist_base_args[@]}" \
@@ -1962,6 +2190,65 @@ elif [ -n "$PLAYLIST_URL" ]; then
         fi
     fi
 
+    if [ "$playlist_status" -eq 0 ]; then
+        retry_command "Playlist metadata export: ${PLAYLIST_URL}" run_yt_dlp_with_log_capture yt-dlp \
+            "${playlist_metadata_base_args[@]}" \
+            "${playlist_cookie_opts[@]}" \
+            "${playlist_extractor_opts[@]}" \
+            "${playlist_tail_args[@]}" \
+            "$PLAYLIST_URL"
+        playlist_metadata_status=$?
+        playlist_metadata_player_error=$yt_dlp_last_player_error
+        playlist_metadata_ssl_error=$yt_dlp_last_ssl_error
+
+        if [ "$playlist_platform" = "bitchute" ] && [ "$allow_insecure_ssl" = true ] && [ "$playlist_metadata_ssl_error" = true ]; then
+            log_warn "SSL errors detected; retrying BitChute playlist metadata export with insecure TLS."
+            log_step "Playlist metadata fallback with --no-check-certificate"
+            retry_command "Playlist metadata fallback (insecure TLS): ${PLAYLIST_URL}" run_yt_dlp_with_log_capture yt-dlp \
+                "${playlist_metadata_base_args[@]}" \
+                "${playlist_cookie_opts[@]}" \
+                "${playlist_extractor_opts[@]}" \
+                --no-check-certificate \
+                "${playlist_tail_args[@]}" \
+                "$PLAYLIST_URL"
+            fallback_status=$?
+            if [ "$fallback_status" -ne 0 ]; then
+                playlist_metadata_status=$fallback_status
+            fi
+        elif [ "$playlist_platform" = "youtube" ] && [ -n "$fallback_player_client" ] && [ "$playlist_metadata_player_error" = true ]; then
+            playlist_cookie_fallback_label="${youtube_cookie_fallback_client:-default}"
+            log_warn "YouTube player errors detected during metadata export; retrying failed items with '${playlist_cookie_fallback_label}'."
+            log_step "Playlist metadata fallback with cookies using ${playlist_cookie_fallback_label}"
+            retry_command "Playlist metadata fallback: ${PLAYLIST_URL}" run_yt_dlp_with_log_capture yt-dlp \
+                "${playlist_metadata_base_args[@]}" \
+                "${playlist_cookie_opts[@]}" \
+                "${playlist_fallback_extractor_opts[@]}" \
+                "${playlist_tail_args[@]}" \
+                "$PLAYLIST_URL"
+            fallback_status=$?
+            if [ "$fallback_status" -ne 0 ]; then
+                playlist_metadata_status=$fallback_status
+            fi
+            if [ "$yt_dlp_last_player_error" = true ]; then
+                log_warn "Fallback client '${playlist_cookie_fallback_label}' still hit player errors; retrying metadata export without cookies."
+                log_step "Playlist metadata fallback without cookies using ${fallback_player_client}"
+                retry_command "Playlist metadata fallback without cookies: ${PLAYLIST_URL}" run_yt_dlp_with_log_capture yt-dlp \
+                    "${playlist_metadata_base_args[@]}" \
+                    "${playlist_fallback_extractor_opts[@]}" \
+                    "${playlist_tail_args[@]}" \
+                    "$PLAYLIST_URL"
+                fallback_status=$?
+                if [ "$fallback_status" -ne 0 ]; then
+                    playlist_metadata_status=$fallback_status
+                fi
+            fi
+        fi
+
+        if [ "$playlist_metadata_status" -ne 0 ]; then
+            playlist_status=$playlist_metadata_status
+        fi
+    fi
+
     exit "$playlist_status"
 
 # Handle individual video URLs mode
@@ -2004,6 +2291,7 @@ else
         manual_archive_hash=$(printf "%s" "$expanded_output_dir" | md5sum | cut -d' ' -f1)
         manual_archive_file="${ARCHIVE_DIR}/manual_urls_${manual_archive_hash}.txt"
         manual_danmaku_archive_file=$(resolve_sidecar_archive_file "$manual_archive_file" "danmaku")
+        manual_metadata_archive_file=$(resolve_sidecar_archive_file "$manual_archive_file" "metadata")
         active_manual_archive_file="$manual_archive_file"
         if [ "$only_danmaku" = true ]; then
             active_manual_archive_file="$manual_danmaku_archive_file"
@@ -2023,6 +2311,17 @@ else
                         fi
                     else
                         log_warn "Refresh requested but no manual video archive found to clear."
+                    fi
+                    if [ -f "$manual_metadata_archive_file" ]; then
+                        log_info "Refresh requested; clearing metadata archive cache at '${manual_metadata_archive_file}'."
+                        if [ "$dry_run" = true ]; then
+                            log_info "Dry-run: would remove metadata archive cache at '${manual_metadata_archive_file}'."
+                        else
+                            log_io "remove metadata archive cache ${manual_metadata_archive_file}"
+                            rm -f "$manual_metadata_archive_file"
+                        fi
+                    else
+                        log_warn "Refresh requested but no manual metadata archive found to clear."
                     fi
                 fi
                 if should_export_danmaku_for_platform "$url_platform"; then
@@ -2079,6 +2378,16 @@ else
         else
             download_status=$?
             log_error "Danmaku export failed for ${url} after ${retry_attempt_limit} attempts."
+            overall_exit_code=$download_status
+            failed_video_urls+=("$url")
+            continue
+        fi
+
+        if retry_command "Metadata export: ${url}" download_video_metadata_with_fallback "$url" "$manual_metadata_archive_file" "$url_output_dir" "$url_platform"; then
+            :
+        else
+            download_status=$?
+            log_error "Metadata export failed for ${url} after ${retry_attempt_limit} attempts."
             overall_exit_code=$download_status
             failed_video_urls+=("$url")
         fi
