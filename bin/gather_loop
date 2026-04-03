@@ -1,0 +1,229 @@
+#!/usr/bin/env bash
+
+set -u
+set -o pipefail
+
+script_name=$(basename "$0")
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+gather_command="${script_dir}/gather"
+package_json_path="${script_dir}/../package.json"
+
+interval_seconds="1"
+debug_mode=false
+quiet_mode=false
+dry_run=false
+stop_requested=0
+gather_args=()
+
+color_reset=$'\033[0m'
+color_info=$'\033[96m'
+color_success=$'\033[92m'
+color_warn=$'\033[93m'
+color_error=$'\033[91m'
+color_detail=$'\033[90m'
+
+print_help() {
+  cat <<EOF
+Usage:
+  ${script_name} [options] [gather arguments]
+  ${script_name} [options] -- [gather options]
+
+Description:
+  Run \`gather\`, sleep for a configurable interval, and repeat until interrupted.
+
+Options:
+  --interval <seconds>    Sleep interval between runs. Accepts integers and decimals. Default: 1
+  -d, --dry-run           Print what would be done without starting the loop.
+  --quiet                 Print only warnings and errors.
+  --debug                 Print verbose output and debug logs.
+  -h, --help              Show help.
+  -v, --version           Show version number and nothing else.
+
+Examples:
+  # Run gather every second until interrupted
+  ${script_name}
+
+  # Run gather every 5 seconds
+  ${script_name} --interval 5
+
+  # Pass gather options after --
+  ${script_name} -- --range source --platform youtube
+
+  # Preview the command without starting the loop
+  ${script_name} --dry-run -- --refresh
+EOF
+}
+
+print_version() {
+  node -e 'process.stdout.write(require(process.argv[1]).version)' "${package_json_path}"
+  printf '\n'
+}
+
+log_info() {
+  if [ "${quiet_mode}" = true ]; then
+    return
+  fi
+  printf '%b\n' "${color_info}${script_name}: $*${color_reset}"
+}
+
+log_success() {
+  if [ "${quiet_mode}" = true ]; then
+    return
+  fi
+  printf '%b\n' "${color_success}${script_name}: $*${color_reset}"
+}
+
+log_warn() {
+  printf '%b\n' "${color_warn}${script_name}: $*${color_reset}" >&2
+}
+
+log_error() {
+  printf '%b\n' "${color_error}${script_name}: $*${color_reset}" >&2
+}
+
+log_debug() {
+  if [ "${debug_mode}" != true ]; then
+    return
+  fi
+  printf '%b\n' "${color_detail}${script_name}: $*${color_reset}" >&2
+}
+
+format_command() {
+  local formatted_command=""
+  local current_arg=""
+
+  for current_arg in "$@"; do
+    if [ -n "${formatted_command}" ]; then
+      formatted_command+=" "
+    fi
+    formatted_command+="$(printf '%q' "${current_arg}")"
+  done
+
+  printf '%s' "${formatted_command}"
+}
+
+request_stop() {
+  local signal_name="${1}"
+  if [ "${stop_requested}" -ne 0 ]; then
+    return
+  fi
+  stop_requested=1
+  log_warn "Received ${signal_name}. Stopping after the current step."
+}
+
+validate_interval() {
+  local interval_value="${1}"
+  if [[ "${interval_value}" =~ ^([0-9]+([.][0-9]+)?|[.][0-9]+)$ ]]; then
+    return 0
+  fi
+  return 1
+}
+
+trap 'request_stop SIGINT' INT
+trap 'request_stop SIGTERM' TERM
+trap 'request_stop SIGHUP' HUP
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      print_help
+      exit 0
+      ;;
+    -v|--version)
+      print_version
+      exit 0
+      ;;
+    --debug)
+      debug_mode=true
+      shift
+      ;;
+    --quiet)
+      quiet_mode=true
+      shift
+      ;;
+    -d|--dry-run)
+      dry_run=true
+      shift
+      ;;
+    --interval)
+      if [ "$#" -lt 2 ]; then
+        log_error "Missing value for --interval."
+        exit 1
+      fi
+      interval_seconds="${2}"
+      shift 2
+      ;;
+    --interval=*)
+      interval_seconds="${1#*=}"
+      shift
+      ;;
+    --)
+      shift
+      gather_args=("$@")
+      break
+      ;;
+    -*)
+      log_error "Unknown option: $1"
+      exit 1
+      ;;
+    *)
+      gather_args+=("$1")
+      shift
+      ;;
+  esac
+done
+
+if ! validate_interval "${interval_seconds}"; then
+  log_error "Invalid --interval value: ${interval_seconds}"
+  exit 1
+fi
+
+log_debug "Stage: validate gather command."
+log_debug "IO: inspect ${gather_command}"
+if [ ! -x "${gather_command}" ]; then
+  log_error "Gather command is not executable: ${gather_command}"
+  exit 1
+fi
+
+formatted_gather_command=$(
+  format_command "${gather_command}" "${gather_args[@]+"${gather_args[@]}"}"
+)
+
+if [ "${dry_run}" = true ]; then
+  printf '%b\n' "${color_info}${script_name}: Dry run${color_reset}"
+  printf '%b\n' "${color_detail}${formatted_gather_command}${color_reset}"
+  printf '%b\n' "${color_detail}sleep ${interval_seconds}${color_reset}"
+  exit 0
+fi
+
+iteration_number=1
+log_info "Running gather every ${interval_seconds} second(s). Press Ctrl-C to stop."
+
+while true; do
+  if [ "${stop_requested}" -ne 0 ]; then
+    break
+  fi
+
+  log_info "Iteration ${iteration_number}: run gather"
+  log_debug "IO: exec ${formatted_gather_command}"
+  "${gather_command}" "${gather_args[@]+"${gather_args[@]}"}"
+  gather_exit_code=$?
+
+  if [ "${gather_exit_code}" -eq 0 ]; then
+    log_success "Iteration ${iteration_number}: gather completed"
+  else
+    log_warn "Iteration ${iteration_number}: gather exited with code ${gather_exit_code}; continuing"
+  fi
+
+  iteration_number=$((iteration_number + 1))
+
+  if [ "${stop_requested}" -ne 0 ]; then
+    break
+  fi
+
+  log_debug "Stage: sleep before the next iteration."
+  log_debug "IO: sleep ${interval_seconds}"
+  sleep "${interval_seconds}"
+done
+
+log_info "Loop stopped."
