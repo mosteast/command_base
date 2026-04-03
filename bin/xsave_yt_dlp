@@ -266,9 +266,9 @@ resolve_youtube_player_client_for_cookies() {
     filtered_clients=$(filter_cookie_incompatible_clients "$raw_clients")
     if [ "$filtered_clients" != "$raw_clients" ]; then
         if [ -n "$context_label" ]; then
-            log_debug "YouTube cookies ${context_label}: drop clients ${raw_clients} -> ${filtered_clients}"
+            log_debug "YouTube cookies ${context_label}: drop clients ${raw_clients} -> ${filtered_clients}" >&2
         else
-            log_debug "YouTube cookies: drop clients ${raw_clients} -> ${filtered_clients}"
+            log_debug "YouTube cookies: drop clients ${raw_clients} -> ${filtered_clients}" >&2
         fi
     fi
     printf "%s" "$filtered_clients"
@@ -640,6 +640,7 @@ retry_command() {
     fi
 
     while true; do
+        reset_yt_dlp_status_flags
         if [ "$debug_mode" = true ] && [ "$quiet_mode" != true ]; then
             log_step "${description} (attempt ${attempt})"
             log_io "$(format_command "$@")"
@@ -656,6 +657,13 @@ retry_command() {
         local exit_code=$?
         log_warn "${description} failed on attempt ${attempt} (exit code ${exit_code})."
 
+        if [ "${yt_dlp_last_non_retriable_error}" = true ]; then
+            local non_retriable_reason="${yt_dlp_last_non_retriable_reason:-extractor}"
+            log_warn "${description} hit non-retriable yt-dlp error(s): ${non_retriable_reason}; skipping remaining identical retries."
+            log_error "${description} failed after ${attempt} attempt(s) due to non-retriable yt-dlp error(s): ${non_retriable_reason} (last exit code ${exit_code})."
+            return "$exit_code"
+        fi
+
         if (( attempt >= retry_attempt_limit )); then
             log_error "${description} failed after ${retry_attempt_limit} attempts (last exit code ${exit_code})."
             return "$exit_code"
@@ -670,6 +678,87 @@ retry_command() {
 yt_dlp_last_format_error=false
 yt_dlp_last_player_error=false
 yt_dlp_last_ssl_error=false
+yt_dlp_last_auth_error=false
+yt_dlp_last_non_retriable_error=false
+yt_dlp_last_non_retriable_reason=""
+
+reset_yt_dlp_status_flags() {
+    yt_dlp_last_format_error=false
+    yt_dlp_last_player_error=false
+    yt_dlp_last_ssl_error=false
+    yt_dlp_last_auth_error=false
+    yt_dlp_last_non_retriable_error=false
+    yt_dlp_last_non_retriable_reason=""
+}
+
+mark_yt_dlp_non_retriable_error() {
+    local reason="$1"
+    yt_dlp_last_non_retriable_error=true
+    if [ -z "$yt_dlp_last_non_retriable_reason" ]; then
+        yt_dlp_last_non_retriable_reason="$reason"
+        return 0
+    fi
+    case ",${yt_dlp_last_non_retriable_reason}," in
+        *",${reason},"*)
+            return 0
+            ;;
+    esac
+    yt_dlp_last_non_retriable_reason="${yt_dlp_last_non_retriable_reason},${reason}"
+}
+
+yt_dlp_has_detected_errors() {
+    [ "$yt_dlp_last_format_error" = true ] || \
+    [ "$yt_dlp_last_player_error" = true ] || \
+    [ "$yt_dlp_last_ssl_error" = true ] || \
+    [ "$yt_dlp_last_auth_error" = true ]
+}
+
+describe_yt_dlp_detected_errors() {
+    local -a reasons=()
+
+    if [ "$yt_dlp_last_non_retriable_error" = true ] && [ -n "$yt_dlp_last_non_retriable_reason" ]; then
+        IFS=',' read -r -a reasons <<< "$yt_dlp_last_non_retriable_reason"
+    else
+        if [ "$yt_dlp_last_format_error" = true ]; then
+            reasons+=("format")
+        fi
+        if [ "$yt_dlp_last_player_error" = true ]; then
+            reasons+=("player")
+        fi
+        if [ "$yt_dlp_last_auth_error" = true ]; then
+            reasons+=("auth")
+        fi
+    fi
+
+    if [ "$yt_dlp_last_ssl_error" = true ]; then
+        reasons+=("ssl")
+    fi
+
+    if [ ${#reasons[@]} -eq 0 ]; then
+        printf "%s" "extractor"
+        return 0
+    fi
+
+    printf "%s" "$(IFS=','; printf "%s" "${reasons[*]}")"
+}
+
+finalize_yt_dlp_capture_status() {
+    local description="$1"
+    local current_status="$2"
+
+    if [ "$current_status" -ne 0 ]; then
+        return "$current_status"
+    fi
+
+    if ! yt_dlp_has_detected_errors; then
+        return 0
+    fi
+
+    local detected_errors
+    detected_errors=$(describe_yt_dlp_detected_errors)
+    log_error "${description} still reported yt-dlp errors after fallback: ${detected_errors}."
+    return 1
+}
 
 yt_dlp_output_has_format_error() {
     local log_file="$1"
@@ -681,6 +770,12 @@ yt_dlp_output_has_player_error() {
     local log_file="$1"
     log_io "read yt-dlp log file ${log_file}"
     grep -Eqi "Video player configuration error|Error 153" "$log_file"
+}
+
+yt_dlp_output_has_auth_error() {
+    local log_file="$1"
+    log_io "read yt-dlp log file ${log_file}"
+    grep -Eqi "Sign in to confirm (you.?re|you’re) not a bot|Use --cookies-from-browser or --cookies for the authentication|This helps protect our community|Please sign in" "$log_file"
 }
 
 yt_dlp_output_has_ssl_error() {
@@ -695,18 +790,14 @@ run_yt_dlp_with_log_internal() {
     local log_file
     if [ "$dry_run" = true ]; then
         log_info "Dry-run: $(format_command "$@")"
-        yt_dlp_last_format_error=false
-        yt_dlp_last_player_error=false
-        yt_dlp_last_ssl_error=false
+        reset_yt_dlp_status_flags
         return 0
     fi
 
     log_io "create temp yt-dlp log file"
     if ! log_file=$(mktemp -t yt_dlp_log.XXXXXX); then
         log_warn "Unable to create temp log file; running yt-dlp without format detection."
-        yt_dlp_last_format_error=false
-        yt_dlp_last_player_error=false
-        yt_dlp_last_ssl_error=false
+        reset_yt_dlp_status_flags
         if [ "$debug_mode" = true ] && [ "$quiet_mode" != true ]; then
             log_io "$(format_command "$@")"
         fi
@@ -720,11 +811,10 @@ run_yt_dlp_with_log_internal() {
     "$@" 2>&1 | tee "$log_file"
     local exit_code=${PIPESTATUS[0]}
 
-    yt_dlp_last_format_error=false
-    yt_dlp_last_player_error=false
-    yt_dlp_last_ssl_error=false
+    reset_yt_dlp_status_flags
     if yt_dlp_output_has_format_error "$log_file"; then
         yt_dlp_last_format_error=true
+        mark_yt_dlp_non_retriable_error "format"
         if [ "$fail_on_detected_error" = true ]; then
             exit_code=1
         fi
@@ -732,6 +822,15 @@ run_yt_dlp_with_log_internal() {
 
     if yt_dlp_output_has_player_error "$log_file"; then
         yt_dlp_last_player_error=true
+        mark_yt_dlp_non_retriable_error "player"
+        if [ "$fail_on_detected_error" = true ]; then
+            exit_code=1
+        fi
+    fi
+
+    if yt_dlp_output_has_auth_error "$log_file"; then
+        yt_dlp_last_auth_error=true
+        mark_yt_dlp_non_retriable_error "auth"
         if [ "$fail_on_detected_error" = true ]; then
             exit_code=1
         fi
@@ -1154,14 +1253,22 @@ download_video_with_fallback() {
         primary_exit_code=$?
     fi
     if [ "$platform" = "youtube" ] && [ -n "$fallback_player_client" ]; then
-        if [ "$yt_dlp_last_player_error" = true ]; then
+        if [ "$yt_dlp_last_player_error" = true ] || [ "$yt_dlp_last_auth_error" = true ]; then
             local cookie_fallback_label="${youtube_cookie_fallback_client:-default}"
-            log_warn "Primary download failed due to YouTube player configuration; retrying with '${cookie_fallback_label}'."
+            if [ "$yt_dlp_last_auth_error" = true ]; then
+                log_warn "Primary download hit a YouTube auth challenge; retrying with '${cookie_fallback_label}'."
+            else
+                log_warn "Primary download failed due to YouTube player configuration; retrying with '${cookie_fallback_label}'."
+            fi
             log_step "Fallback download with cookies using ${cookie_fallback_label}"
             if run_video_yt_dlp "$url" "$archive_file" "$output_dir" "$cookie_mode" "$youtube_cookie_fallback_client"; then
                 return 0
             fi
-            log_warn "Fallback client '${cookie_fallback_label}' failed with cookies; retrying without cookies."
+            if [ "$yt_dlp_last_auth_error" = true ]; then
+                log_warn "Fallback client '${cookie_fallback_label}' still hit a YouTube auth challenge; retrying without cookies."
+            else
+                log_warn "Fallback client '${cookie_fallback_label}' failed with cookies; retrying without cookies."
+            fi
             log_step "Fallback download without cookies using ${fallback_player_client}"
             run_video_yt_dlp "$url" "$archive_file" "$output_dir" none "$fallback_player_client"
             return $?
@@ -1208,14 +1315,22 @@ download_video_metadata_with_fallback() {
         primary_exit_code=$?
     fi
 
-    if [ "$platform" = "youtube" ] && [ -n "$fallback_player_client" ] && [ "$yt_dlp_last_player_error" = true ]; then
+    if [ "$platform" = "youtube" ] && [ -n "$fallback_player_client" ] && { [ "$yt_dlp_last_player_error" = true ] || [ "$yt_dlp_last_auth_error" = true ]; }; then
         local cookie_fallback_label="${youtube_cookie_fallback_client:-default}"
-        log_warn "Metadata export failed due to YouTube player configuration; retrying with '${cookie_fallback_label}'."
+        if [ "$yt_dlp_last_auth_error" = true ]; then
+            log_warn "Metadata export hit a YouTube auth challenge; retrying with '${cookie_fallback_label}'."
+        else
+            log_warn "Metadata export failed due to YouTube player configuration; retrying with '${cookie_fallback_label}'."
+        fi
         log_step "Fallback metadata export with cookies using ${cookie_fallback_label}"
         if run_video_metadata_yt_dlp "$url" "$archive_file" "$output_dir" "$cookie_mode" "$youtube_cookie_fallback_client"; then
             return 0
         fi
-        log_warn "Fallback client '${cookie_fallback_label}' failed with cookies; retrying metadata export without cookies."
+        if [ "$yt_dlp_last_auth_error" = true ]; then
+            log_warn "Fallback client '${cookie_fallback_label}' still hit a YouTube auth challenge; retrying metadata export without cookies."
+        else
+            log_warn "Fallback client '${cookie_fallback_label}' failed with cookies; retrying metadata export without cookies."
+        fi
         log_step "Fallback metadata export without cookies using ${fallback_player_client}"
         run_video_metadata_yt_dlp "$url" "$archive_file" "$output_dir" none "$fallback_player_client"
         return $?
@@ -1661,7 +1776,8 @@ if [ -n "$CHANNEL_URL" ]; then
     channel_output_template="$OUTPUT_DIR/%(playlist)s/%(n_entries+1-playlist_index)d.%(title)s.%(ext)s"
     channel_cookie_opts=()
     channel_extractor_opts=()
-    channel_fallback_extractor_opts=()
+    channel_cookie_fallback_extractor_opts=()
+    channel_nocookie_fallback_extractor_opts=()
     channel_cookie_mode=$(resolve_cookie_mode_for_platform "$channel_platform")
     case "$channel_cookie_mode" in
         browser)
@@ -1674,7 +1790,8 @@ if [ -n "$CHANNEL_URL" ]; then
     if [ "$channel_platform" = "youtube" ]; then
         channel_extractor_opts=(--extractor-args youtubetab:skip=authcheck "${youtube_extractor_args[@]}")
         if [ -n "$fallback_player_client" ]; then
-            channel_fallback_extractor_opts=(--extractor-args youtubetab:skip=authcheck "${youtube_fallback_extractor_args[@]}")
+            channel_cookie_fallback_extractor_opts=(--extractor-args youtubetab:skip=authcheck "${youtube_fallback_extractor_args[@]}")
+            channel_nocookie_fallback_extractor_opts=(--extractor-args youtubetab:skip=authcheck --extractor-args "youtube:player_client=${fallback_player_client}")
         fi
     else
         channel_output_template="$OUTPUT_DIR/%(playlist,channel_id,channel,creator,uploader)s/%(title)s.%(ext)s"
@@ -1805,6 +1922,7 @@ if [ -n "$CHANNEL_URL" ]; then
     channel_primary_player_error=$yt_dlp_last_player_error
     channel_primary_format_error=$yt_dlp_last_format_error
     channel_primary_ssl_error=$yt_dlp_last_ssl_error
+    channel_primary_auth_error=$yt_dlp_last_auth_error
 
     if [ "$channel_platform" = "bitchute" ] && [ "$allow_insecure_ssl" = true ] && [ "$channel_primary_ssl_error" = true ]; then
         log_warn "SSL errors detected; retrying BitChute channel with insecure TLS."
@@ -1823,13 +1941,17 @@ if [ -n "$CHANNEL_URL" ]; then
         fi
     elif [ "$channel_platform" = "youtube" ] && [ -n "$fallback_player_client" ]; then
         channel_cookie_fallback_label="${youtube_cookie_fallback_client:-default}"
-        if [ "$channel_primary_player_error" = true ]; then
-            log_warn "YouTube player errors detected; retrying failed items with '${channel_cookie_fallback_label}'."
+        if [ "$channel_primary_player_error" = true ] || [ "$channel_primary_auth_error" = true ]; then
+            if [ "$channel_primary_auth_error" = true ]; then
+                log_warn "YouTube auth challenges detected; retrying failed items with '${channel_cookie_fallback_label}'."
+            else
+                log_warn "YouTube player errors detected; retrying failed items with '${channel_cookie_fallback_label}'."
+            fi
             log_step "Channel fallback download with cookies using ${channel_cookie_fallback_label}"
             retry_command "Channel fallback download: ${CHANNEL_URL}" run_yt_dlp_with_log_capture yt-dlp \
                 "${channel_base_args[@]}" \
                 "${channel_cookie_opts[@]}" \
-                "${channel_fallback_extractor_opts[@]}" \
+                "${channel_cookie_fallback_extractor_opts[@]}" \
                 "${channel_referer_opts[@]}" \
                 "${channel_tail_args[@]}" \
                 "$CHANNEL_URL"
@@ -1837,12 +1959,16 @@ if [ -n "$CHANNEL_URL" ]; then
             if [ "$fallback_status" -ne 0 ]; then
                 channel_status=$fallback_status
             fi
-            if [ "$yt_dlp_last_player_error" = true ]; then
-                log_warn "Fallback client '${channel_cookie_fallback_label}' still hit player errors; retrying without cookies."
+            if [ "$yt_dlp_last_player_error" = true ] || [ "$yt_dlp_last_auth_error" = true ]; then
+                if [ "$yt_dlp_last_auth_error" = true ]; then
+                    log_warn "Fallback client '${channel_cookie_fallback_label}' still hit YouTube auth challenges; retrying without cookies."
+                else
+                    log_warn "Fallback client '${channel_cookie_fallback_label}' still hit player errors; retrying without cookies."
+                fi
                 log_step "Channel fallback download without cookies using ${fallback_player_client}"
                 retry_command "Channel fallback download without cookies: ${CHANNEL_URL}" run_yt_dlp_with_log_capture yt-dlp \
                     "${channel_base_args[@]}" \
-                    "${channel_fallback_extractor_opts[@]}" \
+                    "${channel_nocookie_fallback_extractor_opts[@]}" \
                     "${channel_referer_opts[@]}" \
                     "${channel_tail_args[@]}" \
                     "$CHANNEL_URL"
@@ -1856,7 +1982,7 @@ if [ -n "$CHANNEL_URL" ]; then
             log_step "Channel fallback download without cookies using ${fallback_player_client}"
             retry_command "Channel fallback download without cookies: ${CHANNEL_URL}" run_yt_dlp_with_log_capture yt-dlp \
                 "${channel_base_args[@]}" \
-                "${channel_fallback_extractor_opts[@]}" \
+                "${channel_nocookie_fallback_extractor_opts[@]}" \
                 "${channel_referer_opts[@]}" \
                 "${channel_tail_args[@]}" \
                 "$CHANNEL_URL"
@@ -1865,6 +1991,12 @@ if [ -n "$CHANNEL_URL" ]; then
                 channel_status=$fallback_status
             fi
         fi
+    fi
+
+    finalize_yt_dlp_capture_status "Channel download: ${CHANNEL_URL}" "$channel_status"
+    finalized_channel_status=$?
+    if [ "$finalized_channel_status" -ne 0 ]; then
+        channel_status=$finalized_channel_status
     fi
 
     if [ "$channel_status" -eq 0 ] && should_export_danmaku_for_platform "$channel_platform"; then
@@ -1894,6 +2026,7 @@ if [ -n "$CHANNEL_URL" ]; then
         channel_metadata_status=$?
         channel_metadata_player_error=$yt_dlp_last_player_error
         channel_metadata_ssl_error=$yt_dlp_last_ssl_error
+        channel_metadata_auth_error=$yt_dlp_last_auth_error
 
         if [ "$channel_platform" = "bitchute" ] && [ "$allow_insecure_ssl" = true ] && [ "$channel_metadata_ssl_error" = true ]; then
             log_warn "SSL errors detected; retrying BitChute channel metadata export with insecure TLS."
@@ -1910,14 +2043,18 @@ if [ -n "$CHANNEL_URL" ]; then
             if [ "$fallback_status" -ne 0 ]; then
                 channel_metadata_status=$fallback_status
             fi
-        elif [ "$channel_platform" = "youtube" ] && [ -n "$fallback_player_client" ] && [ "$channel_metadata_player_error" = true ]; then
+        elif [ "$channel_platform" = "youtube" ] && [ -n "$fallback_player_client" ] && { [ "$channel_metadata_player_error" = true ] || [ "$channel_metadata_auth_error" = true ]; }; then
             channel_cookie_fallback_label="${youtube_cookie_fallback_client:-default}"
-            log_warn "YouTube player errors detected during metadata export; retrying failed items with '${channel_cookie_fallback_label}'."
+            if [ "$channel_metadata_auth_error" = true ]; then
+                log_warn "YouTube auth challenges detected during metadata export; retrying failed items with '${channel_cookie_fallback_label}'."
+            else
+                log_warn "YouTube player errors detected during metadata export; retrying failed items with '${channel_cookie_fallback_label}'."
+            fi
             log_step "Channel metadata fallback with cookies using ${channel_cookie_fallback_label}"
             retry_command "Channel metadata fallback: ${CHANNEL_URL}" run_yt_dlp_with_log_capture yt-dlp \
                 "${channel_metadata_base_args[@]}" \
                 "${channel_cookie_opts[@]}" \
-                "${channel_fallback_extractor_opts[@]}" \
+                "${channel_cookie_fallback_extractor_opts[@]}" \
                 "${channel_referer_opts[@]}" \
                 "${channel_tail_args[@]}" \
                 "$CHANNEL_URL"
@@ -1925,12 +2062,16 @@ if [ -n "$CHANNEL_URL" ]; then
             if [ "$fallback_status" -ne 0 ]; then
                 channel_metadata_status=$fallback_status
             fi
-            if [ "$yt_dlp_last_player_error" = true ]; then
-                log_warn "Fallback client '${channel_cookie_fallback_label}' still hit player errors; retrying metadata export without cookies."
+            if [ "$yt_dlp_last_player_error" = true ] || [ "$yt_dlp_last_auth_error" = true ]; then
+                if [ "$yt_dlp_last_auth_error" = true ]; then
+                    log_warn "Fallback client '${channel_cookie_fallback_label}' still hit YouTube auth challenges; retrying metadata export without cookies."
+                else
+                    log_warn "Fallback client '${channel_cookie_fallback_label}' still hit player errors; retrying metadata export without cookies."
+                fi
                 log_step "Channel metadata fallback without cookies using ${fallback_player_client}"
                 retry_command "Channel metadata fallback without cookies: ${CHANNEL_URL}" run_yt_dlp_with_log_capture yt-dlp \
                     "${channel_metadata_base_args[@]}" \
-                    "${channel_fallback_extractor_opts[@]}" \
+                    "${channel_nocookie_fallback_extractor_opts[@]}" \
                     "${channel_referer_opts[@]}" \
                     "${channel_tail_args[@]}" \
                     "$CHANNEL_URL"
@@ -1939,6 +2080,12 @@ if [ -n "$CHANNEL_URL" ]; then
                     channel_metadata_status=$fallback_status
                 fi
             fi
+        fi
+
+        finalize_yt_dlp_capture_status "Channel metadata export: ${CHANNEL_URL}" "$channel_metadata_status"
+        finalized_channel_metadata_status=$?
+        if [ "$finalized_channel_metadata_status" -ne 0 ]; then
+            channel_metadata_status=$finalized_channel_metadata_status
         fi
 
         if [ "$channel_metadata_status" -ne 0 ]; then
@@ -1974,7 +2121,8 @@ elif [ -n "$PLAYLIST_URL" ]; then
     playlist_output_template="$OUTPUT_DIR/%(playlist)s/%(playlist_index)s.%(title)s.%(ext)s"
     playlist_cookie_opts=()
     playlist_extractor_opts=()
-    playlist_fallback_extractor_opts=()
+    playlist_cookie_fallback_extractor_opts=()
+    playlist_nocookie_fallback_extractor_opts=()
     playlist_cookie_mode=$(resolve_cookie_mode_for_platform "$playlist_platform")
     case "$playlist_cookie_mode" in
         browser)
@@ -1987,7 +2135,8 @@ elif [ -n "$PLAYLIST_URL" ]; then
     if [ "$playlist_platform" = "youtube" ]; then
         playlist_extractor_opts=("${youtube_extractor_args[@]}")
         if [ -n "$fallback_player_client" ]; then
-            playlist_fallback_extractor_opts=("${youtube_fallback_extractor_args[@]}")
+            playlist_cookie_fallback_extractor_opts=("${youtube_fallback_extractor_args[@]}")
+            playlist_nocookie_fallback_extractor_opts=(--extractor-args "youtube:player_client=${fallback_player_client}")
         fi
     else
         playlist_output_template="$OUTPUT_DIR/%(title)s.%(ext)s"
@@ -2117,6 +2266,7 @@ elif [ -n "$PLAYLIST_URL" ]; then
     playlist_primary_player_error=$yt_dlp_last_player_error
     playlist_primary_format_error=$yt_dlp_last_format_error
     playlist_primary_ssl_error=$yt_dlp_last_ssl_error
+    playlist_primary_auth_error=$yt_dlp_last_auth_error
 
     if [ "$playlist_platform" = "bitchute" ] && [ "$allow_insecure_ssl" = true ] && [ "$playlist_primary_ssl_error" = true ]; then
         log_warn "SSL errors detected; retrying BitChute playlist with insecure TLS."
@@ -2134,25 +2284,33 @@ elif [ -n "$PLAYLIST_URL" ]; then
         fi
     elif [ "$playlist_platform" = "youtube" ] && [ -n "$fallback_player_client" ]; then
         playlist_cookie_fallback_label="${youtube_cookie_fallback_client:-default}"
-        if [ "$playlist_primary_player_error" = true ]; then
-            log_warn "YouTube player errors detected; retrying failed items with '${playlist_cookie_fallback_label}'."
+        if [ "$playlist_primary_player_error" = true ] || [ "$playlist_primary_auth_error" = true ]; then
+            if [ "$playlist_primary_auth_error" = true ]; then
+                log_warn "YouTube auth challenges detected; retrying failed items with '${playlist_cookie_fallback_label}'."
+            else
+                log_warn "YouTube player errors detected; retrying failed items with '${playlist_cookie_fallback_label}'."
+            fi
             log_step "Playlist fallback download with cookies using ${playlist_cookie_fallback_label}"
             retry_command "Playlist fallback download: ${PLAYLIST_URL}" run_yt_dlp_with_log_capture yt-dlp \
                 "${playlist_base_args[@]}" \
                 "${playlist_cookie_opts[@]}" \
-                "${playlist_fallback_extractor_opts[@]}" \
+                "${playlist_cookie_fallback_extractor_opts[@]}" \
                 "${playlist_tail_args[@]}" \
                 "$PLAYLIST_URL"
             fallback_status=$?
             if [ "$fallback_status" -ne 0 ]; then
                 playlist_status=$fallback_status
             fi
-            if [ "$yt_dlp_last_player_error" = true ]; then
-                log_warn "Fallback client '${playlist_cookie_fallback_label}' still hit player errors; retrying without cookies."
+            if [ "$yt_dlp_last_player_error" = true ] || [ "$yt_dlp_last_auth_error" = true ]; then
+                if [ "$yt_dlp_last_auth_error" = true ]; then
+                    log_warn "Fallback client '${playlist_cookie_fallback_label}' still hit YouTube auth challenges; retrying without cookies."
+                else
+                    log_warn "Fallback client '${playlist_cookie_fallback_label}' still hit player errors; retrying without cookies."
+                fi
                 log_step "Playlist fallback download without cookies using ${fallback_player_client}"
                 retry_command "Playlist fallback download without cookies: ${PLAYLIST_URL}" run_yt_dlp_with_log_capture yt-dlp \
                     "${playlist_base_args[@]}" \
-                    "${playlist_fallback_extractor_opts[@]}" \
+                    "${playlist_nocookie_fallback_extractor_opts[@]}" \
                     "${playlist_tail_args[@]}" \
                     "$PLAYLIST_URL"
                 fallback_status=$?
@@ -2165,7 +2323,7 @@ elif [ -n "$PLAYLIST_URL" ]; then
             log_step "Playlist fallback download without cookies using ${fallback_player_client}"
             retry_command "Playlist fallback download without cookies: ${PLAYLIST_URL}" run_yt_dlp_with_log_capture yt-dlp \
                 "${playlist_base_args[@]}" \
-                "${playlist_fallback_extractor_opts[@]}" \
+                "${playlist_nocookie_fallback_extractor_opts[@]}" \
                 "${playlist_tail_args[@]}" \
                 "$PLAYLIST_URL"
             fallback_status=$?
@@ -2173,6 +2331,12 @@ elif [ -n "$PLAYLIST_URL" ]; then
                 playlist_status=$fallback_status
             fi
         fi
+    fi
+
+    finalize_yt_dlp_capture_status "Playlist download: ${PLAYLIST_URL}" "$playlist_status"
+    finalized_playlist_status=$?
+    if [ "$finalized_playlist_status" -ne 0 ]; then
+        playlist_status=$finalized_playlist_status
     fi
 
     if [ "$playlist_status" -eq 0 ] && should_export_danmaku_for_platform "$playlist_platform"; then
@@ -2200,6 +2364,7 @@ elif [ -n "$PLAYLIST_URL" ]; then
         playlist_metadata_status=$?
         playlist_metadata_player_error=$yt_dlp_last_player_error
         playlist_metadata_ssl_error=$yt_dlp_last_ssl_error
+        playlist_metadata_auth_error=$yt_dlp_last_auth_error
 
         if [ "$playlist_platform" = "bitchute" ] && [ "$allow_insecure_ssl" = true ] && [ "$playlist_metadata_ssl_error" = true ]; then
             log_warn "SSL errors detected; retrying BitChute playlist metadata export with insecure TLS."
@@ -2215,26 +2380,34 @@ elif [ -n "$PLAYLIST_URL" ]; then
             if [ "$fallback_status" -ne 0 ]; then
                 playlist_metadata_status=$fallback_status
             fi
-        elif [ "$playlist_platform" = "youtube" ] && [ -n "$fallback_player_client" ] && [ "$playlist_metadata_player_error" = true ]; then
+        elif [ "$playlist_platform" = "youtube" ] && [ -n "$fallback_player_client" ] && { [ "$playlist_metadata_player_error" = true ] || [ "$playlist_metadata_auth_error" = true ]; }; then
             playlist_cookie_fallback_label="${youtube_cookie_fallback_client:-default}"
-            log_warn "YouTube player errors detected during metadata export; retrying failed items with '${playlist_cookie_fallback_label}'."
+            if [ "$playlist_metadata_auth_error" = true ]; then
+                log_warn "YouTube auth challenges detected during metadata export; retrying failed items with '${playlist_cookie_fallback_label}'."
+            else
+                log_warn "YouTube player errors detected during metadata export; retrying failed items with '${playlist_cookie_fallback_label}'."
+            fi
             log_step "Playlist metadata fallback with cookies using ${playlist_cookie_fallback_label}"
             retry_command "Playlist metadata fallback: ${PLAYLIST_URL}" run_yt_dlp_with_log_capture yt-dlp \
                 "${playlist_metadata_base_args[@]}" \
                 "${playlist_cookie_opts[@]}" \
-                "${playlist_fallback_extractor_opts[@]}" \
+                "${playlist_cookie_fallback_extractor_opts[@]}" \
                 "${playlist_tail_args[@]}" \
                 "$PLAYLIST_URL"
             fallback_status=$?
             if [ "$fallback_status" -ne 0 ]; then
                 playlist_metadata_status=$fallback_status
             fi
-            if [ "$yt_dlp_last_player_error" = true ]; then
-                log_warn "Fallback client '${playlist_cookie_fallback_label}' still hit player errors; retrying metadata export without cookies."
+            if [ "$yt_dlp_last_player_error" = true ] || [ "$yt_dlp_last_auth_error" = true ]; then
+                if [ "$yt_dlp_last_auth_error" = true ]; then
+                    log_warn "Fallback client '${playlist_cookie_fallback_label}' still hit YouTube auth challenges; retrying metadata export without cookies."
+                else
+                    log_warn "Fallback client '${playlist_cookie_fallback_label}' still hit player errors; retrying metadata export without cookies."
+                fi
                 log_step "Playlist metadata fallback without cookies using ${fallback_player_client}"
                 retry_command "Playlist metadata fallback without cookies: ${PLAYLIST_URL}" run_yt_dlp_with_log_capture yt-dlp \
                     "${playlist_metadata_base_args[@]}" \
-                    "${playlist_fallback_extractor_opts[@]}" \
+                    "${playlist_nocookie_fallback_extractor_opts[@]}" \
                     "${playlist_tail_args[@]}" \
                     "$PLAYLIST_URL"
                 fallback_status=$?
@@ -2242,6 +2415,12 @@ elif [ -n "$PLAYLIST_URL" ]; then
                     playlist_metadata_status=$fallback_status
                 fi
             fi
+        fi
+
+        finalize_yt_dlp_capture_status "Playlist metadata export: ${PLAYLIST_URL}" "$playlist_metadata_status"
+        finalized_playlist_metadata_status=$?
+        if [ "$finalized_playlist_metadata_status" -ne 0 ]; then
+            playlist_metadata_status=$finalized_playlist_metadata_status
         fi
 
         if [ "$playlist_metadata_status" -ne 0 ]; then
