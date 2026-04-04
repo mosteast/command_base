@@ -1011,6 +1011,7 @@ function expand_input_pattern(raw_input) {
     cwd: process.cwd(),
     dot: false,
     nodir: false,
+    nocase: true,
   }).sort((left, right) => left.localeCompare(right));
 }
 

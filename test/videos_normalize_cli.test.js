@@ -72,12 +72,13 @@ describe("videos_normalize cli", () => {
     });
   });
 
-  it("expands quoted glob patterns during dry-run", async () => {
+  it("expands quoted glob patterns case-insensitively during dry-run", async () => {
     const directory = await create_temp_directory();
     const input_directory = path.join(directory, "folder with spaces");
     await fs.mkdir(input_directory, { recursive: true });
     await fs.writeFile(path.join(input_directory, "alpha clip.mp4"), "");
     await fs.writeFile(path.join(input_directory, "beta clip.mp4"), "");
+    await fs.writeFile(path.join(input_directory, "gamma clip.MP4"), "");
 
     const result = await run_cli([
       "--dry-run",
@@ -88,6 +89,7 @@ describe("videos_normalize cli", () => {
     expect(result.stdout).toContain("Would extract audio");
     expect(result.stdout).toContain("alpha clip.mp4");
     expect(result.stdout).toContain("beta clip.mp4");
+    expect(result.stdout).toContain("gamma clip.MP4");
   });
 
   it("regenerates the full transcript set when only part of it exists", async () => {
