@@ -27,7 +27,8 @@ refresh=false
 debug_mode=false
 quiet_mode=false
 dry_run=false
-script_version="1.0.2"
+script_version="1.0.3"
+minimum_gallery_dl_version="1.31.10"
 
 # Color codes for output readability
 color_reset=$'\033[0m'
@@ -127,6 +128,92 @@ hash_string() {
     printf "%s" "archive"
 }
 
+extract_semver() {
+    local version_text="$1"
+
+    if [[ "$version_text" =~ ([0-9]+)\.([0-9]+)\.([0-9]+) ]]; then
+        printf "%s.%s.%s" "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}"
+        return 0
+    fi
+
+    if [[ "$version_text" =~ ([0-9]+)\.([0-9]+) ]]; then
+        printf "%s.%s.0" "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+        return 0
+    fi
+
+    if [[ "$version_text" =~ ([0-9]+) ]]; then
+        printf "%s.0.0" "${BASH_REMATCH[1]}"
+        return 0
+    fi
+
+    return 1
+}
+
+version_is_less_than() {
+    local left_version="$1"
+    local right_version="$2"
+    local left_normalized=""
+    local right_normalized=""
+
+    left_normalized=$(extract_semver "$left_version") || return 1
+    right_normalized=$(extract_semver "$right_version") || return 1
+
+    local left_major left_minor left_patch
+    local right_major right_minor right_patch
+    IFS=. read -r left_major left_minor left_patch <<< "$left_normalized"
+    IFS=. read -r right_major right_minor right_patch <<< "$right_normalized"
+
+    if [ "$left_major" -lt "$right_major" ]; then
+        return 0
+    fi
+    if [ "$left_major" -gt "$right_major" ]; then
+        return 1
+    fi
+
+    if [ "$left_minor" -lt "$right_minor" ]; then
+        return 0
+    fi
+    if [ "$left_minor" -gt "$right_minor" ]; then
+        return 1
+    fi
+
+    if [ "$left_patch" -lt "$right_patch" ]; then
+        return 0
+    fi
+
+    return 1
+}
+
+ensure_supported_gallery_dl_version() {
+    local raw_version=""
+    local detected_version=""
+
+    log_io "gallery-dl --version"
+    raw_version=$(gallery-dl --version 2>/dev/null | head -n 1)
+    if [ -z "$raw_version" ]; then
+        log_warn "Unable to determine gallery-dl version; continuing without version guard."
+        return 0
+    fi
+
+    if ! detected_version=$(extract_semver "$raw_version"); then
+        log_warn "Unable to parse gallery-dl version from '${raw_version}'; continuing without version guard."
+        return 0
+    fi
+
+    log_debug "Detected gallery-dl version ${detected_version}."
+
+    if version_is_less_than "$detected_version" "$minimum_gallery_dl_version"; then
+        log_error "gallery-dl ${minimum_gallery_dl_version} or newer is required for current X downloads. Detected ${detected_version}."
+        log_error "Older gallery-dl releases fail on X with 'ondemand.s.a.js' 404 errors."
+        if command -v brew >/dev/null 2>&1; then
+            log_info "Upgrade gallery-dl and retry: brew upgrade gallery-dl"
+        else
+            log_info "Upgrade gallery-dl via your package manager and retry."
+        fi
+        exit 1
+    fi
+}
+
 ensure_directory() {
     local dir_path="$1"
     if [ "$dry_run" = true ]; then
@@ -221,6 +308,7 @@ ${color_blue}Usage:${color_reset}
 
 ${color_blue}Description:${color_reset}
   Download galleries with gallery-dl using opinionated defaults and readable logs.
+  Requires gallery-dl ${minimum_gallery_dl_version}+ for current X extractor compatibility.
   Defaults:
     - Output base directory: ${default_output_dir}
     - Cookies file: ${default_cookies_file} (if present)
@@ -504,6 +592,7 @@ if ! command -v gallery-dl >/dev/null 2>&1; then
     log_error "gallery-dl not found in PATH."
     exit 1
 fi
+ensure_supported_gallery_dl_version
 
 skip_default_output_dir=false
 for opt in "${extra_opts[@]}"; do

@@ -131,6 +131,21 @@ async function write_platform_filtered_command_config_file(temp_root) {
   return config_path;
 }
 
+async function write_duplicate_source_config_file(temp_root) {
+  const config_path = path.join(temp_root, "gather.duplicate_source.yaml");
+  const config_text = [
+    "source:",
+    "  youtube:",
+    "    - name: Example YouTube channel",
+    "      handle: https://www.youtube.com/@example",
+    "    - name: Duplicate YouTube channel",
+    '      handle: "@example"',
+    "",
+  ].join("\n");
+  await fs.writeFile(config_path, config_text, "utf8");
+  return config_path;
+}
+
 function extract_total_jobs(stdout_text) {
   const lines = String(stdout_text || "")
     .split(/\r?\n/)
@@ -250,6 +265,32 @@ describe("gather CLI platform selection", () => {
         "f2 dy -M post -u https://www.douyin.com/user/EXAMPLE_ID",
       );
       expect(result.stdout).not.toContain("https://www.youtube.com/@example");
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
+  });
+
+  it("deduplicates urls per source type while loading config", async () => {
+    const temp_root = await create_temp_dir();
+    const state_file = path.join(temp_root, "gather.state.json");
+
+    try {
+      const config_path = await write_duplicate_source_config_file(temp_root);
+      const result = await run_cli([
+        "--dry-run",
+        "--state-file",
+        state_file,
+        config_path,
+      ]);
+
+      expect(result.exit_code).toBe(0);
+      expect(extract_total_jobs(result.stdout)).toBe(1);
+      expect(result.stdout).not.toContain(
+        "Skipped 1 duplicate handle entries.",
+      );
+      expect(result.stderr).toContain(
+        "Skipping duplicate youtube url in config",
+      );
     } finally {
       await fs.rm(temp_root, { recursive: true, force: true });
     }

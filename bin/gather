@@ -1033,6 +1033,20 @@ function normalize_source_map(raw_config, logger, source_label, options = {}) {
     normalized[normalized_platform].push(...items);
   }
 
+  for (const [platform_key, items] of Object.entries(normalized)) {
+    const deduplicated_items = deduplicate_source_items_by_url(
+      items,
+      logger,
+      source_label,
+      platform_key,
+    );
+    if (deduplicated_items.length === 0) {
+      delete normalized[platform_key];
+      continue;
+    }
+    normalized[platform_key] = deduplicated_items;
+  }
+
   return normalized;
 }
 
@@ -1079,6 +1093,51 @@ function normalize_source_items(raw_value, logger, source_label, platform_key) {
   }
 
   return items;
+}
+
+function deduplicate_source_items_by_url(
+  items,
+  logger,
+  source_label,
+  platform_key,
+) {
+  const deduplicated_items = [];
+  const seen_urls = new Set();
+
+  for (const item of items) {
+    const trimmed_name = String(item.name || "").trim();
+    const trimmed_handle = String(item.handle || "").trim();
+    if (!trimmed_handle) continue;
+
+    const resolved_url = normalize_handle_to_url(trimmed_handle, platform_key);
+    if (!resolved_url) {
+      deduplicated_items.push({
+        name: trimmed_name,
+        handle: trimmed_handle,
+      });
+      continue;
+    }
+
+    if (seen_urls.has(resolved_url)) {
+      const name_suffix = trimmed_name ? ` (${trimmed_name})` : "";
+      const display_handle = format_handle_for_log(
+        trimmed_handle,
+        resolved_url,
+      );
+      logger.warn(
+        `Skipping duplicate ${platform_key} url in config ${source_label}: ${display_handle}${name_suffix}`,
+      );
+      continue;
+    }
+
+    seen_urls.add(resolved_url);
+    deduplicated_items.push({
+      name: trimmed_name,
+      handle: trimmed_handle,
+    });
+  }
+
+  return deduplicated_items;
 }
 
 function infer_command_platform_keys(command_text) {
