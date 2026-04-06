@@ -270,6 +270,30 @@ describe("gather CLI platform selection", () => {
     }
   });
 
+  it("uses the video f2 export directory by default", async () => {
+    const temp_root = await create_temp_dir();
+    const state_file = path.join(temp_root, "gather.state.json");
+    const default_f2_output_dir =
+      "/Users/hailang/Library/Mobile Documents/com~apple~CloudDocs/main/saved/video/f2";
+
+    try {
+      const config_path = await write_douyin_config_file(temp_root);
+      const result = await run_cli([
+        "--dry-run",
+        "--state-file",
+        state_file,
+        "--platform",
+        "douyin",
+        config_path,
+      ]);
+
+      expect(result.exit_code).toBe(0);
+      expect(result.stdout).toContain(`-p "${default_f2_output_dir}"`);
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
+  });
+
   it("deduplicates urls per source type while loading config", async () => {
     const temp_root = await create_temp_dir();
     const state_file = path.join(temp_root, "gather.state.json");
