@@ -16,7 +16,7 @@ const DEFAULT_CONFIG_PATH =
 const DEFAULT_STATE_FILE =
   "/Users/hailang/Library/Mobile Documents/com~apple~CloudDocs/main/saved/state/gather.state.json";
 const DEFAULT_F2_OUTPUT_DIR =
-  "/Users/hailang/Library/Mobile Documents/com~apple~CloudDocs/main/saved/video/f2";
+  "/Users/hailang/Library/Mobile Documents/com~apple~CloudDocs/main/saved/f2";
 const DEFAULT_CONFIG_LINES = [
   "# Gather config",
   "# Each source item requires a name and handle.",

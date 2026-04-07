@@ -270,11 +270,11 @@ describe("gather CLI platform selection", () => {
     }
   });
 
-  it("uses the video f2 export directory by default", async () => {
+  it("uses the saved f2 export directory by default", async () => {
     const temp_root = await create_temp_dir();
     const state_file = path.join(temp_root, "gather.state.json");
     const default_f2_output_dir =
-      "/Users/hailang/Library/Mobile Documents/com~apple~CloudDocs/main/saved/video/f2";
+      "/Users/hailang/Library/Mobile Documents/com~apple~CloudDocs/main/saved/f2";
 
     try {
       const config_path = await write_douyin_config_file(temp_root);
