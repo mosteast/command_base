@@ -12,6 +12,7 @@ ONLY_SUBTITLE=false
 only_danmaku=false
 OVERWRITE=false
 REFRESH=false
+channel_library_layout=false
 download_danmaku=true
 convert_danmaku_ass=true
 youtube_player_client="web,web_safari,web_embedded"
@@ -305,6 +306,9 @@ ${color_blue}Options:${color_reset}
       --only-audio        Download only audio files (default: false)
       --only-subtitle     Download only subtitle files (default: false)
       --only-danmaku      Download only danmaku XML sidecars from supported platforms (default: false)
+      --channel-library-layout
+                          Store media in a channel-level video directory and, for playlist URLs,
+                          create playlist directories populated with symlinks (default: false)
       --danmaku           Download danmaku sidecars when available (default: true)
       --no-danmaku        Disable danmaku sidecar download (default: false)
       --danmaku-ass       Convert danmaku XML sidecars to ASS after download (default: true)
@@ -339,6 +343,9 @@ ${color_blue}Examples:${color_reset}
 
   # Use a cookies.txt export for YouTube
   \$0 -l https://www.youtube.com/playlist?list=xxx --cookies ~/Downloads/youtube_cookies.txt
+
+  # Keep real files in the channel library and create a symlinked playlist directory
+  \$0 --channel-library-layout -l https://www.youtube.com/playlist?list=xxx
 
   # Use browser cookies for Bilibili regular subtitles
   \$0 -c https://space.bilibili.com/39449692 --cookies-from-browser chrome
@@ -433,6 +440,66 @@ build_main_subtitle_lang_opts() {
     if [ ${#WRITE_SUBS_OPTS[@]} -gt 0 ] && [ -n "$regular_langs" ]; then
         main_subtitle_lang_opts=(--sub-langs "$regular_langs")
     fi
+}
+
+build_default_video_output_template() {
+    local base_dir="$1"
+    printf "%s" "$base_dir/%(uploader)s - Videos/%(title)s.%(ext)s"
+}
+
+build_channel_library_video_output_template() {
+    local base_dir="$1"
+    printf "%s" "$base_dir/%(uploader,channel,creator,playlist_uploader)s - Videos/%(title)s [%(id)s].%(ext)s"
+}
+
+build_video_output_template() {
+    local base_dir="$1"
+    if [ "$channel_library_layout" = true ]; then
+        build_channel_library_video_output_template "$base_dir"
+        return 0
+    fi
+    build_default_video_output_template "$base_dir"
+}
+
+build_channel_output_template() {
+    local base_dir="$1"
+    local platform="$2"
+
+    if [ "$channel_library_layout" = true ]; then
+        build_channel_library_video_output_template "$base_dir"
+        return 0
+    fi
+
+    case "$platform" in
+        youtube)
+            printf "%s" "$base_dir/%(playlist)s/%(n_entries+1-playlist_index)d.%(title)s.%(ext)s"
+            ;;
+        *)
+            printf "%s" "$base_dir/%(playlist,channel_id,channel,creator,uploader)s/%(title)s.%(ext)s"
+            ;;
+    esac
+}
+
+build_playlist_output_template() {
+    local base_dir="$1"
+    local platform="$2"
+
+    if [ "$channel_library_layout" = true ]; then
+        build_channel_library_video_output_template "$base_dir"
+        return 0
+    fi
+
+    if [ "$platform" = "youtube" ]; then
+        printf "%s" "$base_dir/%(playlist)s/%(playlist_index)s.%(title)s.%(ext)s"
+        return 0
+    fi
+
+    printf "%s" "$base_dir/%(title)s.%(ext)s"
+}
+
+build_playlist_symlink_output_template() {
+    local base_dir="$1"
+    printf "%s" "$base_dir/%(playlist)s/%(playlist_index)s.%(title)s.%(ext)s"
 }
 
 resolve_python_binary() {
@@ -856,6 +923,77 @@ run_yt_dlp_with_log_capture() {
     run_yt_dlp_with_log_internal false "$@"
 }
 
+run_yt_dlp_stdout_to_file_with_log_internal() {
+    local fail_on_detected_error="$1"
+    shift
+    local output_file="$1"
+    shift
+    local log_file
+    if [ "$dry_run" = true ]; then
+        log_info "Dry-run: $(format_command "$@") > $(printf '%q' "$output_file")"
+        : > "$output_file"
+        reset_yt_dlp_status_flags
+        return 0
+    fi
+
+    log_io "create temp yt-dlp log file"
+    if ! log_file=$(mktemp -t yt_dlp_log.XXXXXX); then
+        log_warn "Unable to create temp log file; running yt-dlp without format detection."
+        reset_yt_dlp_status_flags
+        if [ "$debug_mode" = true ] && [ "$quiet_mode" != true ]; then
+            log_io "$(format_command "$@") > $(printf '%q' "$output_file")"
+        fi
+        "$@" >"$output_file"
+        return $?
+    fi
+
+    if [ "$debug_mode" = true ] && [ "$quiet_mode" != true ]; then
+        log_io "$(format_command "$@") > $(printf '%q' "$output_file")"
+    fi
+    "$@" >"$output_file" 2> >(tee "$log_file" >&2)
+    local exit_code=$?
+
+    reset_yt_dlp_status_flags
+    if yt_dlp_output_has_format_error "$log_file"; then
+        yt_dlp_last_format_error=true
+        mark_yt_dlp_non_retriable_error "format"
+        if [ "$fail_on_detected_error" = true ]; then
+            exit_code=1
+        fi
+    fi
+
+    if yt_dlp_output_has_player_error "$log_file"; then
+        yt_dlp_last_player_error=true
+        mark_yt_dlp_non_retriable_error "player"
+        if [ "$fail_on_detected_error" = true ]; then
+            exit_code=1
+        fi
+    fi
+
+    if yt_dlp_output_has_auth_error "$log_file"; then
+        yt_dlp_last_auth_error=true
+        mark_yt_dlp_non_retriable_error "auth"
+        if [ "$fail_on_detected_error" = true ]; then
+            exit_code=1
+        fi
+    fi
+
+    if yt_dlp_output_has_ssl_error "$log_file"; then
+        yt_dlp_last_ssl_error=true
+        if [ "$fail_on_detected_error" = true ]; then
+            exit_code=1
+        fi
+    fi
+
+    log_io "remove temp yt-dlp log file ${log_file}"
+    rm -f "$log_file"
+    return "$exit_code"
+}
+
+run_yt_dlp_stdout_to_file_with_log_capture() {
+    run_yt_dlp_stdout_to_file_with_log_internal false "$@"
+}
+
 run_video_yt_dlp() {
     local url="$1"
     local archive_file="$2"
@@ -865,12 +1003,14 @@ run_video_yt_dlp() {
     local insecure_ssl="$6"
 
     build_main_subtitle_lang_opts "$default_video_subtitle_langs"
+    local output_template
+    output_template=$(build_video_output_template "$output_dir")
 
     local -a yt_dlp_args
     yt_dlp_args=(
         "${yt_dlp_color_opts[@]}"
         "${EMBED_SUBS_OPTS[@]}"
-        -o "$output_dir/%(uploader)s - Videos/%(title)s.%(ext)s"
+        -o "$output_template"
         -N 5
         "${FORMAT_OPTS[@]}"
         "${WRITE_SUBS_OPTS[@]}"
@@ -937,10 +1077,13 @@ run_video_metadata_yt_dlp() {
     local player_client="$5"
     local insecure_ssl="$6"
 
+    local output_template
+    output_template=$(build_video_output_template "$output_dir")
+
     local -a yt_dlp_args
     yt_dlp_args=(
         "${yt_dlp_color_opts[@]}"
-        -o "$output_dir/%(uploader)s - Videos/%(title)s.%(ext)s"
+        -o "$output_template"
         -N 5
         --skip-download
         "${WRITE_META_OPTS[@]}"
@@ -1003,10 +1146,13 @@ run_video_danmaku_yt_dlp() {
     local cookie_mode="$4"
     local insecure_ssl="$5"
 
+    local output_template
+    output_template=$(build_video_output_template "$output_dir")
+
     local -a yt_dlp_args
     yt_dlp_args=(
         "${yt_dlp_color_opts[@]}"
-        -o "$output_dir/%(uploader)s - Videos/%(title)s.%(ext)s"
+        -o "$output_template"
         -N 5
         --skip-download
         --write-subs
@@ -1201,6 +1347,192 @@ run_danmaku_command() {
     fi
 
     retry_command "$description" "$@"
+}
+
+export_playlist_layout_manifest_json() {
+    local playlist_url="$1"
+    local output_template="$2"
+    local manifest_file="$3"
+    local cookie_mode="$4"
+    local insecure_ssl="$5"
+    shift 5
+    local -a extractor_opts=("$@")
+    local -a yt_dlp_args
+    yt_dlp_args=(
+        --playlist-reverse
+        "${yt_dlp_color_opts[@]}"
+        -o "$output_template"
+        -J
+        -i
+        --yes-playlist
+        "${match_filter_opts[@]}"
+        --add-header "Accept:text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+        --add-header "Accept-Language:en-us,en;q=0.5"
+        --add-header "Accept-Encoding:gzip, deflate"
+        --add-header "Accept-Charset:ISO-8859-1,utf-8;q=0.7,*;q=0.7"
+        --add-header "User-Agent:Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+    )
+
+    case "$cookie_mode" in
+        browser)
+            yt_dlp_args+=(--cookies-from-browser "$youtube_cookie_browser")
+            ;;
+        file)
+            yt_dlp_args+=(--cookies "$youtube_cookie_file")
+            ;;
+    esac
+
+    if [ "$insecure_ssl" = true ]; then
+        yt_dlp_args+=(--no-check-certificate)
+    fi
+
+    yt_dlp_args+=("${extractor_opts[@]}" "$playlist_url")
+    run_yt_dlp_stdout_to_file_with_log_capture "$manifest_file" yt-dlp "${yt_dlp_args[@]}"
+}
+
+materialize_playlist_symlink_dir() {
+    local source_manifest_file="$1"
+    local symlink_manifest_file="$2"
+
+    if [ "$dry_run" = true ]; then
+        log_info "Dry-run: would materialize playlist symlink directory from yt-dlp manifests."
+        return 0
+    fi
+
+    local python_bin
+    if ! python_bin=$(resolve_python_binary); then
+        log_error "Playlist symlink layout requires python3/python to be available."
+        return 1
+    fi
+
+    log_step "Materialize playlist symlink directory"
+    log_io "read source playlist manifest ${source_manifest_file}"
+    log_io "read symlink playlist manifest ${symlink_manifest_file}"
+    "$python_bin" - "$source_manifest_file" "$symlink_manifest_file" "$OVERWRITE" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+source_manifest = Path(sys.argv[1])
+symlink_manifest = Path(sys.argv[2])
+overwrite = sys.argv[3].lower() == "true"
+
+
+def load_manifest(path: Path):
+    with path.open("r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    entries = payload.get("entries") or []
+    normalized = []
+    for entry in entries:
+        filename = (
+            entry.get("filename")
+            or entry.get("_filename")
+            or (
+                (entry.get("requested_downloads") or [{}])[0].get("filename")
+                if isinstance(entry.get("requested_downloads"), list)
+                and entry.get("requested_downloads")
+                else None
+            )
+            or (
+                (entry.get("requested_downloads") or [{}])[0].get("_filename")
+                if isinstance(entry.get("requested_downloads"), list)
+                and entry.get("requested_downloads")
+                else None
+            )
+        )
+        if not filename:
+            continue
+        normalized.append(
+            {
+                "id": entry.get("id"),
+                "title": entry.get("title"),
+                "filename": filename,
+            }
+        )
+    return normalized
+
+
+def sibling_candidates(media_path: Path):
+    prefix = media_path.stem
+    for candidate in sorted(media_path.parent.iterdir()):
+        if not candidate.is_file():
+            continue
+        if candidate.name == media_path.name:
+            yield candidate
+            continue
+        if candidate.name.startswith(prefix + "."):
+            yield candidate
+
+
+def ensure_link(source: Path, target: Path):
+    if target.exists() or target.is_symlink():
+        if target.is_symlink():
+            current_target = os.path.realpath(target)
+            desired_target = str(source.resolve())
+            if current_target == desired_target:
+                return "reused"
+            target.unlink()
+        elif overwrite:
+            if target.is_dir():
+                raise RuntimeError(f"cannot replace directory with symlink: {target}")
+            target.unlink()
+        else:
+            return "skipped"
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    relative_source = os.path.relpath(source, start=target.parent)
+    target.symlink_to(relative_source)
+    return "created"
+
+
+source_entries = load_manifest(source_manifest)
+symlink_entries = load_manifest(symlink_manifest)
+
+if len(source_entries) != len(symlink_entries):
+    raise RuntimeError(
+        f"playlist manifest mismatch: source entries={len(source_entries)}, symlink entries={len(symlink_entries)}"
+    )
+
+created = 0
+reused = 0
+skipped = 0
+missing = 0
+
+for source_entry, symlink_entry in zip(source_entries, symlink_entries):
+    source_media = Path(source_entry["filename"])
+    symlink_media = Path(symlink_entry["filename"])
+    siblings = list(sibling_candidates(source_media))
+    if not siblings:
+        missing += 1
+        continue
+
+    source_stem = source_media.stem
+    symlink_stem = symlink_media.stem
+
+    for sibling in siblings:
+        if sibling.name == source_media.name:
+            target = symlink_media
+        else:
+            suffix = sibling.name[len(source_stem):]
+            target = symlink_media.with_name(f"{symlink_stem}{suffix}")
+
+        status = ensure_link(sibling, target)
+        if status == "created":
+            created += 1
+        elif status == "reused":
+            reused += 1
+        elif status == "skipped":
+            skipped += 1
+
+summary = f"Playlist symlink layout ready: created={created}, reused={reused}, skipped={skipped}, missing_sources={missing}"
+print(summary)
+if missing:
+    print(
+        f"Warning: skipped {missing} playlist item(s) because their source media file was not found.",
+        file=sys.stderr,
+    )
+PY
 }
 
 export_video_danmaku_if_enabled() {
@@ -1444,6 +1776,10 @@ while [[ $# -gt 0 ]]; do
         --only-danmaku)
             only_danmaku=true
             download_danmaku=true
+            shift
+            ;;
+        --channel-library-layout)
+            channel_library_layout=true
             shift
             ;;
         --danmaku)
@@ -1773,7 +2109,7 @@ if [ -n "$CHANNEL_URL" ]; then
         channel_referer_opts=(--referer "$CHANNEL_URL")
     fi
 
-    channel_output_template="$OUTPUT_DIR/%(playlist)s/%(n_entries+1-playlist_index)d.%(title)s.%(ext)s"
+    channel_output_template=$(build_channel_output_template "$OUTPUT_DIR" "$channel_platform")
     channel_cookie_opts=()
     channel_extractor_opts=()
     channel_cookie_fallback_extractor_opts=()
@@ -1793,8 +2129,6 @@ if [ -n "$CHANNEL_URL" ]; then
             channel_cookie_fallback_extractor_opts=(--extractor-args youtubetab:skip=authcheck "${youtube_fallback_extractor_args[@]}")
             channel_nocookie_fallback_extractor_opts=(--extractor-args youtubetab:skip=authcheck --extractor-args "youtube:player_client=${fallback_player_client}")
         fi
-    else
-        channel_output_template="$OUTPUT_DIR/%(playlist,channel_id,channel,creator,uploader)s/%(title)s.%(ext)s"
     fi
 
     # Generate a unique archive file name based on the channel URL
@@ -2118,7 +2452,8 @@ elif [ -n "$PLAYLIST_URL" ]; then
         fi
     fi
 
-    playlist_output_template="$OUTPUT_DIR/%(playlist)s/%(playlist_index)s.%(title)s.%(ext)s"
+    playlist_output_template=$(build_playlist_output_template "$OUTPUT_DIR" "$playlist_platform")
+    playlist_symlink_output_template=""
     playlist_cookie_opts=()
     playlist_extractor_opts=()
     playlist_cookie_fallback_extractor_opts=()
@@ -2138,8 +2473,9 @@ elif [ -n "$PLAYLIST_URL" ]; then
             playlist_cookie_fallback_extractor_opts=("${youtube_fallback_extractor_args[@]}")
             playlist_nocookie_fallback_extractor_opts=(--extractor-args "youtube:player_client=${fallback_player_client}")
         fi
-    else
-        playlist_output_template="$OUTPUT_DIR/%(title)s.%(ext)s"
+    fi
+    if [ "$channel_library_layout" = true ]; then
+        playlist_symlink_output_template=$(build_playlist_symlink_output_template "$OUTPUT_DIR")
     fi
 
     # Generate a unique archive file name based on the playlist URL
@@ -2355,6 +2691,9 @@ elif [ -n "$PLAYLIST_URL" ]; then
     fi
 
     if [ "$playlist_status" -eq 0 ]; then
+        playlist_manifest_cookie_mode="$playlist_cookie_mode"
+        playlist_manifest_insecure_ssl=false
+        playlist_manifest_extractor_opts=("${playlist_extractor_opts[@]}")
         retry_command "Playlist metadata export: ${PLAYLIST_URL}" run_yt_dlp_with_log_capture yt-dlp \
             "${playlist_metadata_base_args[@]}" \
             "${playlist_cookie_opts[@]}" \
@@ -2377,6 +2716,9 @@ elif [ -n "$PLAYLIST_URL" ]; then
                 "${playlist_tail_args[@]}" \
                 "$PLAYLIST_URL"
             fallback_status=$?
+            if [ "$fallback_status" -eq 0 ]; then
+                playlist_manifest_insecure_ssl=true
+            fi
             if [ "$fallback_status" -ne 0 ]; then
                 playlist_metadata_status=$fallback_status
             fi
@@ -2395,6 +2737,10 @@ elif [ -n "$PLAYLIST_URL" ]; then
                 "${playlist_tail_args[@]}" \
                 "$PLAYLIST_URL"
             fallback_status=$?
+            if [ "$fallback_status" -eq 0 ]; then
+                playlist_manifest_cookie_mode="$playlist_cookie_mode"
+                playlist_manifest_extractor_opts=("${playlist_cookie_fallback_extractor_opts[@]}")
+            fi
             if [ "$fallback_status" -ne 0 ]; then
                 playlist_metadata_status=$fallback_status
             fi
@@ -2411,6 +2757,10 @@ elif [ -n "$PLAYLIST_URL" ]; then
                     "${playlist_tail_args[@]}" \
                     "$PLAYLIST_URL"
                 fallback_status=$?
+                if [ "$fallback_status" -eq 0 ]; then
+                    playlist_manifest_cookie_mode="none"
+                    playlist_manifest_extractor_opts=("${playlist_nocookie_fallback_extractor_opts[@]}")
+                fi
                 if [ "$fallback_status" -ne 0 ]; then
                     playlist_metadata_status=$fallback_status
                 fi
@@ -2425,6 +2775,45 @@ elif [ -n "$PLAYLIST_URL" ]; then
 
         if [ "$playlist_metadata_status" -ne 0 ]; then
             playlist_status=$playlist_metadata_status
+        elif [ "$channel_library_layout" = true ] && [ -n "$playlist_symlink_output_template" ]; then
+            source_manifest_file=""
+            symlink_manifest_file=""
+            if source_manifest_file=$(mktemp -t yt_dlp_playlist_source.XXXXXX.json) && symlink_manifest_file=$(mktemp -t yt_dlp_playlist_symlink.XXXXXX.json); then
+                retry_command "Playlist source manifest export: ${PLAYLIST_URL}" export_playlist_layout_manifest_json \
+                    "$PLAYLIST_URL" \
+                    "$playlist_output_template" \
+                    "$source_manifest_file" \
+                    "$playlist_manifest_cookie_mode" \
+                    "$playlist_manifest_insecure_ssl" \
+                    "${playlist_manifest_extractor_opts[@]}"
+                manifest_status=$?
+                if [ "$manifest_status" -eq 0 ]; then
+                    retry_command "Playlist symlink manifest export: ${PLAYLIST_URL}" export_playlist_layout_manifest_json \
+                        "$PLAYLIST_URL" \
+                        "$playlist_symlink_output_template" \
+                        "$symlink_manifest_file" \
+                        "$playlist_manifest_cookie_mode" \
+                        "$playlist_manifest_insecure_ssl" \
+                        "${playlist_manifest_extractor_opts[@]}"
+                    manifest_status=$?
+                fi
+                if [ "$manifest_status" -eq 0 ]; then
+                    materialize_playlist_symlink_dir "$source_manifest_file" "$symlink_manifest_file"
+                    manifest_status=$?
+                fi
+                log_io "remove temp playlist manifest file ${source_manifest_file}"
+                rm -f "$source_manifest_file"
+                log_io "remove temp playlist manifest file ${symlink_manifest_file}"
+                rm -f "$symlink_manifest_file"
+                if [ "$manifest_status" -ne 0 ]; then
+                    playlist_status=$manifest_status
+                fi
+            else
+                log_error "Unable to create temporary files for playlist symlink layout."
+                [ -n "$source_manifest_file" ] && rm -f "$source_manifest_file"
+                [ -n "$symlink_manifest_file" ] && rm -f "$symlink_manifest_file"
+                playlist_status=1
+            fi
         fi
     fi
 

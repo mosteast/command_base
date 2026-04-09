@@ -61,22 +61,26 @@ const PLATFORM_ALIASES = {
 const PLATFORM_COMMANDS = {
   youtube: {
     command: "xsave_yt_dlp",
-    build_args: (url) => ["-c", url],
+    build_args: (url, platform_key) =>
+      build_xsave_yt_dlp_source_args(url, platform_key),
     label: "youtube",
   },
   bilibili: {
     command: "xsave_yt_dlp",
-    build_args: (url) => ["-c", url],
+    build_args: (url, platform_key) =>
+      build_xsave_yt_dlp_source_args(url, platform_key),
     label: "bilibili",
   },
   rumble: {
     command: "xsave_yt_dlp",
-    build_args: (url) => ["-c", url],
+    build_args: (url, platform_key) =>
+      build_xsave_yt_dlp_source_args(url, platform_key),
     label: "rumble",
   },
   bitchute: {
     command: "xsave_yt_dlp",
-    build_args: (url) => ["-c", url],
+    build_args: (url, platform_key) =>
+      build_xsave_yt_dlp_source_args(url, platform_key),
     label: "bitchute",
   },
   douyin: {
@@ -1316,6 +1320,92 @@ function format_command(command, args) {
   return parts.join(" ");
 }
 
+function parse_http_url(raw_url) {
+  const text = String(raw_url || "").trim();
+  if (!text) return null;
+  try {
+    return new URL(text);
+  } catch (_error) {
+    return null;
+  }
+}
+
+function is_xsave_yt_dlp_platform(platform_key) {
+  return (
+    platform_key === "youtube" ||
+    platform_key === "bilibili" ||
+    platform_key === "rumble" ||
+    platform_key === "bitchute"
+  );
+}
+
+function is_xsave_yt_dlp_playlist_url(platform_key, raw_url) {
+  const parsed_url = parse_http_url(raw_url);
+  if (!parsed_url) return false;
+
+  const pathname = parsed_url.pathname.toLowerCase();
+
+  if (platform_key === "youtube") {
+    return pathname === "/playlist" && parsed_url.searchParams.has("list");
+  }
+
+  if (platform_key === "bilibili") {
+    return pathname.includes("/list/") || pathname.includes("/medialist/");
+  }
+
+  return false;
+}
+
+function is_xsave_yt_dlp_channel_url(platform_key, raw_url) {
+  const parsed_url = parse_http_url(raw_url);
+  if (!parsed_url) return false;
+
+  const hostname = parsed_url.hostname.toLowerCase();
+  const pathname = parsed_url.pathname.toLowerCase();
+
+  if (platform_key === "youtube") {
+    if (!hostname.includes("youtube.com")) return false;
+    return (
+      pathname.startsWith("/@") ||
+      pathname.startsWith("/channel/") ||
+      pathname.startsWith("/c/") ||
+      pathname.startsWith("/user/")
+    );
+  }
+
+  if (platform_key === "bilibili") {
+    return hostname.includes("space.bilibili.com");
+  }
+
+  if (platform_key === "rumble") {
+    return pathname.startsWith("/c/") || pathname.startsWith("/user/");
+  }
+
+  if (platform_key === "bitchute") {
+    return pathname.startsWith("/channel/");
+  }
+
+  return false;
+}
+
+function build_xsave_yt_dlp_source_args(url, platform_key) {
+  const base_args = ["--channel-library-layout"];
+
+  if (!is_xsave_yt_dlp_platform(platform_key)) {
+    return [url];
+  }
+
+  if (is_xsave_yt_dlp_playlist_url(platform_key, url)) {
+    return [...base_args, "-l", url];
+  }
+
+  if (is_xsave_yt_dlp_channel_url(platform_key, url)) {
+    return [...base_args, "-c", url];
+  }
+
+  return [...base_args, url];
+}
+
 function build_xsave_yt_dlp_refresh_args(refresh_mode) {
   if (!refresh_mode) return [];
 
@@ -1370,7 +1460,7 @@ function build_refresh_args(platform_key, refresh_mode) {
 function build_platform_command(platform_key, url, refresh_mode, options) {
   const config = PLATFORM_COMMANDS[platform_key];
   if (!config) return null;
-  const base_args = config.build_args(url);
+  const base_args = config.build_args(url, platform_key);
   const refresh_args = build_refresh_args(platform_key, refresh_mode);
   const args = [...base_args, ...refresh_args];
   if (config.command === "f2") {

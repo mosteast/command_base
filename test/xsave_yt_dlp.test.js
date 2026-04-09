@@ -113,6 +113,136 @@ exit 0
   return { bin_dir };
 }
 
+async function create_channel_library_layout_fake_yt_dlp_bin(temp_root) {
+  const bin_dir = path.join(temp_root, "fake_bin_channel_library");
+  const script_path = path.join(bin_dir, "yt-dlp");
+
+  await fs.mkdir(bin_dir, { recursive: true });
+  await fs.writeFile(
+    script_path,
+    `#!/usr/bin/env bash
+set -euo pipefail
+
+log_file="\${FAKE_YT_DLP_LOG:?}"
+printf '%s\\n' "$*" >> "$log_file"
+
+node - "$@" <<'NODE'
+const fs = require("fs");
+const path = require("path");
+
+const args = process.argv.slice(2);
+const meta = {
+  uploader: "Example Channel",
+  channel: "Example Channel",
+  creator: "Example Channel",
+  playlist_uploader: "Example Channel",
+  playlist: "Example Playlist",
+  playlist_index: "1",
+  n_entries: "1",
+  title: "Example Video",
+  id: "abc123",
+  ext: "mp4",
+};
+
+function argValue(name) {
+  const index = args.indexOf(name);
+  if (index === -1 || index === args.length - 1) return "";
+  return args[index + 1];
+}
+
+function renderTemplate(template) {
+  return String(template || "").replace(/%\\(([^)]+)\\)([a-z])/g, (_match, fieldExpr) => {
+    if (fieldExpr === "n_entries+1-playlist_index") {
+      return String(Number(meta.n_entries) + 1 - Number(meta.playlist_index));
+    }
+
+    const candidates = fieldExpr.split(",");
+    for (const candidate of candidates) {
+      const key = candidate.trim();
+      if (key && meta[key]) {
+        return meta[key];
+      }
+    }
+    return "";
+  });
+}
+
+function ensureFile(filePath, contents = "") {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, contents, "utf8");
+}
+
+const outputTemplate = argValue("-o");
+const renderedFilename = renderTemplate(outputTemplate);
+const isDumpSingleJson = args.includes("-J") || args.includes("--dump-single-json");
+const isSkipDownload = args.includes("--skip-download");
+const shouldWriteSubs = args.includes("--write-subs") || args.includes("--write-auto-subs");
+const shouldWriteInfoJson = args.includes("--write-info-json");
+const shouldWriteDescription = args.includes("--write-description");
+const shouldWriteComments = args.includes("--write-comments");
+const shouldWriteLink = args.includes("--write-link");
+const subtitleLangs = argValue("--sub-langs");
+
+if (isDumpSingleJson) {
+  process.stdout.write(
+    JSON.stringify({
+      entries: [
+        {
+          id: meta.id,
+          title: meta.title,
+          playlist: meta.playlist,
+          playlist_index: Number(meta.playlist_index),
+          filename: renderedFilename,
+          requested_downloads: [{ filename: renderedFilename }],
+        },
+      ],
+    }),
+  );
+  process.exit(0);
+}
+
+if (!isSkipDownload) {
+  ensureFile(renderedFilename, "fake media");
+}
+
+if (shouldWriteSubs) {
+  const stem = renderedFilename.replace(/\\.[^.]+$/, "");
+  if (subtitleLangs.includes("danmaku")) {
+    ensureFile(\`\${stem}.danmaku.xml\`, "<i></i>");
+  } else {
+    ensureFile(\`\${stem}.en.vtt\`, "WEBVTT\\n");
+  }
+}
+
+if (shouldWriteInfoJson) {
+  ensureFile(
+    renderedFilename.replace(/\\.[^.]+$/, ".info.json"),
+    JSON.stringify({ id: meta.id, title: meta.title }),
+  );
+}
+
+if (shouldWriteDescription) {
+  ensureFile(renderedFilename.replace(/\\.[^.]+$/, ".description"), "description");
+}
+
+if (shouldWriteComments) {
+  ensureFile(renderedFilename.replace(/\\.[^.]+$/, ".comments"), "comments");
+}
+
+if (shouldWriteLink) {
+  ensureFile(renderedFilename.replace(/\\.[^.]+$/, ".url"), "https://example.com/watch?v=abc123");
+}
+
+process.stdout.write("[download] Finished downloading playlist: Example Playlist\\n");
+NODE
+`,
+    "utf8",
+  );
+  await fs.chmod(script_path, 0o755);
+
+  return { bin_dir };
+}
+
 describe("xsave_yt_dlp match filters", () => {
   it("keeps missing availability fields in the generated yt-dlp command", async () => {
     const result = await run_cli([
@@ -327,6 +457,85 @@ describe("xsave_yt_dlp youtube auth fallback", () => {
       expect(
         invocation_lines.some((line) => line.includes("--skip-download")),
       ).toBe(false);
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("xsave_yt_dlp channel library layout", () => {
+  it("stores playlist media in the channel library and creates playlist symlinks", async () => {
+    const temp_root = await create_temp_dir();
+    const output_dir = path.join(temp_root, "output");
+    const fake_yt_dlp_log = path.join(temp_root, "fake_yt_dlp.log");
+
+    await fs.mkdir(output_dir, { recursive: true });
+    await fs.writeFile(fake_yt_dlp_log, "", "utf8");
+
+    try {
+      const fake_yt_dlp =
+        await create_channel_library_layout_fake_yt_dlp_bin(temp_root);
+
+      const result = await run_cli(
+        [
+          "--debug",
+          "--retry-count",
+          "2",
+          "--no-danmaku",
+          "--channel-library-layout",
+          "--list",
+          "https://www.youtube.com/playlist?list=PLexample",
+          "--output",
+          output_dir,
+        ],
+        {
+          env: {
+            PATH: `${fake_yt_dlp.bin_dir}:${process.env.PATH || ""}`,
+            FAKE_YT_DLP_LOG: fake_yt_dlp_log,
+          },
+        },
+      );
+
+      const actual_media = path.join(
+        output_dir,
+        "Example Channel - Videos",
+        "Example Video [abc123].mp4",
+      );
+      const actual_subtitle = path.join(
+        output_dir,
+        "Example Channel - Videos",
+        "Example Video [abc123].en.vtt",
+      );
+      const playlist_media_link = path.join(
+        output_dir,
+        "Example Playlist",
+        "1.Example Video.mp4",
+      );
+      const playlist_subtitle_link = path.join(
+        output_dir,
+        "Example Playlist",
+        "1.Example Video.en.vtt",
+      );
+
+      expect(result.exit_code).toBe(0);
+      await expect(fs.readFile(actual_media, "utf8")).resolves.toBe(
+        "fake media",
+      );
+      await expect(fs.readFile(actual_subtitle, "utf8")).resolves.toContain(
+        "WEBVTT",
+      );
+
+      const playlist_media_stat = await fs.lstat(playlist_media_link);
+      const playlist_subtitle_stat = await fs.lstat(playlist_subtitle_link);
+
+      expect(playlist_media_stat.isSymbolicLink()).toBe(true);
+      expect(playlist_subtitle_stat.isSymbolicLink()).toBe(true);
+      expect(await fs.realpath(playlist_media_link)).toBe(
+        await fs.realpath(actual_media),
+      );
+      expect(await fs.realpath(playlist_subtitle_link)).toBe(
+        await fs.realpath(actual_subtitle),
+      );
     } finally {
       await fs.rm(temp_root, { recursive: true, force: true });
     }

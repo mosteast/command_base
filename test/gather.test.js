@@ -146,6 +146,32 @@ async function write_duplicate_source_config_file(temp_root) {
   return config_path;
 }
 
+async function write_playlist_source_config_file(temp_root) {
+  const config_path = path.join(temp_root, "gather.playlist_source.yaml");
+  const config_text = [
+    "source:",
+    "  youtube:",
+    "    - name: Example YouTube playlist",
+    "      handle: https://www.youtube.com/playlist?list=PLexample",
+    "",
+  ].join("\n");
+  await fs.writeFile(config_path, config_text, "utf8");
+  return config_path;
+}
+
+async function write_video_source_config_file(temp_root) {
+  const config_path = path.join(temp_root, "gather.video_source.yaml");
+  const config_text = [
+    "source:",
+    "  youtube:",
+    "    - name: Example YouTube video",
+    "      handle: https://www.youtube.com/watch?v=abc123",
+    "",
+  ].join("\n");
+  await fs.writeFile(config_path, config_text, "utf8");
+  return config_path;
+}
+
 function extract_total_jobs(stdout_text) {
   const lines = String(stdout_text || "")
     .split(/\r?\n/)
@@ -237,7 +263,60 @@ describe("gather CLI platform selection", () => {
       expect(result.exit_code).toBe(0);
       expect(extract_total_jobs(result.stdout)).toBe(1);
       expect(result.stdout).toContain(
-        "xsave_yt_dlp -c https://space.bilibili.com/39449692",
+        "xsave_yt_dlp --channel-library-layout -c https://space.bilibili.com/39449692",
+      );
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
+  });
+
+  it("uses playlist mode for youtube playlist source urls", async () => {
+    const temp_root = await create_temp_dir();
+    const state_file = path.join(temp_root, "gather.state.json");
+
+    try {
+      const config_path = await write_playlist_source_config_file(temp_root);
+      const result = await run_cli([
+        "--dry-run",
+        "--state-file",
+        state_file,
+        "--platform",
+        "youtube",
+        config_path,
+      ]);
+
+      expect(result.exit_code).toBe(0);
+      expect(extract_total_jobs(result.stdout)).toBe(1);
+      expect(result.stdout).toContain(
+        "xsave_yt_dlp --channel-library-layout -l https://www.youtube.com/playlist?list=PLexample",
+      );
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps youtube video source urls as direct video downloads", async () => {
+    const temp_root = await create_temp_dir();
+    const state_file = path.join(temp_root, "gather.state.json");
+
+    try {
+      const config_path = await write_video_source_config_file(temp_root);
+      const result = await run_cli([
+        "--dry-run",
+        "--state-file",
+        state_file,
+        "--platform",
+        "youtube",
+        config_path,
+      ]);
+
+      expect(result.exit_code).toBe(0);
+      expect(extract_total_jobs(result.stdout)).toBe(1);
+      expect(result.stdout).toContain(
+        "xsave_yt_dlp --channel-library-layout https://www.youtube.com/watch?v=abc123",
+      );
+      expect(result.stdout).not.toContain(
+        "xsave_yt_dlp --channel-library-layout -c https://www.youtube.com/watch?v=abc123",
       );
     } finally {
       await fs.rm(temp_root, { recursive: true, force: true });
@@ -370,7 +449,7 @@ describe("gather CLI platform selection", () => {
       expect(result.exit_code).toBe(0);
       expect(extract_total_jobs(result.stdout)).toBe(1);
       expect(result.stdout).toContain(
-        "xsave_yt_dlp -c https://www.youtube.com/@example --refresh --overwrite -- --skip-download",
+        "xsave_yt_dlp --channel-library-layout -c https://www.youtube.com/@example --refresh --overwrite -- --skip-download",
       );
       expect(result.stdout).not.toContain("--no-write-comments");
       expect(result.stdout).toContain("--no-write-subs");
