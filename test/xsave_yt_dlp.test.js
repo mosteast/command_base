@@ -260,6 +260,27 @@ describe("xsave_yt_dlp match filters", () => {
   });
 });
 
+describe("xsave_yt_dlp comment extraction", () => {
+  it("adds a YouTube max comments extractor arg during metadata export", async () => {
+    const result = await run_cli([
+      "--dry-run",
+      "--debug",
+      "--channel",
+      "https://www.youtube.com/@user1",
+      "--max-comment",
+      "100",
+    ]);
+
+    const stdout_text = strip_ansi(result.stdout);
+
+    expect(result.exit_code).toBe(0);
+    expect(stdout_text).toContain("--write-comments");
+    expect(stdout_text).toMatch(
+      /--extractor-args youtube:max_comments=100\\,all\\,all\\,all/,
+    );
+  });
+});
+
 describe("xsave_yt_dlp danmaku handling", () => {
   it("exports bilibili danmaku by default with a standalone command", async () => {
     const result = await run_cli([

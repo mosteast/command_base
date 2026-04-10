@@ -21,6 +21,7 @@ debug_mode=false
 quiet_mode=false
 dry_run=false
 allow_insecure_ssl=false
+max_comments=""
 use_youtube_cookies=true
 youtube_cookie_browser="chrome"
 youtube_cookie_browser_provided=false
@@ -323,6 +324,7 @@ ${color_blue}Options:${color_reset}
       --cookies <file>    Load cookies from a Netscape cookie file (default: disabled)
       --no-cookies        Disable browser/cookie-file auth for supported sites (default: false)
       --insecure          Allow insecure SSL requests when needed (default: false)
+      --max-comment <n>  Limit YouTube comment extraction during metadata export (default: unlimited)
       --                 Pass additional options to yt-dlp
 
 ${color_blue}Examples:${color_reset}
@@ -343,6 +345,9 @@ ${color_blue}Examples:${color_reset}
 
   # Use a cookies.txt export for YouTube
   \$0 -l https://www.youtube.com/playlist?list=xxx --cookies ~/Downloads/youtube_cookies.txt
+
+  # Limit YouTube comment extraction to 100 comments
+  \$0 -c https://www.youtube.com/@user1 --max-comment 100
 
   # Keep real files in the channel library and create a symlinked playlist directory
   \$0 --channel-library-layout -l https://www.youtube.com/playlist?list=xxx
@@ -1090,6 +1095,10 @@ run_video_metadata_yt_dlp() {
         --continue
     )
 
+    if [ -n "$youtube_comment_limit_arg" ] && [ "$(detect_platform "$url")" = "youtube" ]; then
+        yt_dlp_args+=(--extractor-args "$youtube_comment_limit_arg")
+    fi
+
     if [ "$OVERWRITE" != true ]; then
         yt_dlp_args+=(--download-archive "$archive_file" --no-overwrites)
     else
@@ -1806,6 +1815,29 @@ while [[ $# -gt 0 ]]; do
             REFRESH=true
             shift
             ;;
+        --max-comment=*)
+            max_comments="${1#*=}"
+            if [[ "$max_comments" =~ ^[0-9]+$ ]]; then
+                shift
+            else
+                log_error "Max comments must be a non-negative integer."
+                exit 1
+            fi
+            ;;
+        --max-comment)
+            if [ -n "$2" ]; then
+                max_comments="$2"
+                if [[ "$max_comments" =~ ^[0-9]+$ ]]; then
+                    shift 2
+                else
+                    log_error "Max comments must be a non-negative integer."
+                    exit 1
+                fi
+            else
+                log_error "Max comments value is required after --max-comment option."
+                exit 1
+            fi
+            ;;
         --youtube-client=*)
             youtube_player_client="${1#*=}"
             if [ -z "$youtube_player_client" ]; then
@@ -2038,6 +2070,12 @@ WRITE_META_OPTS=(
     --write-link
 )
 
+log_step "Configure comment extraction"
+youtube_comment_limit_arg=""
+if [ -n "$max_comments" ]; then
+    youtube_comment_limit_arg="youtube:max_comments=${max_comments},all,all,all"
+fi
+
 if [ "$ONLY_AUDIO" = true ]; then
     FORMAT_OPTS=(-f "ba/best")
 elif [ "$ONLY_SUBTITLE" = true ]; then
@@ -2238,6 +2276,9 @@ if [ -n "$CHANNEL_URL" ]; then
         "${WRITE_META_OPTS[@]}"
         --continue
     )
+    if [ -n "$youtube_comment_limit_arg" ] && [ "$channel_platform" = "youtube" ]; then
+        channel_metadata_base_args+=(--extractor-args "$youtube_comment_limit_arg")
+    fi
     if [ "$OVERWRITE" != true ]; then
         channel_metadata_base_args+=(--download-archive "$METADATA_ARCHIVE_FILE" --no-overwrites)
     else
@@ -2585,6 +2626,9 @@ elif [ -n "$PLAYLIST_URL" ]; then
         "${WRITE_META_OPTS[@]}"
         --continue
     )
+    if [ -n "$youtube_comment_limit_arg" ] && [ "$playlist_platform" = "youtube" ]; then
+        playlist_metadata_base_args+=(--extractor-args "$youtube_comment_limit_arg")
+    fi
     if [ "$OVERWRITE" != true ]; then
         playlist_metadata_base_args+=(--download-archive "$METADATA_ARCHIVE_FILE" --no-overwrites)
     else

@@ -295,6 +295,7 @@ function build_help_text(script_name) {
       DEFAULT_F2_OUTPUT_DIR,
     )})`,
     "  -r, --refresh [mode]         Refresh yt-dlp output (youtube, bilibili, rumble, bitchute; media, info, all; info skips media/subtitles)",
+    "      --max-comment <n>        Limit YouTube comment extraction for yt-dlp jobs (default: unlimited)",
     "      --stop-on-error          Stop on first failed export (default: false)",
     "  -d, --dry-run                Print commands without executing (default: false)",
     "      --quiet                  Print only warnings and errors (default: false)",
@@ -329,6 +330,9 @@ function build_help_text(script_name) {
     "",
     "  # Refresh media only",
     `  ${example_cmd} --refresh media source/exporter.yaml`,
+    "",
+    "  # Limit YouTube comment extraction during metadata export",
+    `  ${example_cmd} --max-comment 100 source/exporter.yaml`,
     "",
     "  # Initialize the default config if empty",
     `  ${example_cmd} init`,
@@ -472,6 +476,23 @@ function normalize_refresh_mode(raw_value) {
   return { mode: normalized, explicit: true };
 }
 
+function normalize_max_comments(raw_value) {
+  if (raw_value === undefined || raw_value === null || raw_value === false) {
+    return { value: "" };
+  }
+
+  const text = String(raw_value || "").trim();
+  if (!text) {
+    return { error: "Max comments must be a non-negative integer." };
+  }
+
+  if (!/^\d+$/.test(text)) {
+    return { error: "Max comments must be a non-negative integer." };
+  }
+
+  return { value: text };
+}
+
 function normalize_range_selection(raw_value) {
   const raw_ranges = normalize_list(raw_value);
   const normalized_ranges = raw_ranges
@@ -608,6 +629,11 @@ function parse_cli_arguments() {
       describe:
         "Refresh yt-dlp output (youtube, bilibili, rumble, bitchute; media, info, all; default: info; info skips media/subtitles)",
     })
+    .option("max-comment", {
+      type: "string",
+      describe:
+        "Limit YouTube comment extraction for yt-dlp jobs (default: unlimited)",
+    })
     .option("stop-on-error", {
       type: "boolean",
       default: false,
@@ -644,6 +670,12 @@ function parse_cli_arguments() {
     .wrap(Math.min(yargs.terminalWidth(), 110));
 
   const argv = parser.parse();
+
+  if (argv["max-comments"] !== undefined) {
+    console.error(chalk.red("Unknown option: --max-comments"));
+    console.log(build_help_text(argv.$0 || "batch_exporter"));
+    process.exit(1);
+  }
 
   if (argv.help) {
     console.log(build_help_text(argv.$0 || "batch_exporter"));
@@ -741,6 +773,13 @@ function parse_cli_arguments() {
     process.exit(1);
   }
 
+  const max_comments_result = normalize_max_comments(argv["max-comment"]);
+  if (max_comments_result.error) {
+    console.error(chalk.red(max_comments_result.error));
+    console.log(build_help_text(argv.$0 || "batch_exporter"));
+    process.exit(1);
+  }
+
   return {
     command_name: argv.$0 || "batch_exporter",
     config_patterns,
@@ -757,6 +796,7 @@ function parse_cli_arguments() {
     run_command_jobs: Boolean(range_result.run_command_jobs),
     refresh_mode: refresh_result.mode,
     refresh_mode_explicit: refresh_result.explicit,
+    max_comments: max_comments_result.value,
     stop_on_error: Boolean(argv["stop-on-error"]),
     dry_run: Boolean(argv["dry-run"]),
     quiet_mode: Boolean(argv.quiet),
@@ -1445,6 +1485,13 @@ function build_xsave_yt_dlp_refresh_args(refresh_mode) {
   return [...base_args, "--", ...ytdlp_args];
 }
 
+function build_xsave_yt_dlp_comment_args(max_comments) {
+  if (max_comments === undefined || max_comments === null) return [];
+  const text = String(max_comments).trim();
+  if (!text) return [];
+  return ["--max-comment", text];
+}
+
 function build_refresh_args(platform_key, refresh_mode) {
   if (!refresh_mode) return [];
   if (
@@ -1461,8 +1508,12 @@ function build_platform_command(platform_key, url, refresh_mode, options) {
   const config = PLATFORM_COMMANDS[platform_key];
   if (!config) return null;
   const base_args = config.build_args(url, platform_key);
+  const comment_args =
+    config.command === "xsave_yt_dlp"
+      ? build_xsave_yt_dlp_comment_args(options && options.max_comments)
+      : [];
   const refresh_args = build_refresh_args(platform_key, refresh_mode);
-  const args = [...base_args, ...refresh_args];
+  const args = [...base_args, ...comment_args, ...refresh_args];
   if (config.command === "f2") {
     const f2_output_dir =
       options && typeof options.f2_output_dir === "string"

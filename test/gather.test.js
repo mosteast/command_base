@@ -459,6 +459,58 @@ describe("gather CLI platform selection", () => {
     }
   });
 
+  it("forwards max comments to yt-dlp-backed jobs", async () => {
+    const temp_root = await create_temp_dir();
+    const state_file = path.join(temp_root, "gather.state.json");
+
+    try {
+      const config_path = await write_config_file(temp_root);
+      const result = await run_cli([
+        "--dry-run",
+        "--state-file",
+        state_file,
+        "--platform",
+        "youtube",
+        "--max-comment",
+        "100",
+        config_path,
+      ]);
+
+      expect(result.exit_code).toBe(0);
+      expect(extract_total_jobs(result.stdout)).toBe(1);
+      expect(result.stdout).toContain(
+        "xsave_yt_dlp --channel-library-layout -c https://www.youtube.com/@example --max-comment 100",
+      );
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects the old max-comments option name", async () => {
+    const temp_root = await create_temp_dir();
+    const state_file = path.join(temp_root, "gather.state.json");
+
+    try {
+      const config_path = await write_config_file(temp_root);
+      await expect(
+        run_cli([
+          "--dry-run",
+          "--state-file",
+          state_file,
+          "--platform",
+          "youtube",
+          "--max-comments",
+          "100",
+          config_path,
+        ]),
+      ).rejects.toMatchObject({
+        exit_code: 1,
+      });
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
+  });
+
   it("treats a path-like platform token as config when platform value is missing", async () => {
     const temp_root = await create_temp_dir();
     const state_file = path.join(temp_root, "gather.state.json");

@@ -2,8 +2,10 @@
 
 ## Naming Conventions
 
-- Use snake_case for directories (e.g., services/auth_service)
+- Use snake_case for directories (e.g., service/auth_service)
 - Favor named exports
+- Use singular form when naming if possible
+- Prefer singular option names when possible (e.g., `--max-line` instead of `--max-lines`)
 - Use `snake_case` for classic camelCase, example:
   - File names: `user_utils.ts`
   - Variables: `user_data`
