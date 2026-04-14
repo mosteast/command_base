@@ -17,6 +17,8 @@ const DEFAULT_STATE_FILE =
   "/Users/hailang/Library/Mobile Documents/com~apple~CloudDocs/main/saved/state/gather.state.json";
 const DEFAULT_F2_OUTPUT_DIR =
   "/Users/hailang/Library/Mobile Documents/com~apple~CloudDocs/main/saved/f2";
+const F2_COMPAT_COMMAND = "f2_compat";
+const F2_COMMANDS = new Set(["f2", F2_COMPAT_COMMAND]);
 const DEFAULT_CONFIG_LINES = [
   "# Gather config",
   "# Each source item requires a name and handle.",
@@ -84,7 +86,7 @@ const PLATFORM_COMMANDS = {
     label: "bitchute",
   },
   douyin: {
-    command: "f2",
+    command: F2_COMPAT_COMMAND,
     build_args: (url) => ["dy", "-M", "post", "-u", url],
     label: "douyin",
   },
@@ -278,7 +280,7 @@ function build_help_text(script_name) {
     "  Batch export channels/users across platforms by reading YAML configs and",
     "  running platform-specific export commands.",
     "  Resumes from the last successful job using the state file pointer.",
-    "  X export options: x_f2 uses f2, x_gallery_dl uses xsave_gallery_dl.",
+    `  Douyin uses ${F2_COMPAT_COMMAND}. x_f2 uses f2, x_gallery_dl uses xsave_gallery_dl.`,
     "  Platform aliases: yt -> youtube, bili -> bilibili, dy/tiktok/douyin_f2 -> douyin, x/tw/twitter -> x_f2.",
     "  Platform filters apply to source jobs and custom commands with declared or inferred platforms.",
     "",
@@ -365,7 +367,7 @@ function build_help_text(script_name) {
     "  command:",
     "    - name: Example custom command",
     "      platform: douyin",
-    "      command: f2 dy -M like -u user1",
+    `      command: ${F2_COMPAT_COMMAND} dy -M like -u user1`,
   ].join("\n");
 }
 
@@ -1200,7 +1202,7 @@ function infer_command_platform_keys(command_text) {
   }
 
   if (
-    /\bf2\s+dy\b/.test(normalized_command) ||
+    /\b(?:f2|f2_compat)\s+dy\b/.test(normalized_command) ||
     normalized_command.includes("douyin.com") ||
     normalized_command.includes("v.douyin.com")
   ) {
@@ -1514,7 +1516,7 @@ function build_platform_command(platform_key, url, refresh_mode, options) {
       : [];
   const refresh_args = build_refresh_args(platform_key, refresh_mode);
   const args = [...base_args, ...comment_args, ...refresh_args];
-  if (config.command === "f2") {
+  if (F2_COMMANDS.has(config.command)) {
     const f2_output_dir =
       options && typeof options.f2_output_dir === "string"
         ? options.f2_output_dir

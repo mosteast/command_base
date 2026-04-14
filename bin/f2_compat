@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+script_dir="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd -- "$script_dir/.." && pwd)"
+compat_dir="$repo_root/utility/f2_compat"
+upstream_f2="${COMMAND_BASE_F2_UPSTREAM:-$HOME/.local/bin/f2}"
+
+if [[ ! -x "$upstream_f2" ]]; then
+  printf 'Error: upstream f2 not found: %s\n' "$upstream_f2" >&2
+  exit 1
+fi
+
+if [[ $# -gt 0 ]]; then
+  case "$1" in
+    dy|douyin)
+      export COMMAND_BASE_F2_PATCH=1
+      if [[ -n "${PYTHONPATH:-}" ]]; then
+        export PYTHONPATH="$compat_dir:$PYTHONPATH"
+      else
+        export PYTHONPATH="$compat_dir"
+      fi
+      ;;
+  esac
+fi
+
+exec "$upstream_f2" "$@"

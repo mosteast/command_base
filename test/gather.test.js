@@ -122,7 +122,7 @@ async function write_platform_filtered_command_config_file(temp_root) {
     "      handle: https://www.douyin.com/user/EXAMPLE_ID",
     "command:",
     "  - name: Douyin Likes",
-    '    command: "f2 dy -M like -u https://v.douyin.com/EXAMPLE/"',
+    '    command: "f2_compat dy -M like -u https://v.douyin.com/EXAMPLE/"',
     "  - name: YouTube Playlist",
     '    command: "videos_download -l \\"https://www.youtube.com/playlist?list=PLexample\\""',
     "",
@@ -341,7 +341,7 @@ describe("gather CLI platform selection", () => {
       expect(result.exit_code).toBe(0);
       expect(extract_total_jobs(result.stdout)).toBe(1);
       expect(result.stdout).toContain(
-        "f2 dy -M post -u https://www.douyin.com/user/EXAMPLE_ID",
+        "f2_compat dy -M post -u https://www.douyin.com/user/EXAMPLE_ID",
       );
       expect(result.stdout).not.toContain("https://www.youtube.com/@example");
     } finally {
@@ -419,7 +419,7 @@ describe("gather CLI platform selection", () => {
       expect(extract_total_jobs(result.stdout)).toBe(1);
       expect(extract_total_commands(result.stdout)).toBe(1);
       expect(result.stdout).toContain(
-        "f2 dy -M like -u https://v.douyin.com/EXAMPLE/",
+        "f2_compat dy -M like -u https://v.douyin.com/EXAMPLE/",
       );
       expect(result.stdout).not.toContain(
         "https://www.youtube.com/playlist?list=PLexample",
