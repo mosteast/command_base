@@ -1,0 +1,435 @@
+#!/usr/bin/env node
+
+const fs = require("fs");
+const path = require("path");
+const chalk = require("chalk");
+const yargs = require("yargs/yargs");
+const { globSync } = require("glob");
+const { version: package_version } = require("../package.json");
+
+const {
+  DEFAULT_AUDIO_BITRATE,
+  DEFAULT_AUDIO_CODEC,
+  build_volume_label,
+  looks_like_volume_output,
+  normalize_volume_value,
+  set_video_volume,
+} = require("../lib/live_media/set_video_volume");
+
+const DEFAULT_FILE_CONCURRENCY = 1;
+
+const palette = {
+  title: chalk.cyanBright.bold,
+  label: chalk.cyanBright,
+  success: chalk.greenBright.bold,
+  warn: chalk.yellowBright.bold,
+  error: chalk.redBright.bold,
+  debug: chalk.magentaBright.bold,
+  dim: chalk.gray,
+  path: chalk.cyan,
+};
+
+function build_help_text(command_name = "videos_set_volume") {
+  return [
+    palette.title("Usage:"),
+    `  ${chalk.cyan(command_name)} ${chalk.yellow("<video-file> [...more files]")} --volume ${chalk.yellow("<value>")} [options]`,
+    "",
+    palette.title("Description:"),
+    "  Edit videos by re-encoding audio with an ffmpeg volume filter while copying non-audio streams.",
+    "  Supports glob patterns by default and skips generated volume outputs plus existing targets unless --refresh is used.",
+    "",
+    palette.title("Options:"),
+    "  -o, --output PATH           Explicit output path for a single input file",
+    "      --output-dir DIR        Directory for generated output files",
+    "      --volume VALUE          Volume value (required): 1.5, 150%, +6dB, or an ffmpeg expression",
+    `      --audio-codec NAME     Audio codec for filtered audio (default: ${DEFAULT_AUDIO_CODEC})`,
+    `      --audio-bitrate RATE   Audio bitrate for filtered audio (default: ${DEFAULT_AUDIO_BITRATE})`,
+    `      --concurrency N        Number of videos to process in parallel (default: ${DEFAULT_FILE_CONCURRENCY})`,
+    "      --ffmpeg PATH          Path to ffmpeg executable",
+    "      --refresh              Reprocess even if the output exists or the input already looks generated",
+    "      --quiet                Print only warnings and errors",
+    "  -d, --dry-run             Print the planned work without running ffmpeg",
+    "      --debug                Print verbose stage and command diagnostics",
+    "  -v, --version              Show version number only",
+    "  -h, --help                 Show this help message",
+    "",
+    palette.title("Examples:"),
+    "  # Raise volume to 150% for every matching MP4 file",
+    `  ${chalk.cyan(command_name)} ${chalk.yellow('"lesson/*.mp4"')} --volume 150%`,
+    "",
+    "  # Lower volume by 6 dB and write results to another folder",
+    `  ${chalk.cyan(command_name)} ${chalk.yellow('"clip/*.mkv"')} --volume -6dB --output-dir adjusted`,
+    "",
+    "  # Preview the output paths and ffmpeg settings without editing files",
+    `  ${chalk.cyan(command_name)} ${chalk.yellow("sample.mp4")} --volume 1.25 --dry-run --debug`,
+  ].join("\n");
+}
+
+function show_help() {
+  const command_name = path.basename(process.argv[1] || "videos_set_volume");
+  console.log(build_help_text(command_name));
+}
+
+function coerce_array_of_strings(value) {
+  if (value === undefined || value === null) return [];
+  const values = Array.isArray(value) ? value : [value];
+  return values
+    .filter((entry) => entry !== undefined && entry !== null)
+    .map((entry) => `${entry}`);
+}
+
+function create_parser(argv_input = process.argv.slice(2)) {
+  return yargs(argv_input)
+    .parserConfiguration({
+      "camel-case-expansion": true,
+      "duplicate-arguments-array": true,
+      "flatten-duplicate-arrays": false,
+      "strip-aliased": true,
+    })
+    .help(false)
+    .version(false)
+    .strict()
+    .exitProcess(false)
+    .fail((message, error) => {
+      throw error || new Error(message || "Invalid arguments.");
+    })
+    .alias("output", "o")
+    .alias("help", "h")
+    .alias("version", "v")
+    .alias("dry-run", "d")
+    .option("output", { type: "string" })
+    .option("output-dir", { type: "string" })
+    .option("volume", { type: "string" })
+    .option("audio-codec", { type: "string" })
+    .option("audio-bitrate", { type: "string" })
+    .option("concurrency", { type: "string" })
+    .option("ffmpeg", { type: "string" })
+    .option("input", { type: "array" })
+    .option("debug", { type: "boolean" })
+    .option("quiet", { type: "boolean" })
+    .option("dry-run", { type: "boolean" })
+    .option("refresh", { type: "boolean" })
+    .option("version", { type: "boolean" })
+    .option("help", { type: "boolean" })
+    .coerce("input", coerce_array_of_strings)
+    .wrap(null);
+}
+
+function create_logger(runtime_flags = {}) {
+  const { debug = false, quiet = false } = runtime_flags;
+
+  return {
+    log(message) {
+      if (quiet) return;
+      console.log(message);
+    },
+    info(message) {
+      if (quiet) return;
+      console.log(message);
+    },
+    warn(message) {
+      console.warn(message);
+    },
+    error(message) {
+      console.error(message);
+    },
+    debug(message) {
+      if (!debug || quiet) return;
+      console.log(`${palette.debug("DEBUG")} ${palette.dim(message)}`);
+    },
+  };
+}
+
+function expand_input_patterns(patterns) {
+  const unique_paths = new Set();
+  const resolved_files = [];
+  const unmatched_patterns = [];
+
+  patterns.forEach((pattern) => {
+    const matches = globSync(pattern, {
+      nodir: true,
+      dot: true,
+      nocase: true,
+    });
+    if (!matches.length) {
+      try {
+        const stats = fs.statSync(pattern);
+        if (stats.isFile()) {
+          const absolute_path = path.resolve(pattern);
+          if (!unique_paths.has(absolute_path)) {
+            unique_paths.add(absolute_path);
+            resolved_files.push(absolute_path);
+          }
+          return;
+        }
+      } catch (error) {
+        // Fall through to unmatched pattern reporting.
+      }
+      unmatched_patterns.push(pattern);
+      return;
+    }
+
+    matches.forEach((match_path) => {
+      const absolute_path = path.resolve(match_path);
+      if (unique_paths.has(absolute_path)) return;
+      unique_paths.add(absolute_path);
+      resolved_files.push(absolute_path);
+    });
+  });
+
+  return {
+    files: resolved_files,
+    unmatched_patterns,
+  };
+}
+
+async function run_with_concurrency(items, concurrency_limit, runner) {
+  const limited_concurrency = Math.max(
+    1,
+    Math.min(concurrency_limit, items.length || 1),
+  );
+  const failures = [];
+  let next_index = 0;
+
+  async function worker() {
+    for (;;) {
+      if (next_index >= items.length) return;
+      const current_index = next_index;
+      next_index += 1;
+      try {
+        await runner(items[current_index], current_index);
+      } catch (error) {
+        failures.push({
+          index: current_index,
+          item: items[current_index],
+          error,
+        });
+      }
+    }
+  }
+
+  await Promise.all(
+    Array.from({ length: limited_concurrency }, () => worker()),
+  );
+
+  return { failures };
+}
+
+function parse_positive_integer(value, option_label) {
+  if (value === undefined || value === null || value === "") {
+    return undefined;
+  }
+  const parsed_value = Number(value);
+  if (!Number.isFinite(parsed_value) || parsed_value < 1) {
+    throw new Error(`${option_label} must be a positive integer.`);
+  }
+  return Math.floor(parsed_value);
+}
+
+function build_runtime_options(argv) {
+  const raw_inputs = [
+    ...(Array.isArray(argv._) ? argv._ : []),
+    ...(Array.isArray(argv.input) ? argv.input : []),
+  ]
+    .filter((entry) => typeof entry === "string")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+
+  if (!raw_inputs.length) {
+    throw new Error("At least one input video file or glob pattern is required.");
+  }
+
+  if (!argv.volume) {
+    throw new Error("--volume is required.");
+  }
+
+  const normalized_volume = normalize_volume_value(argv.volume);
+  const file_concurrency =
+    parse_positive_integer(argv.concurrency, "--concurrency") ??
+    DEFAULT_FILE_CONCURRENCY;
+  const audio_codec =
+    `${argv["audio-codec"] || argv.audioCodec || DEFAULT_AUDIO_CODEC}`.trim();
+
+  if (!audio_codec) {
+    throw new Error("--audio-codec must not be empty.");
+  }
+  if (audio_codec.toLowerCase() === "copy") {
+    throw new Error(
+      "--audio-codec cannot be copy when applying a volume filter.",
+    );
+  }
+  if (argv.output && raw_inputs.length > 1) {
+    throw new Error("--output can only be used with a single input file.");
+  }
+
+  return {
+    raw_inputs,
+    output_path: argv.output,
+    output_dir: argv["output-dir"] || argv.outputDir,
+    requested_volume: `${argv.volume}`.trim(),
+    volume_expression: normalized_volume,
+    volume_label: build_volume_label(argv.volume),
+    audio_codec,
+    audio_bitrate:
+      `${argv["audio-bitrate"] || argv.audioBitrate || DEFAULT_AUDIO_BITRATE}`.trim(),
+    ffmpeg_path: argv.ffmpeg,
+    file_concurrency,
+    refresh: Boolean(argv.refresh),
+    dry_run: Boolean(argv["dry-run"] || argv.dryRun),
+    debug: Boolean(argv.debug),
+    quiet: Boolean(argv.quiet),
+  };
+}
+
+async function main() {
+  let argv;
+  try {
+    argv = create_parser().parse();
+  } catch (error) {
+    console.error(palette.error(error.message || "Invalid command options."));
+    process.exit(1);
+  }
+
+  if (argv.help) {
+    show_help();
+    return;
+  }
+
+  if (argv.version) {
+    console.log(`${package_version}`);
+    return;
+  }
+
+  let runtime_options;
+  try {
+    runtime_options = build_runtime_options(argv);
+  } catch (error) {
+    console.error(palette.error(error.message || "Invalid runtime options."));
+    process.exit(1);
+  }
+
+  const logger = create_logger(runtime_options);
+  logger.debug("Stage 1/3: expanding input file patterns.");
+  const { files: input_paths, unmatched_patterns } = expand_input_patterns(
+    runtime_options.raw_inputs,
+  );
+
+  unmatched_patterns.forEach((pattern) => {
+    logger.warn(
+      `${palette.warn("WARN")} No files matched pattern: ${chalk.yellow(pattern)}`,
+    );
+  });
+
+  if (!input_paths.length) {
+    console.error(palette.error("No input files could be resolved."));
+    process.exit(1);
+  }
+
+  logger.debug(
+    `Stage 2/3: processing ${input_paths.length} video file(s) with concurrency ${runtime_options.file_concurrency}.`,
+  );
+
+  const summary = {
+    completed: 0,
+    skipped: 0,
+    failed: 0,
+  };
+
+  const { failures } = await run_with_concurrency(
+    input_paths,
+    runtime_options.file_concurrency,
+    async (input_path) => {
+      const file_label = chalk.white.bold(path.basename(input_path));
+      if (!runtime_options.quiet) {
+        console.log(`${palette.label("START")} ${file_label}`);
+      }
+
+      if (!runtime_options.refresh && looks_like_volume_output(input_path)) {
+        summary.skipped += 1;
+        logger.log(
+          `${palette.warn("SKIP")} ${file_label} ${palette.dim("->")} ${palette.path(input_path)} ${palette.dim("(looks like generated volume output; use --refresh to reprocess)")}`,
+        );
+        return;
+      }
+
+      const result = await set_video_volume({
+        input_path,
+        output_path: runtime_options.output_path,
+        output_dir: runtime_options.output_dir,
+        volume: runtime_options.requested_volume,
+        audio_codec: runtime_options.audio_codec,
+        audio_bitrate: runtime_options.audio_bitrate,
+        ffmpeg_path: runtime_options.ffmpeg_path,
+        refresh: runtime_options.refresh,
+        dry_run: runtime_options.dry_run,
+        logger,
+        debug: runtime_options.debug,
+      });
+
+      if (result.skipped) {
+        summary.skipped += 1;
+        logger.log(
+          `${palette.warn("SKIP")} ${file_label} ${palette.dim("->")} ${palette.path(result.output_path)} ${palette.dim("(already exists; use --refresh to reprocess)")}`,
+        );
+        return;
+      }
+
+      if (result.dry_run) {
+        summary.completed += 1;
+        logger.log(
+          `${palette.label("PLAN")} ${file_label} ${palette.dim("->")} ${palette.path(result.output_path)}`,
+        );
+        logger.log(
+          `  ${palette.dim(`volume=${result.volume_expression}, codec=${result.audio_codec}, bitrate=${result.audio_bitrate}`)}`,
+        );
+        return;
+      }
+
+      summary.completed += 1;
+      logger.log(
+        `${palette.success("DONE")} ${file_label} ${palette.dim("->")} ${palette.path(result.output_path)}`,
+      );
+      logger.log(
+        `  ${palette.dim(`volume=${result.volume_expression}, codec=${result.audio_codec}, label=${runtime_options.volume_label}`)}`,
+      );
+    },
+  );
+
+  if (failures.length) {
+    summary.failed = failures.length;
+    failures.forEach((failure) => {
+      const file_name = failure.item || "<unknown>";
+      const message =
+        failure.error && failure.error.message
+          ? failure.error.message
+          : "Unknown error";
+      console.error(
+        `${palette.error("FAIL")} ${chalk.white.bold(path.basename(file_name))} ${palette.dim("->")} ${chalk.red(message)}`,
+      );
+    });
+    process.exit(1);
+  }
+
+  logger.debug("Stage 3/3: final summary.");
+  if (!runtime_options.quiet) {
+    console.log(
+      palette.success(
+        `Completed ${summary.completed} file(s); skipped ${summary.skipped}; failed ${summary.failed}.`,
+      ),
+    );
+  }
+}
+
+if (require.main === module) {
+  main();
+}
+
+module.exports = {
+  build_help_text,
+  build_runtime_options,
+  create_logger,
+  create_parser,
+  expand_input_patterns,
+  main,
+  run_with_concurrency,
+};
