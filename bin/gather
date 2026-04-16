@@ -298,6 +298,7 @@ function build_help_text(script_name) {
     )})`,
     "  -r, --refresh [mode]         Refresh yt-dlp output (youtube, bilibili, rumble, bitchute; media, info, all; info skips media/subtitles)",
     "      --max-comment <n>        Limit YouTube comment extraction for yt-dlp jobs (default: unlimited)",
+    "      --skip-comment           Skip comment sidecars for yt-dlp jobs (default: false)",
     "      --stop-on-error          Stop on first failed export (default: false)",
     "  -d, --dry-run                Print commands without executing (default: false)",
     "      --quiet                  Print only warnings and errors (default: false)",
@@ -335,6 +336,9 @@ function build_help_text(script_name) {
     "",
     "  # Limit YouTube comment extraction during metadata export",
     `  ${example_cmd} --max-comment 100 source/exporter.yaml`,
+    "",
+    "  # Skip comment sidecars during export",
+    `  ${example_cmd} --skip-comment source/exporter.yaml`,
     "",
     "  # Initialize the default config if empty",
     `  ${example_cmd} init`,
@@ -636,6 +640,11 @@ function parse_cli_arguments() {
       describe:
         "Limit YouTube comment extraction for yt-dlp jobs (default: unlimited)",
     })
+    .option("skip-comment", {
+      type: "boolean",
+      default: false,
+      describe: "Skip comment sidecars for yt-dlp jobs",
+    })
     .option("stop-on-error", {
       type: "boolean",
       default: false,
@@ -799,6 +808,7 @@ function parse_cli_arguments() {
     refresh_mode: refresh_result.mode,
     refresh_mode_explicit: refresh_result.explicit,
     max_comments: max_comments_result.value,
+    skip_comment: Boolean(argv["skip-comment"]),
     stop_on_error: Boolean(argv["stop-on-error"]),
     dry_run: Boolean(argv["dry-run"]),
     quiet_mode: Boolean(argv.quiet),
@@ -1448,13 +1458,15 @@ function build_xsave_yt_dlp_source_args(url, platform_key) {
   return [...base_args, url];
 }
 
-function build_xsave_yt_dlp_refresh_args(refresh_mode) {
-  if (!refresh_mode) return [];
-
-  const base_args = ["--refresh", "--overwrite"];
+function build_xsave_yt_dlp_passthrough_args(refresh_mode, options) {
   let ytdlp_args = [];
 
   switch (refresh_mode) {
+    case "":
+    case undefined:
+    case null:
+    case false:
+      break;
     case "info":
       ytdlp_args = [
         "--skip-download",
@@ -1480,6 +1492,23 @@ function build_xsave_yt_dlp_refresh_args(refresh_mode) {
       return [];
   }
 
+  if (options && options.skip_comment) {
+    ytdlp_args.push("--no-write-comments");
+  }
+
+  return Array.from(new Set(ytdlp_args));
+}
+
+function build_xsave_yt_dlp_refresh_args(refresh_mode, options) {
+  const base_args = [];
+  if (refresh_mode) {
+    base_args.push("--refresh", "--overwrite");
+  }
+
+  const ytdlp_args = build_xsave_yt_dlp_passthrough_args(
+    refresh_mode,
+    options,
+  );
   if (ytdlp_args.length === 0) {
     return base_args;
   }
@@ -1487,15 +1516,16 @@ function build_xsave_yt_dlp_refresh_args(refresh_mode) {
   return [...base_args, "--", ...ytdlp_args];
 }
 
-function build_xsave_yt_dlp_comment_args(max_comments) {
+function build_xsave_yt_dlp_comment_args(max_comments, options) {
+  if (options && options.skip_comment) return [];
   if (max_comments === undefined || max_comments === null) return [];
   const text = String(max_comments).trim();
   if (!text) return [];
   return ["--max-comment", text];
 }
 
-function build_refresh_args(platform_key, refresh_mode) {
-  if (!refresh_mode) return [];
+function build_refresh_args(platform_key, refresh_mode, options) {
+  if (!refresh_mode && !(options && options.skip_comment)) return [];
   if (
     platform_key !== "youtube" &&
     platform_key !== "bilibili" &&
@@ -1503,7 +1533,7 @@ function build_refresh_args(platform_key, refresh_mode) {
     platform_key !== "bitchute"
   )
     return [];
-  return build_xsave_yt_dlp_refresh_args(refresh_mode);
+  return build_xsave_yt_dlp_refresh_args(refresh_mode, options);
 }
 
 function build_platform_command(platform_key, url, refresh_mode, options) {
@@ -1512,9 +1542,12 @@ function build_platform_command(platform_key, url, refresh_mode, options) {
   const base_args = config.build_args(url, platform_key);
   const comment_args =
     config.command === "xsave_yt_dlp"
-      ? build_xsave_yt_dlp_comment_args(options && options.max_comments)
+      ? build_xsave_yt_dlp_comment_args(
+          options && options.max_comments,
+          options,
+        )
       : [];
-  const refresh_args = build_refresh_args(platform_key, refresh_mode);
+  const refresh_args = build_refresh_args(platform_key, refresh_mode, options);
   const args = [...base_args, ...comment_args, ...refresh_args];
   if (F2_COMMANDS.has(config.command)) {
     const f2_output_dir =

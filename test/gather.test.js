@@ -486,6 +486,88 @@ describe("gather CLI platform selection", () => {
     }
   });
 
+  it("skips comment sidecars for yt-dlp-backed jobs", async () => {
+    const temp_root = await create_temp_dir();
+    const state_file = path.join(temp_root, "gather.state.json");
+
+    try {
+      const config_path = await write_config_file(temp_root);
+      const result = await run_cli([
+        "--dry-run",
+        "--state-file",
+        state_file,
+        "--platform",
+        "youtube",
+        "--skip-comment",
+        config_path,
+      ]);
+
+      expect(result.exit_code).toBe(0);
+      expect(extract_total_jobs(result.stdout)).toBe(1);
+      expect(result.stdout).toContain(
+        "xsave_yt_dlp --channel-library-layout -c https://www.youtube.com/@example -- --no-write-comments",
+      );
+      expect(result.stdout).not.toContain("--max-comment");
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
+  });
+
+  it("adds comment skipping to yt-dlp info refresh commands", async () => {
+    const temp_root = await create_temp_dir();
+    const state_file = path.join(temp_root, "gather.state.json");
+
+    try {
+      const config_path = await write_config_file(temp_root);
+      const result = await run_cli([
+        "--dry-run",
+        "--refresh",
+        "info",
+        "--state-file",
+        state_file,
+        "--platform",
+        "youtube",
+        "--skip-comment",
+        config_path,
+      ]);
+
+      expect(result.exit_code).toBe(0);
+      expect(extract_total_jobs(result.stdout)).toBe(1);
+      expect(result.stdout).toContain(
+        "xsave_yt_dlp --channel-library-layout -c https://www.youtube.com/@example --refresh --overwrite -- --skip-download --no-write-subs --no-write-auto-subs --no-write-comments",
+      );
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
+  });
+
+  it("suppresses max comment forwarding when comments are skipped", async () => {
+    const temp_root = await create_temp_dir();
+    const state_file = path.join(temp_root, "gather.state.json");
+
+    try {
+      const config_path = await write_config_file(temp_root);
+      const result = await run_cli([
+        "--dry-run",
+        "--state-file",
+        state_file,
+        "--platform",
+        "youtube",
+        "--max-comment",
+        "100",
+        "--skip-comment",
+        config_path,
+      ]);
+
+      expect(result.exit_code).toBe(0);
+      expect(extract_total_jobs(result.stdout)).toBe(1);
+      expect(result.stdout).toContain("--no-write-comments");
+      expect(result.stdout).not.toContain("--max-comment 100");
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
+  });
+
   it("rejects the old max-comments option name", async () => {
     const temp_root = await create_temp_dir();
     const state_file = path.join(temp_root, "gather.state.json");
