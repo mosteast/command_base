@@ -115,6 +115,10 @@ const PLATFORM_HANDLE_BASE_URLS = {
 
 const REFRESH_MODE_VALUES = ["media", "info", "all"];
 const DEFAULT_REFRESH_MODE = "info";
+const SKIP_VALUES = ["comment"];
+const SKIP_ALIASES = {
+  comments: "comment",
+};
 const STATE_VERSION = 2;
 
 const palette = {
@@ -298,7 +302,7 @@ function build_help_text(script_name) {
     )})`,
     "  -r, --refresh [mode]         Refresh yt-dlp output (youtube, bilibili, rumble, bitchute; media, info, all; info skips media/subtitles)",
     "      --max-comment <n>        Limit YouTube comment extraction for yt-dlp jobs (default: unlimited)",
-    "      --skip-comment           Skip comment sidecars for yt-dlp jobs (default: false)",
+    "      --skip <name...>         Skip yt-dlp outputs: comment (default: none)",
     "      --stop-on-error          Stop on first failed export (default: false)",
     "  -d, --dry-run                Print commands without executing (default: false)",
     "      --quiet                  Print only warnings and errors (default: false)",
@@ -338,7 +342,7 @@ function build_help_text(script_name) {
     `  ${example_cmd} --max-comment 100 source/exporter.yaml`,
     "",
     "  # Skip comment sidecars during export",
-    `  ${example_cmd} --skip-comment source/exporter.yaml`,
+    `  ${example_cmd} --skip comment source/exporter.yaml`,
     "",
     "  # Initialize the default config if empty",
     `  ${example_cmd} init`,
@@ -499,6 +503,14 @@ function normalize_max_comments(raw_value) {
   return { value: text };
 }
 
+function normalize_skip_value(raw_value) {
+  const text = String(raw_value || "")
+    .trim()
+    .toLowerCase();
+  if (!text) return "";
+  return SKIP_ALIASES[text] || text;
+}
+
 function normalize_range_selection(raw_value) {
   const raw_ranges = normalize_list(raw_value);
   const normalized_ranges = raw_ranges
@@ -640,10 +652,9 @@ function parse_cli_arguments() {
       describe:
         "Limit YouTube comment extraction for yt-dlp jobs (default: unlimited)",
     })
-    .option("skip-comment", {
-      type: "boolean",
-      default: false,
-      describe: "Skip comment sidecars for yt-dlp jobs",
+    .option("skip", {
+      type: "array",
+      describe: "Skip yt-dlp outputs: comment",
     })
     .option("stop-on-error", {
       type: "boolean",
@@ -688,6 +699,14 @@ function parse_cli_arguments() {
     process.exit(1);
   }
 
+  if (argv["skip-comment"] !== undefined) {
+    console.error(
+      chalk.red("Unknown option: --skip-comment. Use --skip comment."),
+    );
+    console.log(build_help_text(argv.$0 || "batch_exporter"));
+    process.exit(1);
+  }
+
   if (argv.help) {
     console.log(build_help_text(argv.$0 || "batch_exporter"));
     process.exit(0);
@@ -705,7 +724,9 @@ function parse_cli_arguments() {
   const raw_include_platforms = normalize_list(argv.platform);
   const raw_exclude_platforms = normalize_list(argv["exclude-platform"]);
   const raw_range_values = normalize_list(argv.range);
+  const raw_skip_values = normalize_list(argv.skip);
   const range_tokens = [];
+  const skip_list = [];
   for (const raw_value of raw_range_values) {
     const normalized_range = String(raw_value || "")
       .trim()
@@ -762,6 +783,25 @@ function parse_cli_arguments() {
     exclude_platforms.push(normalized_platform);
   }
 
+  for (const raw_value of raw_skip_values) {
+    if (looks_like_config_path(raw_value)) {
+      config_patterns.push(raw_value);
+      continue;
+    }
+    const normalized_skip = normalize_skip_value(raw_value);
+    if (!normalized_skip) continue;
+    if (!SKIP_VALUES.includes(normalized_skip)) {
+      console.error(
+        chalk.red(
+          `Invalid --skip value: ${raw_value}. Supported values: ${SKIP_VALUES.join(", ")}`,
+        ),
+      );
+      console.log(build_help_text(argv.$0 || "batch_exporter"));
+      process.exit(1);
+    }
+    skip_list.push(normalized_skip);
+  }
+
   let refresh_result = normalize_refresh_mode(argv.refresh);
   if (
     refresh_result.error &&
@@ -808,7 +848,7 @@ function parse_cli_arguments() {
     refresh_mode: refresh_result.mode,
     refresh_mode_explicit: refresh_result.explicit,
     max_comments: max_comments_result.value,
-    skip_comment: Boolean(argv["skip-comment"]),
+    skip_list: Array.from(new Set(skip_list)),
     stop_on_error: Boolean(argv["stop-on-error"]),
     dry_run: Boolean(argv["dry-run"]),
     quiet_mode: Boolean(argv.quiet),
@@ -1492,7 +1532,11 @@ function build_xsave_yt_dlp_passthrough_args(refresh_mode, options) {
       return [];
   }
 
-  if (options && options.skip_comment) {
+  if (
+    options &&
+    Array.isArray(options.skip_list) &&
+    options.skip_list.includes("comment")
+  ) {
     ytdlp_args.push("--no-write-comments");
   }
 
@@ -1505,10 +1549,7 @@ function build_xsave_yt_dlp_refresh_args(refresh_mode, options) {
     base_args.push("--refresh", "--overwrite");
   }
 
-  const ytdlp_args = build_xsave_yt_dlp_passthrough_args(
-    refresh_mode,
-    options,
-  );
+  const ytdlp_args = build_xsave_yt_dlp_passthrough_args(refresh_mode, options);
   if (ytdlp_args.length === 0) {
     return base_args;
   }
@@ -1517,7 +1558,12 @@ function build_xsave_yt_dlp_refresh_args(refresh_mode, options) {
 }
 
 function build_xsave_yt_dlp_comment_args(max_comments, options) {
-  if (options && options.skip_comment) return [];
+  if (
+    options &&
+    Array.isArray(options.skip_list) &&
+    options.skip_list.includes("comment")
+  )
+    return [];
   if (max_comments === undefined || max_comments === null) return [];
   const text = String(max_comments).trim();
   if (!text) return [];
@@ -1525,7 +1571,15 @@ function build_xsave_yt_dlp_comment_args(max_comments, options) {
 }
 
 function build_refresh_args(platform_key, refresh_mode, options) {
-  if (!refresh_mode && !(options && options.skip_comment)) return [];
+  if (
+    !refresh_mode &&
+    !(
+      options &&
+      Array.isArray(options.skip_list) &&
+      options.skip_list.includes("comment")
+    )
+  )
+    return [];
   if (
     platform_key !== "youtube" &&
     platform_key !== "bilibili" &&

@@ -498,7 +498,8 @@ describe("gather CLI platform selection", () => {
         state_file,
         "--platform",
         "youtube",
-        "--skip-comment",
+        "--skip",
+        "comment",
         config_path,
       ]);
 
@@ -527,7 +528,8 @@ describe("gather CLI platform selection", () => {
         state_file,
         "--platform",
         "youtube",
-        "--skip-comment",
+        "--skip",
+        "comment",
         config_path,
       ]);
 
@@ -555,7 +557,8 @@ describe("gather CLI platform selection", () => {
         "youtube",
         "--max-comment",
         "100",
-        "--skip-comment",
+        "--skip",
+        "comment",
         config_path,
       ]);
 
@@ -583,6 +586,53 @@ describe("gather CLI platform selection", () => {
           "youtube",
           "--max-comments",
           "100",
+          config_path,
+        ]),
+      ).rejects.toMatchObject({
+        exit_code: 1,
+      });
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects the old skip-comment option name", async () => {
+    const temp_root = await create_temp_dir();
+    const state_file = path.join(temp_root, "gather.state.json");
+
+    try {
+      const config_path = await write_config_file(temp_root);
+      await expect(
+        run_cli([
+          "--dry-run",
+          "--state-file",
+          state_file,
+          "--platform",
+          "youtube",
+          "--skip-comment",
+          config_path,
+        ]),
+      ).rejects.toMatchObject({
+        exit_code: 1,
+      });
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects invalid skip values", async () => {
+    const temp_root = await create_temp_dir();
+    const state_file = path.join(temp_root, "gather.state.json");
+
+    try {
+      const config_path = await write_config_file(temp_root);
+      await expect(
+        run_cli([
+          "--dry-run",
+          "--state-file",
+          state_file,
+          "--skip",
+          "invalid",
           config_path,
         ]),
       ).rejects.toMatchObject({
