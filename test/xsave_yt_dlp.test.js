@@ -43,6 +43,24 @@ async function create_temp_dir() {
   return fs.mkdtemp(path.join(os.tmpdir(), "xsave-yt-dlp-test-"));
 }
 
+async function find_files_with_suffix(root_dir, suffix) {
+  const matches = [];
+  const entries = await fs.readdir(root_dir, { withFileTypes: true });
+
+  for (const entry of entries) {
+    const full_path = path.join(root_dir, entry.name);
+    if (entry.isDirectory()) {
+      matches.push(...(await find_files_with_suffix(full_path, suffix)));
+      continue;
+    }
+    if (entry.isFile() && full_path.endsWith(suffix)) {
+      matches.push(full_path);
+    }
+  }
+
+  return matches;
+}
+
 async function create_fake_yt_dlp_bin(temp_root) {
   const bin_dir = path.join(temp_root, "fake_bin");
   const script_path = path.join(bin_dir, "yt-dlp");
@@ -278,6 +296,93 @@ describe("xsave_yt_dlp comment extraction", () => {
     expect(stdout_text).toMatch(
       /--extractor-args youtube:max_comments=100\\,all\\,all\\,all/,
     );
+  });
+
+  it("suppresses comment export when yt-dlp passthrough disables comments", async () => {
+    const result = await run_cli([
+      "--dry-run",
+      "--debug",
+      "--channel",
+      "https://www.youtube.com/@user1",
+      "--max-comment",
+      "100",
+      "--",
+      "--no-write-comments",
+    ]);
+
+    const stdout_text = strip_ansi(result.stdout);
+
+    expect(result.exit_code).toBe(0);
+    expect(stdout_text).toContain("--write-info-json");
+    expect(stdout_text).not.toContain("--write-comments");
+    expect(stdout_text).not.toContain("youtube:max_comments=100,all,all,all");
+    expect(stdout_text).toMatch(/youtube:max_comments=0\\,all\\,all\\,all/);
+    expect(stdout_text).not.toContain("--no-write-comments");
+  });
+
+  it("strips conflicting comment flags before invoking yt-dlp", async () => {
+    const temp_root = await create_temp_dir();
+    const output_dir = path.join(temp_root, "output");
+    const fake_yt_dlp_log = path.join(temp_root, "fake_yt_dlp.log");
+
+    await fs.mkdir(output_dir, { recursive: true });
+    await fs.writeFile(fake_yt_dlp_log, "", "utf8");
+
+    try {
+      const fake_yt_dlp =
+        await create_channel_library_layout_fake_yt_dlp_bin(temp_root);
+
+      const result = await run_cli(
+        [
+          "--debug",
+          "--retry-count",
+          "2",
+          "--no-danmaku",
+          "--channel",
+          "https://www.youtube.com/@example",
+          "--output",
+          output_dir,
+          "--max-comment",
+          "100",
+          "--",
+          "--no-write-comments",
+        ],
+        {
+          env: {
+            PATH: `${fake_yt_dlp.bin_dir}:${process.env.PATH || ""}`,
+            FAKE_YT_DLP_LOG: fake_yt_dlp_log,
+          },
+        },
+      );
+
+      const invocation_lines = (await fs.readFile(fake_yt_dlp_log, "utf8"))
+        .split(/\r?\n/)
+        .filter(Boolean);
+      const download_call = invocation_lines.find(
+        (line) => !line.includes("--skip-download"),
+      );
+      const metadata_call = invocation_lines.find((line) =>
+        line.includes("--skip-download"),
+      );
+
+      expect(result.exit_code).toBe(0);
+      expect(download_call).toBeDefined();
+      expect(metadata_call).toBeDefined();
+      expect(download_call).toContain("youtube:max_comments=0,all,all,all");
+      expect(metadata_call).not.toContain("--write-comments");
+      expect(metadata_call).not.toContain(
+        "youtube:max_comments=100,all,all,all",
+      );
+      expect(metadata_call).toContain("youtube:max_comments=0,all,all,all");
+      expect(
+        invocation_lines.some((line) => line.includes("--no-write-comments")),
+      ).toBe(false);
+      expect(
+        await find_files_with_suffix(output_dir, ".comments"),
+      ).toHaveLength(0);
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
   });
 });
 

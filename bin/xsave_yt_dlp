@@ -1053,6 +1053,10 @@ run_video_yt_dlp() {
             ;;
     esac
 
+    if [ -n "$youtube_comment_extractor_arg" ] && [ "$(detect_platform "$url")" = "youtube" ]; then
+        yt_dlp_args+=(--extractor-args "$youtube_comment_extractor_arg")
+    fi
+
     if [ -n "$player_client" ]; then
         yt_dlp_args+=(--extractor-args "youtube:player_client=${player_client}")
     fi
@@ -1095,8 +1099,8 @@ run_video_metadata_yt_dlp() {
         --continue
     )
 
-    if [ -n "$youtube_comment_limit_arg" ] && [ "$(detect_platform "$url")" = "youtube" ]; then
-        yt_dlp_args+=(--extractor-args "$youtube_comment_limit_arg")
+    if [ -n "$youtube_comment_extractor_arg" ] && [ "$(detect_platform "$url")" = "youtube" ]; then
+        yt_dlp_args+=(--extractor-args "$youtube_comment_extractor_arg")
     fi
 
     if [ "$OVERWRITE" != true ]; then
@@ -2046,6 +2050,28 @@ fi
 
 # All remaining arguments will be passed to yt-dlp
 EXTRA_OPTS=("$@")
+write_comments=true
+
+log_step "Resolve passthrough comment options"
+if [ ${#EXTRA_OPTS[@]} -gt 0 ]; then
+    filtered_extra_opts=()
+    for extra_opt in "${EXTRA_OPTS[@]}"; do
+        case "$extra_opt" in
+            --write-comments)
+                write_comments=true
+                log_debug "Passthrough yt-dlp options keep comment sidecars enabled."
+                ;;
+            --no-write-comments)
+                write_comments=false
+                log_debug "Passthrough yt-dlp options disable comment sidecars."
+                ;;
+            *)
+                filtered_extra_opts+=("$extra_opt")
+                ;;
+        esac
+    done
+    EXTRA_OPTS=("${filtered_extra_opts[@]}")
+fi
 
 # Create download archive directory if it doesn't exist
 log_step "Prepare download archive directory"
@@ -2064,16 +2090,25 @@ EMBED_SUBS_OPTS=()
 WRITE_SUBS_OPTS=()
 WRITE_META_OPTS=(
     --write-info-json
-    --write-comments
     --write-description
     --write-playlist-metafiles
     --write-link
 )
+if [ "$write_comments" = true ]; then
+    WRITE_META_OPTS+=(--write-comments)
+fi
 
 log_step "Configure comment extraction"
-youtube_comment_limit_arg=""
-if [ -n "$max_comments" ]; then
-    youtube_comment_limit_arg="youtube:max_comments=${max_comments},all,all,all"
+youtube_comment_extractor_arg=""
+if [ "$write_comments" = true ] && [ -n "$max_comments" ]; then
+    youtube_comment_extractor_arg="youtube:max_comments=${max_comments},all,all,all"
+elif [ "$write_comments" != true ]; then
+    youtube_comment_extractor_arg="youtube:max_comments=0,all,all,all"
+    if [ -n "$max_comments" ]; then
+        log_debug "Skip requested max comment count because comment sidecars are disabled."
+    else
+        log_debug "Force YouTube comment extraction to zero because comment sidecars are disabled."
+    fi
 fi
 
 if [ "$ONLY_AUDIO" = true ]; then
@@ -2245,6 +2280,9 @@ if [ -n "$CHANNEL_URL" ]; then
         --sleep-subtitles "$sleep_subtitles_seconds"
         --continue
     )
+    if [ -n "$youtube_comment_extractor_arg" ] && [ "$channel_platform" = "youtube" ]; then
+        channel_base_args+=(--extractor-args "$youtube_comment_extractor_arg")
+    fi
     if [ "$OVERWRITE" != true ]; then
         channel_base_args+=(--download-archive "$ARCHIVE_FILE" --no-overwrites)
     else
@@ -2276,8 +2314,8 @@ if [ -n "$CHANNEL_URL" ]; then
         "${WRITE_META_OPTS[@]}"
         --continue
     )
-    if [ -n "$youtube_comment_limit_arg" ] && [ "$channel_platform" = "youtube" ]; then
-        channel_metadata_base_args+=(--extractor-args "$youtube_comment_limit_arg")
+    if [ -n "$youtube_comment_extractor_arg" ] && [ "$channel_platform" = "youtube" ]; then
+        channel_metadata_base_args+=(--extractor-args "$youtube_comment_extractor_arg")
     fi
     if [ "$OVERWRITE" != true ]; then
         channel_metadata_base_args+=(--download-archive "$METADATA_ARCHIVE_FILE" --no-overwrites)
@@ -2594,6 +2632,9 @@ elif [ -n "$PLAYLIST_URL" ]; then
         --sleep-subtitles "$sleep_subtitles_seconds"
         --continue
     )
+    if [ -n "$youtube_comment_extractor_arg" ] && [ "$playlist_platform" = "youtube" ]; then
+        playlist_base_args+=(--extractor-args "$youtube_comment_extractor_arg")
+    fi
     if [ "$OVERWRITE" != true ]; then
         playlist_base_args+=(--download-archive "$ARCHIVE_FILE" --no-overwrites)
     else
@@ -2626,8 +2667,8 @@ elif [ -n "$PLAYLIST_URL" ]; then
         "${WRITE_META_OPTS[@]}"
         --continue
     )
-    if [ -n "$youtube_comment_limit_arg" ] && [ "$playlist_platform" = "youtube" ]; then
-        playlist_metadata_base_args+=(--extractor-args "$youtube_comment_limit_arg")
+    if [ -n "$youtube_comment_extractor_arg" ] && [ "$playlist_platform" = "youtube" ]; then
+        playlist_metadata_base_args+=(--extractor-args "$youtube_comment_extractor_arg")
     fi
     if [ "$OVERWRITE" != true ]; then
         playlist_metadata_base_args+=(--download-archive "$METADATA_ARCHIVE_FILE" --no-overwrites)

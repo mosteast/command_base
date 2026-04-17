@@ -30,6 +30,8 @@ Usage:
 
 Description:
   Run \`gather\`, sleep for a configurable interval, and repeat until interrupted.
+  Any non-loop option is forwarded to \`gather\`.
+  Use \`--\` when a \`gather\` option conflicts with a \`gather_loop\` option.
 
 Options:
   --interval <seconds>    Sleep interval between runs. Accepts integers and decimals. Default: 1
@@ -48,6 +50,12 @@ Examples:
 
   # Pass gather options after --
   ${script_name} -- --range source --platform youtube
+
+  # Pass gather options directly without --
+  ${script_name} --skip comment source/exporter.yaml
+
+  # Pass a conflicting gather option explicitly
+  ${script_name} -- --help
 
   # Preview the command without starting the loop
   ${script_name} --dry-run -- --refresh
@@ -135,10 +143,12 @@ while [ "$#" -gt 0 ]; do
       ;;
     --debug)
       debug_mode=true
+      gather_args+=("$1")
       shift
       ;;
     --quiet)
       quiet_mode=true
+      gather_args+=("$1")
       shift
       ;;
     -d|--dry-run)
@@ -163,8 +173,8 @@ while [ "$#" -gt 0 ]; do
       break
       ;;
     -*)
-      log_error "Unknown option: $1"
-      exit 1
+      gather_args+=("$1")
+      shift
       ;;
     *)
       gather_args+=("$1")
