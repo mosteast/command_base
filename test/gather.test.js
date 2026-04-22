@@ -6,13 +6,13 @@ import { describe, it, expect } from "vitest";
 
 const cli_entry = path.resolve(__dirname, "../bin/gather");
 
-function run_cli(args) {
+function run_cli(args, env_overrides = {}) {
   return new Promise((resolve, reject) => {
     execFile(
       process.execPath,
       [cli_entry, ...args],
       {
-        env: { ...process.env, FORCE_COLOR: "0" },
+        env: { ...process.env, ...env_overrides, FORCE_COLOR: "0" },
         maxBuffer: 1024 * 1024,
       },
       (error, stdout, stderr) => {
@@ -170,6 +170,52 @@ async function write_video_source_config_file(temp_root) {
   ].join("\n");
   await fs.writeFile(config_path, config_text, "utf8");
   return config_path;
+}
+
+async function write_stub_f2_compat_command(temp_root) {
+  const bin_dir = path.join(temp_root, "fake_bin");
+  const script_path = path.join(bin_dir, "f2_compat");
+  const script_text = [
+    "#!/usr/bin/env bash",
+    "",
+    "set -euo pipefail",
+    "",
+    'output_dir=""',
+    'while [ "$#" -gt 0 ]; do',
+    '  case "$1" in',
+    "    -p)",
+    '      if [ "$#" -lt 2 ]; then',
+    "        exit 90",
+    "      fi",
+    '      output_dir="$2"',
+    "      shift 2",
+    "      ;;",
+    "    *)",
+    "      shift",
+    "      ;;",
+    "  esac",
+    "done",
+    "",
+    'if [ -z "$output_dir" ]; then',
+    "  exit 91",
+    "fi",
+    "",
+    'if [ ! -d "$output_dir" ]; then',
+    "  exit 93",
+    "fi",
+    "",
+    'if find "$output_dir" -type f -size 0 | grep -q .; then',
+    "  exit 92",
+    "fi",
+    "",
+    "exit 0",
+    "",
+  ].join("\n");
+
+  await fs.mkdir(bin_dir, { recursive: true });
+  await fs.writeFile(script_path, script_text, "utf8");
+  await fs.chmod(script_path, 0o755);
+  return { bin_dir, script_path };
 }
 
 function extract_total_jobs(stdout_text) {
@@ -368,6 +414,58 @@ describe("gather CLI platform selection", () => {
 
       expect(result.exit_code).toBe(0);
       expect(result.stdout).toContain(`-p "${default_f2_output_dir}"`);
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
+  });
+
+  it("removes empty files before running f2 exports", async () => {
+    const temp_root = await create_temp_dir();
+    const state_file = path.join(temp_root, "gather.state.json");
+    const f2_output_dir = path.join(temp_root, "f2_output");
+    const empty_file_path = path.join(
+      f2_output_dir,
+      "douyin",
+      "post",
+      "example_source",
+      "empty.mp4",
+    );
+    const keep_file_path = path.join(
+      f2_output_dir,
+      "douyin",
+      "post",
+      "example_source",
+      "keep.txt",
+    );
+
+    try {
+      await fs.mkdir(path.dirname(empty_file_path), { recursive: true });
+      await fs.writeFile(empty_file_path, "");
+      await fs.writeFile(keep_file_path, "keep", "utf8");
+      const config_path = await write_douyin_config_file(temp_root);
+      const { bin_dir } = await write_stub_f2_compat_command(temp_root);
+
+      const result = await run_cli(
+        [
+          "--state-file",
+          state_file,
+          "--platform",
+          "douyin",
+          "--f2-output-dir",
+          f2_output_dir,
+          config_path,
+        ],
+        {
+          PATH: `${bin_dir}${path.delimiter}${process.env.PATH || ""}`,
+        },
+      );
+
+      expect(result.exit_code).toBe(0);
+      await expect(fs.stat(empty_file_path)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+      expect(await fs.readFile(keep_file_path, "utf8")).toBe("keep");
+      expect(result.stdout).toContain("Removed 1 empty file(s)");
     } finally {
       await fs.rm(temp_root, { recursive: true, force: true });
     }

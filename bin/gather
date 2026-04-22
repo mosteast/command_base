@@ -1619,6 +1619,224 @@ function build_platform_command(platform_key, url, refresh_mode, options) {
   };
 }
 
+function normalize_f2_path_part(raw_value) {
+  const text = String(raw_value || "")
+    .trim()
+    .toLowerCase();
+  if (!text) return "";
+  if (!/^[a-z0-9_-]+$/.test(text)) return "";
+  return text;
+}
+
+function normalize_f2_platform_directory(raw_value) {
+  const text = normalize_f2_path_part(raw_value);
+  if (!text) return "";
+  if (text === "dy" || text === "douyin") return "douyin";
+  if (text === "x" || text === "x_f2" || text === "twitter") return "x";
+  return text;
+}
+
+function read_option_value(command_args, flag_names) {
+  if (!Array.isArray(command_args) || command_args.length === 0) return "";
+  const normalized_flag_names = Array.isArray(flag_names) ? flag_names : [];
+  if (normalized_flag_names.length === 0) return "";
+
+  for (let index = 0; index < command_args.length; index += 1) {
+    const current_arg = String(command_args[index] || "").trim();
+    if (!current_arg) continue;
+
+    for (const flag_name of normalized_flag_names) {
+      if (current_arg === flag_name) {
+        const next_value = String(command_args[index + 1] || "").trim();
+        return next_value;
+      }
+      const option_prefix = `${flag_name}=`;
+      if (current_arg.startsWith(option_prefix)) {
+        return current_arg.slice(option_prefix.length).trim();
+      }
+    }
+  }
+
+  return "";
+}
+
+function build_f2_cleanup_directories(command_config, options) {
+  if (!command_config || !F2_COMMANDS.has(command_config.command)) return [];
+
+  const f2_output_dir =
+    options && typeof options.f2_output_dir === "string"
+      ? options.f2_output_dir.trim()
+      : "";
+  if (!f2_output_dir) return [];
+
+  const resolved_output_dir = path.resolve(expand_user_path(f2_output_dir));
+  const command_args = Array.isArray(command_config.args)
+    ? command_config.args
+    : [];
+  const platform_directory = normalize_f2_platform_directory(command_args[0]);
+  const mode_directory = normalize_f2_path_part(
+    read_option_value(command_args, ["-M", "--mode"]),
+  );
+
+  const candidate_directories = [];
+  if (platform_directory && mode_directory) {
+    candidate_directories.push(
+      path.join(resolved_output_dir, platform_directory, mode_directory),
+    );
+  }
+  if (platform_directory) {
+    candidate_directories.push(
+      path.join(resolved_output_dir, platform_directory),
+    );
+  }
+  candidate_directories.push(resolved_output_dir);
+
+  return Array.from(new Set(candidate_directories));
+}
+
+function is_safe_cleanup_directory(target_dir) {
+  const resolved_dir = path.resolve(String(target_dir || "").trim());
+  if (!resolved_dir) return false;
+  const root_dir = path.parse(resolved_dir).root;
+  return resolved_dir !== root_dir;
+}
+
+function format_error_message(error) {
+  if (!error) return "Unknown error";
+  if (typeof error.message === "string" && error.message.trim()) {
+    return error.message;
+  }
+  return String(error);
+}
+
+async function find_first_existing_directory(candidate_directories, logger) {
+  for (const candidate_directory of candidate_directories) {
+    if (!is_safe_cleanup_directory(candidate_directory)) {
+      logger.warn(
+        `Skip empty-file cleanup for unsafe directory: ${candidate_directory}`,
+      );
+      continue;
+    }
+
+    try {
+      logger.debug(`IO: stat cleanup directory ${candidate_directory}`);
+      const stat = await fs.stat(candidate_directory);
+      if (stat.isDirectory()) return candidate_directory;
+    } catch (error) {
+      if (!error || error.code !== "ENOENT") {
+        logger.warn(
+          `Unable to inspect cleanup directory ${candidate_directory}: ${format_error_message(
+            error,
+          )}`,
+        );
+      }
+    }
+  }
+
+  return "";
+}
+
+async function remove_zero_byte_files(target_dir, logger) {
+  const pending_directories = [target_dir];
+  let removed_count = 0;
+
+  while (pending_directories.length > 0) {
+    const current_directory = pending_directories.pop();
+    if (!current_directory) continue;
+
+    let entries = [];
+    try {
+      logger.debug(`IO: read directory ${current_directory}`);
+      entries = await fs.readdir(current_directory, { withFileTypes: true });
+    } catch (error) {
+      if (!error || error.code !== "ENOENT") {
+        logger.warn(
+          `Unable to read cleanup directory ${current_directory}: ${format_error_message(
+            error,
+          )}`,
+        );
+      }
+      continue;
+    }
+
+    for (const entry of entries) {
+      const entry_path = path.join(current_directory, entry.name);
+
+      if (entry.isDirectory()) {
+        pending_directories.push(entry_path);
+        continue;
+      }
+
+      if (!entry.isFile()) continue;
+
+      let entry_stat;
+      try {
+        logger.debug(`IO: stat file ${entry_path}`);
+        entry_stat = await fs.stat(entry_path);
+      } catch (error) {
+        if (!error || error.code !== "ENOENT") {
+          logger.warn(
+            `Unable to inspect file ${entry_path}: ${format_error_message(error)}`,
+          );
+        }
+        continue;
+      }
+
+      if (entry_stat.size !== 0) continue;
+
+      try {
+        logger.debug(`IO: remove empty file ${entry_path}`);
+        await fs.unlink(entry_path);
+        removed_count += 1;
+      } catch (error) {
+        if (!error || error.code !== "ENOENT") {
+          logger.warn(
+            `Unable to remove empty file ${entry_path}: ${format_error_message(error)}`,
+          );
+        }
+      }
+    }
+  }
+
+  return removed_count;
+}
+
+async function cleanup_empty_files_before_export(
+  command_config,
+  options,
+  logger,
+) {
+  if (!command_config || !F2_COMMANDS.has(command_config.command)) return;
+  if (options.dry_run) return;
+
+  const candidate_directories = build_f2_cleanup_directories(
+    command_config,
+    options,
+  );
+  if (candidate_directories.length === 0) return;
+
+  const cleanup_directory = await find_first_existing_directory(
+    candidate_directories,
+    logger,
+  );
+  if (!cleanup_directory) {
+    logger.debug(
+      "Step: pre-export empty-file cleanup skipped (no existing target directory).",
+    );
+    return;
+  }
+
+  logger.debug(`Step: pre-export empty-file cleanup ${cleanup_directory}`);
+  const removed_count = await remove_zero_byte_files(cleanup_directory, logger);
+  if (removed_count > 0) {
+    logger.info(
+      `Removed ${removed_count} empty file(s) from ${palette.path(cleanup_directory)} before export.`,
+    );
+  } else {
+    logger.debug(`No empty files found in ${cleanup_directory} before export.`);
+  }
+}
+
 function build_job_key(platform_key, url) {
   return `${platform_key}::${url}`;
 }
@@ -1901,6 +2119,7 @@ async function run_export_job(job, command_config, options, logger) {
     return { ok: true, command_text, exit_code: 0, dry_run: true };
   }
 
+  await cleanup_empty_files_before_export(command_config, options, logger);
   logger.debug(`IO: spawn ${command_text}`);
 
   return new Promise((resolve) => {
