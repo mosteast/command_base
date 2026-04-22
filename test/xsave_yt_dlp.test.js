@@ -261,6 +261,77 @@ NODE
   return { bin_dir };
 }
 
+async function create_bilibili_channel_name_fake_yt_dlp_bin(temp_root) {
+  const bin_dir = path.join(temp_root, "fake_bin_bilibili_channel_name");
+  const script_path = path.join(bin_dir, "yt-dlp");
+
+  await fs.mkdir(bin_dir, { recursive: true });
+  await fs.writeFile(
+    script_path,
+    `#!/usr/bin/env bash
+set -euo pipefail
+
+log_file="\${FAKE_YT_DLP_LOG:?}"
+printf '%s\\n' "$*" >> "$log_file"
+
+node - "$@" <<'NODE'
+const fs = require("fs");
+const path = require("path");
+
+const args = process.argv.slice(2);
+const meta = {
+  uploader: "489990823",
+  channel_id: "489990823",
+  channel: "Example Bili Creator",
+  creator: "Example Bili Creator",
+  playlist: "",
+  title: "Sample Video",
+  id: "BV1example",
+  ext: "mp4",
+};
+
+function argValue(name) {
+  const index = args.indexOf(name);
+  if (index === -1 || index === args.length - 1) return "";
+  return args[index + 1];
+}
+
+function renderTemplate(template) {
+  return String(template || "").replace(/%\\(([^)]+)\\)([a-z])/g, (_match, fieldExpr) => {
+    const candidates = fieldExpr.split(",");
+    for (const candidate of candidates) {
+      const key = candidate.trim();
+      if (key && meta[key]) {
+        return meta[key];
+      }
+    }
+    return "";
+  });
+}
+
+function ensureFile(filePath, contents = "") {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, contents, "utf8");
+}
+
+const outputTemplate = argValue("-o");
+const renderedFilename = renderTemplate(outputTemplate);
+const isSkipDownload = args.includes("--skip-download");
+
+if (!isSkipDownload) {
+  ensureFile(renderedFilename, "fake media");
+}
+
+process.stdout.write("[download] Finished downloading playlist: Example Bili Creator\\n");
+NODE
+`,
+    "utf8",
+  );
+  await fs.chmod(script_path, 0o755);
+
+  return { bin_dir };
+}
+
 describe("xsave_yt_dlp match filters", () => {
   it("keeps missing availability fields in the generated yt-dlp command", async () => {
     const result = await run_cli([
@@ -455,6 +526,56 @@ describe("xsave_yt_dlp danmaku handling", () => {
     expect(
       stdout_text.match(/--cookies-from-browser safari/g)?.length ?? 0,
     ).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe("xsave_yt_dlp bilibili channel naming", () => {
+  it("prefers channel name over channel id for channel directories", async () => {
+    const temp_root = await create_temp_dir();
+    const output_dir = path.join(temp_root, "output");
+    const fake_yt_dlp_log = path.join(temp_root, "fake_yt_dlp.log");
+
+    await fs.mkdir(output_dir, { recursive: true });
+    await fs.writeFile(fake_yt_dlp_log, "", "utf8");
+
+    try {
+      const fake_yt_dlp =
+        await create_bilibili_channel_name_fake_yt_dlp_bin(temp_root);
+
+      const result = await run_cli(
+        [
+          "--debug",
+          "--retry-count",
+          "2",
+          "--no-danmaku",
+          "--channel",
+          "https://space.bilibili.com/489990823",
+          "--output",
+          output_dir,
+        ],
+        {
+          env: {
+            PATH: `${fake_yt_dlp.bin_dir}:${process.env.PATH || ""}`,
+            FAKE_YT_DLP_LOG: fake_yt_dlp_log,
+          },
+        },
+      );
+
+      const expected_media = path.join(
+        output_dir,
+        "Example Bili Creator",
+        "Sample Video.mp4",
+      );
+      const numeric_dir = path.join(output_dir, "489990823");
+
+      expect(result.exit_code).toBe(0);
+      await expect(fs.readFile(expected_media, "utf8")).resolves.toBe(
+        "fake media",
+      );
+      await expect(fs.access(numeric_dir)).rejects.toThrow();
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
   });
 });
 

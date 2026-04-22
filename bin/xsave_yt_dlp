@@ -454,7 +454,7 @@ build_default_video_output_template() {
 
 build_channel_library_video_output_template() {
     local base_dir="$1"
-    printf "%s" "$base_dir/%(uploader,channel,creator,playlist_uploader)s - Videos/%(title)s [%(id)s].%(ext)s"
+    printf "%s" "$base_dir/%(channel,creator,uploader,playlist_uploader,channel_id)s - Videos/%(title)s [%(id)s].%(ext)s"
 }
 
 build_video_output_template() {
@@ -480,7 +480,7 @@ build_channel_output_template() {
             printf "%s" "$base_dir/%(playlist)s/%(n_entries+1-playlist_index)d.%(title)s.%(ext)s"
             ;;
         *)
-            printf "%s" "$base_dir/%(playlist,channel_id,channel,creator,uploader)s/%(title)s.%(ext)s"
+            printf "%s" "$base_dir/%(channel,creator,uploader,playlist,channel_id)s/%(title)s.%(ext)s"
             ;;
     esac
 }
