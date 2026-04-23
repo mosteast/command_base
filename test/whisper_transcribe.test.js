@@ -136,4 +136,72 @@ describe("whisper transcription", () => {
       fs.readFile(path.join(directory, "sample.vtt"), "utf8"),
     ).resolves.toContain("Speaker 1: hello");
   });
+
+  it("renames whisper input-stem output to the requested output base name", async () => {
+    const directory = await create_temp_directory();
+    const input_path = path.join(directory, "audio_source.opus");
+    const whisper_path = path.join(directory, "whisper");
+    await fs.writeFile(input_path, "fake audio", "utf8");
+    await fs.writeFile(
+      whisper_path,
+      [
+        "#!/bin/sh",
+        'output_dir=""',
+        'output_format="txt"',
+        'input_path=""',
+        'previous_arg=""',
+        'for arg in "$@"; do',
+        '  if [ "$previous_arg" = "--output_dir" ]; then',
+        '    output_dir="$arg"',
+        '    previous_arg=""',
+        "    continue",
+        "  fi",
+        '  if [ "$previous_arg" = "--output_format" ]; then',
+        '    output_format="$arg"',
+        '    previous_arg=""',
+        "    continue",
+        "  fi",
+        '  case "$arg" in',
+        "    --output_dir|--output_format)",
+        '      previous_arg="$arg"',
+        "      ;;",
+        "    *)",
+        '      input_path="$arg"',
+        "      ;;",
+        "  esac",
+        "done",
+        'base_name="$(basename "$input_path")"',
+        'base_name="${base_name%.*}"',
+        'mkdir -p "$output_dir"',
+        "printf 'WEBVTT\\n\\n00:00.000 --> 00:01.000\\nhello\\n' > \"$output_dir/$base_name.$output_format\"",
+      ].join("\n"),
+      "utf8",
+    );
+    await fs.chmod(whisper_path, 0o755);
+
+    const result = await transcribeWithWhisper({
+      inputPath: input_path,
+      outputBaseName: "video_target",
+      whisperPath: whisper_path,
+      logger: {
+        log() {},
+        warn() {},
+        debug() {},
+      },
+    });
+
+    expect(result.outputs).toEqual([
+      {
+        format: "vtt",
+        path: path.join(directory, "video_target.vtt"),
+      },
+    ]);
+    expect(result.primaryOutput).toBe(path.join(directory, "video_target.vtt"));
+    await expect(
+      fs.readFile(path.join(directory, "video_target.vtt"), "utf8"),
+    ).resolves.toContain("Speaker 1: hello");
+    await expect(
+      fs.access(path.join(directory, "audio_source.vtt")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  });
 });
