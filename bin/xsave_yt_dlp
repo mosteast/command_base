@@ -27,7 +27,7 @@ youtube_cookie_browser="chrome"
 youtube_cookie_browser_provided=false
 youtube_cookie_file=""
 youtube_cookie_file_provided=false
-script_version="1.0.7"
+script_version="1.0.9"
 yt_dlp_color_policy="always"
 yt_dlp_color_opts=(--color "$yt_dlp_color_policy")
 default_video_subtitle_langs="en,en-US,zh-Hans,zh-Hant,zh-CN,zh"
@@ -334,6 +334,8 @@ ${color_blue}Examples:${color_reset}
   # Download a Bilibili space
   \$0 -c https://space.bilibili.com/39449692
 
+  # If uploads list is empty but the space has playlists, pass a playlist URL (\$0 -l) such as …/lists/<id>?type=series
+
   # Download a Rumble channel
   \$0 -c https://rumble.com/c/m16
 
@@ -454,13 +456,23 @@ build_default_video_output_template() {
 
 build_channel_library_video_output_template() {
     local base_dir="$1"
-    printf "%s" "$base_dir/%(channel,creator,uploader,playlist_uploader,channel_id)s - Videos/%(title)s [%(id)s].%(ext)s"
+    local platform="${2:-}"
+    case "$platform" in
+        bilibili)
+            # Space playlists often reuse the numeric mid as playlist title/channel_id; coalescing onto those yields ID folders.
+            printf "%s" "$base_dir/%(uploader,channel,creator,playlist_uploader)s - Videos/%(title)s [%(id)s].%(ext)s"
+            ;;
+        *)
+            printf "%s" "$base_dir/%(channel,creator,uploader,playlist_uploader,channel_id)s - Videos/%(title)s [%(id)s].%(ext)s"
+            ;;
+    esac
 }
 
 build_video_output_template() {
     local base_dir="$1"
+    local platform="${2:-}"
     if [ "$channel_library_layout" = true ]; then
-        build_channel_library_video_output_template "$base_dir"
+        build_channel_library_video_output_template "$base_dir" "$platform"
         return 0
     fi
     build_default_video_output_template "$base_dir"
@@ -471,13 +483,16 @@ build_channel_output_template() {
     local platform="$2"
 
     if [ "$channel_library_layout" = true ]; then
-        build_channel_library_video_output_template "$base_dir"
+        build_channel_library_video_output_template "$base_dir" "$platform"
         return 0
     fi
 
     case "$platform" in
         youtube)
             printf "%s" "$base_dir/%(playlist)s/%(n_entries+1-playlist_index)d.%(title)s.%(ext)s"
+            ;;
+        bilibili)
+            printf "%s" "$base_dir/%(uploader,channel,creator,playlist_uploader)s/%(title)s.%(ext)s"
             ;;
         *)
             printf "%s" "$base_dir/%(channel,creator,uploader,playlist,channel_id)s/%(title)s.%(ext)s"
@@ -490,7 +505,7 @@ build_playlist_output_template() {
     local platform="$2"
 
     if [ "$channel_library_layout" = true ]; then
-        build_channel_library_video_output_template "$base_dir"
+        build_channel_library_video_output_template "$base_dir" "$platform"
         return 0
     fi
 
@@ -633,8 +648,17 @@ normalize_channel_url() {
                     query="${base#*\?}"
                     base="${base%%\?*}"
                 fi
-                if [[ "$base" != */video && "$base" != */video/ ]]; then
-                    base="${base%/}/video"
+                # Match the site's "uploads · video" tab; /upload/audio is left unchanged.
+                if [[ "$base" == */upload/audio || "$base" == */upload/audio/ ]]; then
+                    :
+                elif [[ "$base" == */upload/video || "$base" == */upload/video/ ]]; then
+                    :
+                elif [[ "$base" == */video || "$base" == */video/ ]]; then
+                    base="${base%/}"
+                    base="${base%/video}"
+                    base="${base%/}/upload/video"
+                else
+                    base="${base%/}/upload/video"
                 fi
                 if [ -n "$query" ]; then
                     url="${base}?${query}"
@@ -646,6 +670,14 @@ normalize_channel_url() {
     esac
 
     printf "%s" "$url"
+}
+
+# Pinned UA is kept for extractor quirks on some sites; Bilibili treats a stale UA as bot traffic.
+should_append_legacy_ytdlp_user_agent() {
+    case "$1" in
+        bilibili) return 1 ;;
+        *) return 0 ;;
+    esac
 }
 
 contains_non_ascii() {
@@ -1006,10 +1038,12 @@ run_video_yt_dlp() {
     local cookie_mode="$4"
     local player_client="$5"
     local insecure_ssl="$6"
+    local video_platform_for_ua
+    video_platform_for_ua=$(detect_platform "$url")
 
     build_main_subtitle_lang_opts "$default_video_subtitle_langs"
     local output_template
-    output_template=$(build_video_output_template "$output_dir")
+    output_template=$(build_video_output_template "$output_dir" "$video_platform_for_ua")
 
     local -a yt_dlp_args
     yt_dlp_args=(
@@ -1053,7 +1087,7 @@ run_video_yt_dlp() {
             ;;
     esac
 
-    if [ -n "$youtube_comment_extractor_arg" ] && [ "$(detect_platform "$url")" = "youtube" ]; then
+    if [ -n "$youtube_comment_extractor_arg" ] && [ "$video_platform_for_ua" = "youtube" ]; then
         yt_dlp_args+=(--extractor-args "$youtube_comment_extractor_arg")
     fi
 
@@ -1070,10 +1104,11 @@ run_video_yt_dlp() {
         --add-header "Accept-Language:en-us,en;q=0.5"
         --add-header "Accept-Encoding:gzip, deflate"
         --add-header "Accept-Charset:ISO-8859-1,utf-8;q=0.7,*;q=0.7"
-        --add-header "User-Agent:Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
-        "${EXTRA_OPTS[@]}"
-        "$url"
     )
+    if should_append_legacy_ytdlp_user_agent "$video_platform_for_ua"; then
+        yt_dlp_args+=(--add-header "User-Agent:Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36")
+    fi
+    yt_dlp_args+=("${EXTRA_OPTS[@]}" "$url")
 
     run_yt_dlp_with_log yt-dlp "${yt_dlp_args[@]}"
 }
@@ -1085,9 +1120,11 @@ run_video_metadata_yt_dlp() {
     local cookie_mode="$4"
     local player_client="$5"
     local insecure_ssl="$6"
+    local video_platform_for_ua
+    video_platform_for_ua=$(detect_platform "$url")
 
     local output_template
-    output_template=$(build_video_output_template "$output_dir")
+    output_template=$(build_video_output_template "$output_dir" "$video_platform_for_ua")
 
     local -a yt_dlp_args
     yt_dlp_args=(
@@ -1099,7 +1136,7 @@ run_video_metadata_yt_dlp() {
         --continue
     )
 
-    if [ -n "$youtube_comment_extractor_arg" ] && [ "$(detect_platform "$url")" = "youtube" ]; then
+    if [ -n "$youtube_comment_extractor_arg" ] && [ "$video_platform_for_ua" = "youtube" ]; then
         yt_dlp_args+=(--extractor-args "$youtube_comment_extractor_arg")
     fi
 
@@ -1144,10 +1181,11 @@ run_video_metadata_yt_dlp() {
         --add-header "Accept-Language:en-us,en;q=0.5"
         --add-header "Accept-Encoding:gzip, deflate"
         --add-header "Accept-Charset:ISO-8859-1,utf-8;q=0.7,*;q=0.7"
-        --add-header "User-Agent:Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
-        "${EXTRA_OPTS[@]}"
-        "$url"
     )
+    if should_append_legacy_ytdlp_user_agent "$video_platform_for_ua"; then
+        yt_dlp_args+=(--add-header "User-Agent:Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36")
+    fi
+    yt_dlp_args+=("${EXTRA_OPTS[@]}" "$url")
 
     run_yt_dlp_with_log yt-dlp "${yt_dlp_args[@]}"
 }
@@ -1158,9 +1196,11 @@ run_video_danmaku_yt_dlp() {
     local output_dir="$3"
     local cookie_mode="$4"
     local insecure_ssl="$5"
+    local video_platform_for_ua
+    video_platform_for_ua=$(detect_platform "$url")
 
     local output_template
-    output_template=$(build_video_output_template "$output_dir")
+    output_template=$(build_video_output_template "$output_dir" "$video_platform_for_ua")
 
     local -a yt_dlp_args
     yt_dlp_args=(
@@ -1212,9 +1252,11 @@ run_video_danmaku_yt_dlp() {
         --add-header "Accept-Language:en-us,en;q=0.5"
         --add-header "Accept-Encoding:gzip, deflate"
         --add-header "Accept-Charset:ISO-8859-1,utf-8;q=0.7,*;q=0.7"
-        --add-header "User-Agent:Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
-        "$url"
     )
+    if should_append_legacy_ytdlp_user_agent "$video_platform_for_ua"; then
+        yt_dlp_args+=(--add-header "User-Agent:Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36")
+    fi
+    yt_dlp_args+=("$url")
 
     run_yt_dlp_with_log yt-dlp "${yt_dlp_args[@]}"
 }
@@ -1227,6 +1269,8 @@ run_channel_danmaku_yt_dlp() {
     local insecure_ssl="$5"
     shift 5
     local -a referer_opts=("$@")
+    local channel_danmu_platform_for_ua
+    channel_danmu_platform_for_ua=$(detect_platform "$url")
 
     local -a yt_dlp_args
     yt_dlp_args=(
@@ -1277,10 +1321,11 @@ run_channel_danmaku_yt_dlp() {
         --add-header "Accept-Language:en-us,en;q=0.5"
         --add-header "Accept-Encoding:gzip, deflate"
         --add-header "Accept-Charset:ISO-8859-1,utf-8;q=0.7,*;q=0.7"
-        --add-header "User-Agent:Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
-        "${referer_opts[@]}"
-        "$url"
     )
+    if should_append_legacy_ytdlp_user_agent "$channel_danmu_platform_for_ua"; then
+        yt_dlp_args+=(--add-header "User-Agent:Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36")
+    fi
+    yt_dlp_args+=("${referer_opts[@]}" "$url")
 
     run_yt_dlp_with_log yt-dlp "${yt_dlp_args[@]}"
 }
@@ -1291,6 +1336,8 @@ run_playlist_danmaku_yt_dlp() {
     local output_template="$3"
     local cookie_mode="$4"
     local insecure_ssl="$5"
+    local playlist_danmu_platform_for_ua
+    playlist_danmu_platform_for_ua=$(detect_platform "$url")
 
     local -a yt_dlp_args
     yt_dlp_args=(
@@ -1342,9 +1389,11 @@ run_playlist_danmaku_yt_dlp() {
         --add-header "Accept-Language:en-us,en;q=0.5"
         --add-header "Accept-Encoding:gzip, deflate"
         --add-header "Accept-Charset:ISO-8859-1,utf-8;q=0.7,*;q=0.7"
-        --add-header "User-Agent:Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
-        "$url"
     )
+    if should_append_legacy_ytdlp_user_agent "$playlist_danmu_platform_for_ua"; then
+        yt_dlp_args+=(--add-header "User-Agent:Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36")
+    fi
+    yt_dlp_args+=("$url")
 
     run_yt_dlp_with_log yt-dlp "${yt_dlp_args[@]}"
 }
@@ -1370,6 +1419,9 @@ export_playlist_layout_manifest_json() {
     local insecure_ssl="$5"
     shift 5
     local -a extractor_opts=("$@")
+    local manifest_platform_for_ua
+    manifest_platform_for_ua=$(detect_platform "$playlist_url")
+
     local -a yt_dlp_args
     yt_dlp_args=(
         --playlist-reverse
@@ -1383,8 +1435,10 @@ export_playlist_layout_manifest_json() {
         --add-header "Accept-Language:en-us,en;q=0.5"
         --add-header "Accept-Encoding:gzip, deflate"
         --add-header "Accept-Charset:ISO-8859-1,utf-8;q=0.7,*;q=0.7"
-        --add-header "User-Agent:Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
     )
+    if should_append_legacy_ytdlp_user_agent "$manifest_platform_for_ua"; then
+        yt_dlp_args+=(--add-header "User-Agent:Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36")
+    fi
 
     case "$cookie_mode" in
         browser)
@@ -2301,9 +2355,11 @@ if [ -n "$CHANNEL_URL" ]; then
         --add-header "Accept-Language:en-us,en;q=0.5"
         --add-header "Accept-Encoding:gzip, deflate"
         --add-header "Accept-Charset:ISO-8859-1,utf-8;q=0.7,*;q=0.7"
-        --add-header "User-Agent:Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
-        "${EXTRA_OPTS[@]}"
     )
+    if should_append_legacy_ytdlp_user_agent "$channel_platform"; then
+        channel_tail_args+=(--add-header "User-Agent:Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36")
+    fi
+    channel_tail_args+=("${EXTRA_OPTS[@]}")
     channel_metadata_base_args=(
         --playlist-reverse
         "${yt_dlp_color_opts[@]}"
@@ -2654,9 +2710,11 @@ elif [ -n "$PLAYLIST_URL" ]; then
         --add-header "Accept-Language:en-us,en;q=0.5"
         --add-header "Accept-Encoding:gzip, deflate"
         --add-header "Accept-Charset:ISO-8859-1,utf-8;q=0.7,*;q=0.7"
-        --add-header "User-Agent:Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
-        "${EXTRA_OPTS[@]}"
     )
+    if should_append_legacy_ytdlp_user_agent "$playlist_platform"; then
+        playlist_tail_args+=(--add-header "User-Agent:Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36")
+    fi
+    playlist_tail_args+=("${EXTRA_OPTS[@]}")
     playlist_metadata_base_args=(
         --playlist-reverse
         "${yt_dlp_color_opts[@]}"
