@@ -1,0 +1,506 @@
+#!/usr/bin/env node
+
+const { readFile, writeFile, mkdir, stat } = require("fs/promises");
+const path = require("path");
+const { globSync } = require("glob");
+const chalk = require("chalk");
+const yargs = require("yargs");
+
+const package_json = require("../package.json");
+
+const DEFAULT_OUTPUT_EXTENSION = ".env";
+const STDIN_SENTINEL = "-";
+
+function normalize_extension(extension_text) {
+  if (!extension_text) return DEFAULT_OUTPUT_EXTENSION;
+  return extension_text.startsWith(".") ? extension_text : `.${extension_text}`;
+}
+
+function create_logger({ quiet_mode, debug_mode }) {
+  const prefix = chalk.dim("json2env");
+
+  function format_message(message) {
+    return `${prefix} ${message}`;
+  }
+
+  return {
+    info(message) {
+      if (quiet_mode) return;
+      console.log(format_message(chalk.green(message)));
+    },
+    warn(message) {
+      if (quiet_mode) return;
+      console.warn(format_message(chalk.yellow(message)));
+    },
+    error(message, error) {
+      const base_message = format_message(chalk.red(message));
+      console.error(base_message);
+      if (debug_mode && error) {
+        console.error(chalk.red(error.stack || String(error)));
+      }
+    },
+    debug(message) {
+      if (!debug_mode || quiet_mode) return;
+      console.log(format_message(chalk.cyan(`[debug] ${message}`)));
+    },
+  };
+}
+
+function build_help_text(script_name) {
+  return [
+    `${chalk.bold("Usage")}`,
+    `  ${script_name} [options] <patterns...>`,
+    `  ${script_name} -                                  # Read JSON from stdin`,
+    `  echo '{{"PORT":3000}}' | ${script_name}          # Pipe JSON, print .env to stdout`,
+    "",
+    `${chalk.bold("Description")}`,
+    "  Convert JSON files or stdin into dotenv-style KEY=value lines.",
+    "  Nested objects are flattened using a separator (default: underscore).",
+    "  Arrays and non-plain values are written as JSON in the value (quoted when needed).",
+    "",
+    `${chalk.bold("Options")}`,
+    "  -o, --out <dir>         Output directory (defaults to source directory)",
+    "  -e, --extension <ext>   Output extension (default: .env)",
+    "  -F, --force             Overwrite existing files (default: false)",
+    "  --no-flatten            Only accept a flat object (error if nested)",
+    "  --separator <s>         Join nested keys with this string (default: _)",
+    "  --prefix <p>            Prefix every key (after flatten and sanitize)",
+    "  --strict-key            Require keys to match [A-Za-z_][A-Za-z0-9_]* (no auto-fix)",
+    "  -d, --dry-run           Preview actions without writing files",
+    "  --quiet                 Suppress non-error logs",
+    "  --debug                 Show detailed logs and error stacks",
+    "  -v, --version           Show version number and exit",
+    "  -h, --help              Show this help message",
+    "",
+    `${chalk.bold("Examples")}`,
+    "  # Convert all JSON files next to originals as *.env",
+    `  ${script_name} "config/*.json"`,
+    "",
+    "  # Write into deploy/ with custom extension",
+    `  ${script_name} --out deploy --extension env.local api.json`,
+    "",
+    "  # Dry-run to see target paths only",
+    `  ${script_name} --dry-run secrets/*.json`,
+    "",
+    "  # Strict keys, no nested objects",
+    `  ${script_name} --strict-key --no-flatten .env.json`,
+  ].join("\n");
+}
+
+function parse_cli_arguments() {
+  const parser = yargs(process.argv.slice(2))
+    .scriptName("json2env")
+    .help(false)
+    .version(false)
+    .parserConfiguration({
+      "camel-case-expansion": false,
+      "strip-dashed": false,
+    })
+    .option("out", {
+      alias: "o",
+      type: "string",
+      describe: "Output directory (defaults to the source directory)",
+    })
+    .option("extension", {
+      alias: "e",
+      type: "string",
+      describe: "Output extension (default: .env)",
+    })
+    .option("force", {
+      alias: "F",
+      type: "boolean",
+      default: false,
+      describe: "Overwrite existing files",
+    })
+    .option("flatten", {
+      type: "boolean",
+      default: true,
+      describe: "Flatten nested objects (default: true)",
+    })
+    .option("separator", {
+      type: "string",
+      default: "_",
+      describe: "Separator between nested key segments",
+    })
+    .option("prefix", {
+      type: "string",
+      default: "",
+      describe: "Prefix added to each key name",
+    })
+    .option("strict-key", {
+      type: "boolean",
+      default: false,
+      describe: "Reject keys that are not valid shell-style identifiers",
+    })
+    .option("dry-run", {
+      alias: "d",
+      type: "boolean",
+      default: false,
+      describe: "Preview changes without writing files",
+    })
+    .option("quiet", {
+      type: "boolean",
+      default: false,
+      describe: "Suppress non-error logs",
+    })
+    .option("debug", {
+      type: "boolean",
+      default: false,
+      describe: "Enable verbose debugging output",
+    })
+    .option("version", {
+      alias: "v",
+      type: "boolean",
+      describe: "Show version number and exit",
+    })
+    .option("help", {
+      alias: "h",
+      type: "boolean",
+      describe: "Show help message",
+    })
+    .strict()
+    .usage(build_help_text("json2env"))
+    .wrap(Math.min(yargs.terminalWidth(), 100));
+
+  const argv = parser.parse();
+
+  if (argv.help) {
+    console.log(build_help_text(argv.$0 || "json2env"));
+    process.exit(0);
+  }
+
+  if (argv.version) {
+    console.log(package_json.version);
+    process.exit(0);
+  }
+
+  const patterns = (argv._ || []).map(String);
+
+  return {
+    patterns,
+    output_directory: argv.out ? path.resolve(argv.out) : "",
+    output_extension: normalize_extension(argv.extension),
+    force_overwrite: Boolean(argv.force),
+    flatten_nested: Boolean(argv.flatten),
+    key_separator: String(argv.separator ?? "_"),
+    key_prefix: String(argv.prefix ?? ""),
+    strict_key: Boolean(argv["strict-key"]),
+    dry_run: Boolean(argv["dry-run"]),
+    quiet_mode: Boolean(argv.quiet),
+    debug_mode: Boolean(argv.debug),
+  };
+}
+
+function is_stdin_mode(patterns) {
+  if (patterns.length === 0) return true;
+  if (patterns.length === 1 && patterns[0] === STDIN_SENTINEL) return true;
+  return false;
+}
+
+function expand_patterns(patterns, logger) {
+  const resolved_paths = new Set();
+
+  for (const pattern of patterns) {
+    if (pattern === STDIN_SENTINEL) continue;
+    const matches = globSync(pattern, {
+      nodir: true,
+      absolute: true,
+      windowsPathsNoEscape: true,
+    });
+
+    if (matches.length === 0) {
+      logger.debug(
+        `Pattern ${pattern} matched no files; treating as literal path.`,
+      );
+      resolved_paths.add(path.resolve(pattern));
+      continue;
+    }
+
+    for (const match of matches) {
+      resolved_paths.add(path.resolve(match));
+    }
+  }
+
+  return Array.from(resolved_paths);
+}
+
+async function file_exists(file_path) {
+  try {
+    await stat(file_path);
+    return true;
+  } catch (error) {
+    if (error && error.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+async function is_regular_file(file_path) {
+  try {
+    const stats = await stat(file_path);
+    return stats.isFile();
+  } catch (error) {
+    if (error && error.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+const ENV_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/** @returns {string} */
+function sanitize_key_component(name) {
+  return String(name).replace(/[^A-Za-z0-9_]/g, "_").replace(/_+/g, "_");
+}
+
+/** @returns {string} */
+function finalize_key(raw_key, options) {
+  const prefixed = options.key_prefix
+    ? `${options.key_prefix}${options.key_separator}${raw_key}`
+    : raw_key;
+  if (options.strict_key) {
+    if (!ENV_KEY_PATTERN.test(prefixed)) {
+      throw new Error(`Invalid env key (strict-key): ${prefixed}`);
+    }
+    return prefixed;
+  }
+  return sanitize_key_component(prefixed);
+}
+
+/**
+ * @param {unknown} data
+ * @param {string} prefix
+ * @param {{ flatten: boolean, separator: string, strict_key: boolean, key_prefix: string }} options
+ * @param {Record<string, unknown>} out
+ */
+function flatten_to_leaves(data, prefix, options, out) {
+  if (data === null || typeof data !== "object") {
+    throw new Error("JSON root must be an object");
+  }
+  if (Array.isArray(data)) {
+    throw new Error("JSON root must be an object (not an array)");
+  }
+
+  for (const [raw_name, value] of Object.entries(data)) {
+    if (options.strict_key && !ENV_KEY_PATTERN.test(raw_name)) {
+      throw new Error(`Invalid env key segment (strict-key): ${raw_name}`);
+    }
+    const segment = options.strict_key
+      ? raw_name
+      : sanitize_key_component(raw_name);
+    const next_prefix = prefix
+      ? `${prefix}${options.separator}${segment}`
+      : segment;
+
+    if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+      if (!options.flatten) {
+        throw new Error(
+          `Nested object at "${raw_name}" requires flattening (remove --no-flatten)`,
+        );
+      }
+      flatten_to_leaves(value, next_prefix, options, out);
+      continue;
+    }
+
+    const final_key = finalize_key(next_prefix, {
+      key_prefix: options.key_prefix,
+      key_separator: options.separator,
+      strict_key: options.strict_key,
+    });
+    if (Object.prototype.hasOwnProperty.call(out, final_key)) {
+      /* last wins */
+    }
+    out[final_key] = value;
+  }
+}
+
+function leaf_value_to_env_string(value) {
+  if (value === null || value === undefined) {
+    return "";
+  }
+  if (typeof value === "boolean") {
+    return value ? "true" : "false";
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return String(value);
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  return JSON.stringify(value);
+}
+
+function escape_env_value(plain) {
+  if (plain === "") return "";
+  const needs_quote =
+    /[\s#'"$`\\\n\r]/.test(plain) ||
+    plain.includes("=") ||
+    plain.startsWith("#");
+  if (!needs_quote) {
+    return plain;
+  }
+  const escaped = plain
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, "\\n")
+    .replace(/\r/g, "\\r");
+  return `"${escaped}"`;
+}
+
+function object_to_env_text(obj, format_options) {
+  const leaves = {};
+  flatten_to_leaves(obj, "", format_options, leaves);
+  const lines = Object.keys(leaves)
+    .sort((a, b) => a.localeCompare(b))
+    .map((key) => {
+      const raw_value = leaf_value_to_env_string(leaves[key]);
+      return `${key}=${escape_env_value(raw_value)}`;
+    });
+  if (lines.length === 0) {
+    return "\n";
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+function convert_json_text_to_env(json_text, format_options) {
+  const text =
+    json_text && json_text.charCodeAt(0) === 0xfeff
+      ? json_text.slice(1)
+      : json_text;
+  const parsed = JSON.parse(text);
+  return object_to_env_text(parsed, format_options);
+}
+
+async function convert_stdin(format_options, logger) {
+  if (process.stdin.isTTY) {
+    logger.error("No JSON input detected on stdin", null);
+    process.exit(1);
+  }
+
+  const input_chunks = [];
+  for await (const chunk of process.stdin) {
+    input_chunks.push(chunk);
+  }
+
+  const json_text = input_chunks.join("");
+  if (!json_text.trim()) {
+    logger.error("Received empty stdin input", null);
+    process.exit(1);
+  }
+
+  const env_text = convert_json_text_to_env(json_text, format_options);
+  process.stdout.write(env_text);
+}
+
+function build_output_path(input_path, output_directory, output_extension) {
+  const source_directory = path.dirname(input_path);
+  const target_directory = output_directory || source_directory;
+  const base_name = path.basename(input_path, path.extname(input_path));
+  return path.join(target_directory, `${base_name}${output_extension}`);
+}
+
+async function convert_files(options, format_options, logger) {
+  const input_files = expand_patterns(options.patterns, logger);
+
+  if (input_files.length === 0) {
+    logger.error("No input files discovered", null);
+    process.exit(1);
+  }
+
+  let converted_count = 0;
+  let skipped_count = 0;
+  let failed_count = 0;
+
+  for (const input_path of input_files) {
+    let absolute_input_path = input_path;
+
+    if (!(await is_regular_file(absolute_input_path))) {
+      logger.warn(`Skipping (not a regular file): ${input_path}`);
+      skipped_count += 1;
+      continue;
+    }
+
+    const output_path = build_output_path(
+      absolute_input_path,
+      options.output_directory,
+      options.output_extension,
+    );
+
+    try {
+      logger.debug(`Stage: prepare output path for ${absolute_input_path}`);
+      if (options.output_directory) {
+        logger.debug(`IO: mkdir ${path.dirname(output_path)}`);
+        await mkdir(path.dirname(output_path), { recursive: true });
+      }
+
+      if (!options.force_overwrite && (await file_exists(output_path))) {
+        logger.warn(
+          `Exists, skipping: ${path.relative(process.cwd(), output_path)}`,
+        );
+        skipped_count += 1;
+        continue;
+      }
+
+      logger.debug(`IO: read ${absolute_input_path}`);
+      const input_text = await readFile(absolute_input_path, "utf8");
+      logger.debug(`Stage: convert JSON to env for ${absolute_input_path}`);
+      const env_text = convert_json_text_to_env(input_text, format_options);
+
+      if (options.dry_run) {
+        logger.info(
+          `Dry run -> ${path.relative(process.cwd(), absolute_input_path)} => ${path.relative(process.cwd(), output_path)}`,
+        );
+      } else {
+        logger.debug(`IO: write ${output_path}`);
+        await writeFile(output_path, env_text, "utf8");
+        logger.info(
+          `Converted ${path.relative(process.cwd(), absolute_input_path)} -> ${path.relative(process.cwd(), output_path)}`,
+        );
+      }
+
+      converted_count += 1;
+    } catch (error) {
+      failed_count += 1;
+      logger.error(
+        `Failed to convert ${path.relative(process.cwd(), absolute_input_path)}: ${error.message}`,
+        error,
+      );
+    }
+  }
+
+  const summary_message = `Completed with ${chalk.green(`${converted_count} converted`)}, ${chalk.yellow(`${skipped_count} skipped`)}, ${chalk.red(`${failed_count} failed`)}`;
+
+  if (failed_count > 0) {
+    logger.error(summary_message, null);
+    process.exitCode = 1;
+  } else if (!options.quiet_mode) {
+    console.log(chalk.bold(summary_message));
+  }
+}
+
+async function main() {
+  const cli_options = parse_cli_arguments();
+  const logger = create_logger({
+    quiet_mode: cli_options.quiet_mode,
+    debug_mode: cli_options.debug_mode,
+  });
+
+  const format_options = {
+    flatten: cli_options.flatten_nested,
+    separator: cli_options.key_separator,
+    strict_key: cli_options.strict_key,
+    key_prefix: cli_options.key_prefix,
+  };
+
+  try {
+    if (is_stdin_mode(cli_options.patterns)) {
+      await convert_stdin(format_options, logger);
+      return;
+    }
+
+    await convert_files(cli_options, format_options, logger);
+  } catch (error) {
+    logger.error(error.message || "Unexpected failure", error);
+    process.exit(1);
+  }
+}
+
+main();
