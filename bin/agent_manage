@@ -1,0 +1,270 @@
+#!/usr/bin/env node
+
+const fs = require("fs-extra");
+const path = require("path");
+const os = require("os");
+const chalk = require("chalk");
+const yargs = require("yargs");
+
+const SCRIPT_NAME = "agent_manage";
+const PROFILE_BASE = path.join(__dirname, "..", "secret", "agent_manage", "profile");
+
+const AGENT_TARGETS = {
+  codex: path.join(os.homedir(), ".codex"),
+};
+
+function get_profile_dir(agent) {
+  return path.join(PROFILE_BASE, agent);
+}
+
+function get_current_profile_file(agent) {
+  return path.join(get_profile_dir(agent), ".current_profile");
+}
+
+function read_current_profile(agent) {
+  const file = get_current_profile_file(agent);
+  if (!fs.existsSync(file)) return null;
+  return fs.readFileSync(file, "utf8").trim();
+}
+
+function write_current_profile(agent, profile_name) {
+  const file = get_current_profile_file(agent);
+  fs.ensureDirSync(path.dirname(file));
+  fs.writeFileSync(file, profile_name + "\n");
+}
+
+function list_profiles(agent) {
+  const dir = get_profile_dir(agent);
+  if (!fs.existsSync(dir)) return [];
+  return fs
+    .readdirSync(dir, { withFileTypes: true })
+    .filter((e) => e.isDirectory() && !e.name.startsWith("."))
+    .map((e) => e.name);
+}
+
+function timestamp() {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  return (
+    `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-` +
+    `${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`
+  );
+}
+
+function backup_file(target, filename) {
+  const src = path.join(target, filename);
+  if (!fs.existsSync(src)) return;
+  const backup_name = `backup.${timestamp()}.${filename}`;
+  const dst = path.join(target, backup_name);
+  fs.copySync(src, dst);
+  console.log(chalk.dim(`${SCRIPT_NAME}: backup ${backup_name}`));
+}
+
+function get_profile_files(profile_dir) {
+  if (!fs.existsSync(profile_dir)) return [];
+  return fs.readdirSync(profile_dir).filter((f) => !f.startsWith("."));
+}
+
+function switch_profile(agent, profile_name) {
+  const profile_dir = path.join(get_profile_dir(agent), profile_name);
+  if (!fs.existsSync(profile_dir)) {
+    console.error(chalk.red(`${SCRIPT_NAME}: profile "${profile_name}" not found for ${agent}`));
+    console.error(chalk.dim(`  available: ${list_profiles(agent).join(", ") || "(none)"}`));
+    process.exit(1);
+  }
+
+  const target = AGENT_TARGETS[agent];
+  if (!target) {
+    console.error(chalk.red(`${SCRIPT_NAME}: unknown agent "${agent}"`));
+    process.exit(1);
+  }
+
+  const current = read_current_profile(agent);
+  if (current === profile_name) {
+    console.log(chalk.yellow(`${SCRIPT_NAME}: already using profile "${profile_name}" for ${agent}`));
+    return;
+  }
+
+  const files = get_profile_files(profile_dir);
+  for (const file of files) {
+    backup_file(target, file);
+    const src = path.join(profile_dir, file);
+    const dst = path.join(target, file);
+    fs.copySync(src, dst);
+    console.log(chalk.green(`${SCRIPT_NAME}: copied ${file}`));
+  }
+
+  write_current_profile(agent, profile_name);
+  console.log(chalk.green(`${SCRIPT_NAME}: switched ${agent} to profile "${profile_name}"`));
+}
+
+function cmd_save(agent, profile_name) {
+  const target = AGENT_TARGETS[agent];
+  if (!target) {
+    console.error(chalk.red(`${SCRIPT_NAME}: unknown agent "${agent}"`));
+    process.exit(1);
+  }
+
+  const profile_dir = path.join(get_profile_dir(agent), profile_name);
+  if (fs.existsSync(profile_dir)) {
+    console.error(chalk.red(`${SCRIPT_NAME}: profile "${profile_name}" already exists`));
+    process.exit(1);
+  }
+
+  // discover which files to save by looking at existing profiles or common config files
+  const existing = list_profiles(agent);
+  let files_to_save;
+  if (existing.length) {
+    files_to_save = get_profile_files(path.join(get_profile_dir(agent), existing[0]));
+  } else {
+    files_to_save = ["auth.json", "config.toml"];
+  }
+
+  const missing = files_to_save.filter((f) => !fs.existsSync(path.join(target, f)));
+  if (missing.length) {
+    console.error(chalk.red(`${SCRIPT_NAME}: missing files in target: ${missing.join(", ")}`));
+    process.exit(1);
+  }
+
+  fs.ensureDirSync(profile_dir);
+  for (const file of files_to_save) {
+    fs.copySync(path.join(target, file), path.join(profile_dir, file));
+    console.log(chalk.green(`${SCRIPT_NAME}: saved ${file}`));
+  }
+
+  write_current_profile(agent, profile_name);
+  console.log(chalk.green(`${SCRIPT_NAME}: saved ${agent} config as profile "${profile_name}"`));
+}
+
+function cmd_diff(agent, profile_name) {
+  const target = AGENT_TARGETS[agent];
+  if (!target) {
+    console.error(chalk.red(`${SCRIPT_NAME}: unknown agent "${agent}"`));
+    process.exit(1);
+  }
+
+  const profile_dir = path.join(get_profile_dir(agent), profile_name);
+  if (!fs.existsSync(profile_dir)) {
+    console.error(chalk.red(`${SCRIPT_NAME}: profile "${profile_name}" not found for ${agent}`));
+    process.exit(1);
+  }
+
+  const files = get_profile_files(profile_dir);
+
+  for (const file of files) {
+    const profile_path = path.join(profile_dir, file);
+    const target_path = path.join(target, file);
+
+    if (!fs.existsSync(target_path)) {
+      console.log(chalk.bold(`\n--- ${file}: ${chalk.yellow("(target does not exist)")}`));
+      console.log(chalk.green(`+++ ${file}: (profile -> target)`));
+      console.log(chalk.dim("  [new file, no diff to show]"));
+      continue;
+    }
+
+    const profile_content = fs.readFileSync(profile_path, "utf8");
+    const target_content = fs.readFileSync(target_path, "utf8");
+
+    if (profile_content === target_content) {
+      console.log(chalk.dim(`  ${file}: no differences`));
+      continue;
+    }
+
+    console.log(chalk.bold(`\n--- ${file}: ${chalk.red("(current)")}`));
+    console.log(chalk.bold(`+++ ${file}: ${chalk.green(`(profile: ${profile_name})`)}`));
+
+    const profile_lines = profile_content.split("\n");
+    const target_lines = target_content.split("\n");
+    const max_len = Math.max(profile_lines.length, target_lines.length);
+
+    for (let i = 0; i < max_len; i++) {
+      const pl = profile_lines[i];
+      const tl = target_lines[i];
+      if (pl !== tl) {
+        if (tl !== undefined) console.log(chalk.red(`- ${tl}`));
+        if (pl !== undefined) console.log(chalk.green(`+ ${pl}`));
+      }
+    }
+  }
+  console.log("");
+}
+
+function show_info(agent) {
+  const current = read_current_profile(agent);
+  const profiles = list_profiles(agent);
+  const target = AGENT_TARGETS[agent];
+
+  console.log(chalk.bold(`\n${agent} profile info:`));
+  console.log(`  target dir: ${target}`);
+  console.log(`  current profile: ${current ? chalk.green(current) : chalk.yellow("(none set)")}`);
+  console.log(`  available profiles: ${profiles.length ? profiles.join(", ") : chalk.yellow("(none)")}`);
+
+  if (!fs.existsSync(target)) {
+    console.log(`  ${chalk.yellow("target directory does not exist")}`);
+  }
+  console.log("");
+}
+
+function cmd_list(agent) {
+  const profiles = list_profiles(agent);
+  const current = read_current_profile(agent);
+  console.log(chalk.bold(`\n${agent} profiles:`));
+  for (const p of profiles) {
+    const marker = p === current ? chalk.green(" *") : "  ";
+    console.log(`  ${marker} ${p}`);
+  }
+  if (!profiles.length) {
+    console.log(chalk.yellow("  (none)"));
+  }
+  console.log("");
+}
+
+yargs
+  .scriptName(SCRIPT_NAME)
+  .usage("$0 <command> [agent] [profile]")
+  .command(
+    "switch <agent> <profile>",
+    "switch agent to a profile",
+    (y) => {
+      y.positional("agent", { describe: "agent name (e.g. codex)", type: "string" });
+      y.positional("profile", { describe: "profile name", type: "string" });
+    },
+    (argv) => switch_profile(argv.agent, argv.profile),
+  )
+  .command(
+    "save <agent> <profile>",
+    "save current config as a new profile",
+    (y) => {
+      y.positional("agent", { describe: "agent name (e.g. codex)", type: "string" });
+      y.positional("profile", { describe: "new profile name", type: "string" });
+    },
+    (argv) => cmd_save(argv.agent, argv.profile),
+  )
+  .command(
+    "diff <agent> <profile>",
+    "diff current config against a profile",
+    (y) => {
+      y.positional("agent", { describe: "agent name (e.g. codex)", type: "string" });
+      y.positional("profile", { describe: "profile name to diff against", type: "string" });
+    },
+    (argv) => cmd_diff(argv.agent, argv.profile),
+  )
+  .command(
+    "info [agent]",
+    "show current profile info",
+    (y) => {
+      y.positional("agent", { describe: "agent name (e.g. codex)", type: "string", default: "codex" });
+    },
+    (argv) => show_info(argv.agent),
+  )
+  .command(
+    "list [agent]",
+    "list available profiles",
+    (y) => {
+      y.positional("agent", { describe: "agent name (e.g. codex)", type: "string", default: "codex" });
+    },
+    (argv) => cmd_list(argv.agent),
+  )
+  .demandCommand(1, "Please specify a command")
+  .help()
+  .parse();
