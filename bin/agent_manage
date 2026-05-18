@@ -7,11 +7,31 @@ const chalk = require("chalk");
 const yargs = require("yargs");
 
 const SCRIPT_NAME = "agent_manage";
-const PROFILE_BASE = path.join(__dirname, "..", "secret", "agent_manage", "profile");
+const VERSION = "1.0.1";
+const PROFILE_BASE = path.join(
+  __dirname,
+  "..",
+  "secret",
+  "agent_manage",
+  "profile",
+);
 
 const AGENT_TARGETS = {
   codex: path.join(os.homedir(), ".codex"),
 };
+
+// Global flags set by yargs middleware
+let DEBUG = false;
+let QUIET = false;
+let DRY_RUN = false;
+
+function debug_log(msg) {
+  if (DEBUG) console.warn(chalk.cyan(`[DEBUG] ${msg}`));
+}
+
+function log(msg) {
+  if (!QUIET) console.log(msg);
+}
 
 function get_profile_dir(agent) {
   return path.join(PROFILE_BASE, agent);
@@ -23,18 +43,29 @@ function get_current_profile_file(agent) {
 
 function read_current_profile(agent) {
   const file = get_current_profile_file(agent);
+  debug_log(`reading current profile from: ${file}`);
   if (!fs.existsSync(file)) return null;
   return fs.readFileSync(file, "utf8").trim();
 }
 
 function write_current_profile(agent, profile_name) {
   const file = get_current_profile_file(agent);
+  debug_log(`writing current profile to: ${file}`);
+  if (DRY_RUN) {
+    log(
+      chalk.dim(
+        `${SCRIPT_NAME}: [dry-run] would set current profile to "${profile_name}"`,
+      ),
+    );
+    return;
+  }
   fs.ensureDirSync(path.dirname(file));
   fs.writeFileSync(file, profile_name + "\n");
 }
 
 function list_profiles(agent) {
   const dir = get_profile_dir(agent);
+  debug_log(`listing profiles in: ${dir}`);
   if (!fs.existsSync(dir)) return [];
   return fs
     .readdirSync(dir, { withFileTypes: true })
@@ -51,25 +82,41 @@ function timestamp() {
   );
 }
 
-function backup_file(target, filename) {
+function backup_file(target, filename, profile_name) {
   const src = path.join(target, filename);
+  debug_log(`backup: checking source ${src}`);
   if (!fs.existsSync(src)) return;
-  const backup_name = `backup.${timestamp()}.${filename}`;
+  const backup_name = `backup.${timestamp()}.${profile_name}.${filename}`;
   const dst = path.join(target, backup_name);
+  debug_log(`backup: ${src} -> ${dst}`);
+  if (DRY_RUN) {
+    log(chalk.dim(`${SCRIPT_NAME}: [dry-run] would backup ${backup_name}`));
+    return;
+  }
   fs.copySync(src, dst);
-  console.log(chalk.dim(`${SCRIPT_NAME}: backup ${backup_name}`));
+  log(chalk.dim(`${SCRIPT_NAME}: backup ${backup_name}`));
 }
 
 function get_profile_files(profile_dir) {
+  debug_log(`reading profile files from: ${profile_dir}`);
   if (!fs.existsSync(profile_dir)) return [];
   return fs.readdirSync(profile_dir).filter((f) => !f.startsWith("."));
 }
 
 function switch_profile(agent, profile_name) {
+  debug_log(`switch: agent=${agent}, profile=${profile_name}`);
+
   const profile_dir = path.join(get_profile_dir(agent), profile_name);
+  debug_log(`switch: checking profile dir ${profile_dir}`);
   if (!fs.existsSync(profile_dir)) {
-    console.error(chalk.red(`${SCRIPT_NAME}: profile "${profile_name}" not found for ${agent}`));
-    console.error(chalk.dim(`  available: ${list_profiles(agent).join(", ") || "(none)"}`));
+    console.error(
+      chalk.red(
+        `${SCRIPT_NAME}: profile "${profile_name}" not found for ${agent}`,
+      ),
+    );
+    console.error(
+      chalk.dim(`  available: ${list_profiles(agent).join(", ") || "(none)"}`),
+    );
     process.exit(1);
   }
 
@@ -79,35 +126,47 @@ function switch_profile(agent, profile_name) {
     process.exit(1);
   }
 
-  const current = read_current_profile(agent);
-  if (current === profile_name) {
-    console.log(chalk.yellow(`${SCRIPT_NAME}: already using profile "${profile_name}" for ${agent}`));
-    return;
-  }
+  debug_log(`switch: target dir ${target}`);
 
   const files = get_profile_files(profile_dir);
+  debug_log(`switch: files to process: ${files.join(", ") || "(none)"}`);
   for (const file of files) {
-    backup_file(target, file);
+    backup_file(target, file, profile_name);
     const src = path.join(profile_dir, file);
     const dst = path.join(target, file);
+    debug_log(`switch: copying ${src} -> ${dst}`);
+    if (DRY_RUN) {
+      log(chalk.green(`${SCRIPT_NAME}: [dry-run] would copy ${file}`));
+      continue;
+    }
     fs.copySync(src, dst);
-    console.log(chalk.green(`${SCRIPT_NAME}: copied ${file}`));
+    log(chalk.green(`${SCRIPT_NAME}: copied ${file}`));
   }
 
   write_current_profile(agent, profile_name);
-  console.log(chalk.green(`${SCRIPT_NAME}: switched ${agent} to profile "${profile_name}"`));
+  log(
+    chalk.green(
+      `${SCRIPT_NAME}: switched ${agent} to profile "${profile_name}"`,
+    ),
+  );
 }
 
 function cmd_save(agent, profile_name) {
+  debug_log(`save: agent=${agent}, profile=${profile_name}`);
+
   const target = AGENT_TARGETS[agent];
   if (!target) {
     console.error(chalk.red(`${SCRIPT_NAME}: unknown agent "${agent}"`));
     process.exit(1);
   }
 
+  debug_log(`save: target dir ${target}`);
+
   const profile_dir = path.join(get_profile_dir(agent), profile_name);
   if (fs.existsSync(profile_dir)) {
-    console.error(chalk.red(`${SCRIPT_NAME}: profile "${profile_name}" already exists`));
+    console.error(
+      chalk.red(`${SCRIPT_NAME}: profile "${profile_name}" already exists`),
+    );
     process.exit(1);
   }
 
@@ -115,28 +174,61 @@ function cmd_save(agent, profile_name) {
   const existing = list_profiles(agent);
   let files_to_save;
   if (existing.length) {
-    files_to_save = get_profile_files(path.join(get_profile_dir(agent), existing[0]));
+    files_to_save = get_profile_files(
+      path.join(get_profile_dir(agent), existing[0]),
+    );
   } else {
     files_to_save = ["auth.json", "config.toml"];
   }
 
-  const missing = files_to_save.filter((f) => !fs.existsSync(path.join(target, f)));
+  debug_log(`save: files to save: ${files_to_save.join(", ")}`);
+
+  const missing = files_to_save.filter(
+    (f) => !fs.existsSync(path.join(target, f)),
+  );
   if (missing.length) {
-    console.error(chalk.red(`${SCRIPT_NAME}: missing files in target: ${missing.join(", ")}`));
+    console.error(
+      chalk.red(
+        `${SCRIPT_NAME}: missing files in target: ${missing.join(", ")}`,
+      ),
+    );
     process.exit(1);
   }
 
-  fs.ensureDirSync(profile_dir);
+  debug_log(`save: creating profile dir ${profile_dir}`);
+  if (DRY_RUN) {
+    log(
+      chalk.dim(
+        `${SCRIPT_NAME}: [dry-run] would create profile dir "${profile_name}"`,
+      ),
+    );
+  } else {
+    fs.ensureDirSync(profile_dir);
+  }
+
   for (const file of files_to_save) {
-    fs.copySync(path.join(target, file), path.join(profile_dir, file));
-    console.log(chalk.green(`${SCRIPT_NAME}: saved ${file}`));
+    const src = path.join(target, file);
+    const dst = path.join(profile_dir, file);
+    debug_log(`save: copying ${src} -> ${dst}`);
+    if (DRY_RUN) {
+      log(chalk.green(`${SCRIPT_NAME}: [dry-run] would save ${file}`));
+      continue;
+    }
+    fs.copySync(src, dst);
+    log(chalk.green(`${SCRIPT_NAME}: saved ${file}`));
   }
 
   write_current_profile(agent, profile_name);
-  console.log(chalk.green(`${SCRIPT_NAME}: saved ${agent} config as profile "${profile_name}"`));
+  log(
+    chalk.green(
+      `${SCRIPT_NAME}: saved ${agent} config as profile "${profile_name}"`,
+    ),
+  );
 }
 
 function cmd_diff(agent, profile_name) {
+  debug_log(`diff: agent=${agent}, profile=${profile_name}`);
+
   const target = AGENT_TARGETS[agent];
   if (!target) {
     console.error(chalk.red(`${SCRIPT_NAME}: unknown agent "${agent}"`));
@@ -144,21 +236,31 @@ function cmd_diff(agent, profile_name) {
   }
 
   const profile_dir = path.join(get_profile_dir(agent), profile_name);
+  debug_log(`diff: checking profile dir ${profile_dir}`);
   if (!fs.existsSync(profile_dir)) {
-    console.error(chalk.red(`${SCRIPT_NAME}: profile "${profile_name}" not found for ${agent}`));
+    console.error(
+      chalk.red(
+        `${SCRIPT_NAME}: profile "${profile_name}" not found for ${agent}`,
+      ),
+    );
     process.exit(1);
   }
 
   const files = get_profile_files(profile_dir);
+  debug_log(`diff: files to compare: ${files.join(", ") || "(none)"}`);
 
   for (const file of files) {
     const profile_path = path.join(profile_dir, file);
     const target_path = path.join(target, file);
 
+    debug_log(`diff: comparing ${file}`);
+
     if (!fs.existsSync(target_path)) {
-      console.log(chalk.bold(`\n--- ${file}: ${chalk.yellow("(target does not exist)")}`));
-      console.log(chalk.green(`+++ ${file}: (profile -> target)`));
-      console.log(chalk.dim("  [new file, no diff to show]"));
+      log(
+        chalk.bold(`\n--- ${file}: ${chalk.yellow("(target does not exist)")}`),
+      );
+      log(chalk.green(`+++ ${file}: (profile -> target)`));
+      log(chalk.dim("  [new file, no diff to show]"));
       continue;
     }
 
@@ -166,12 +268,14 @@ function cmd_diff(agent, profile_name) {
     const target_content = fs.readFileSync(target_path, "utf8");
 
     if (profile_content === target_content) {
-      console.log(chalk.dim(`  ${file}: no differences`));
+      log(chalk.dim(`  ${file}: no differences`));
       continue;
     }
 
-    console.log(chalk.bold(`\n--- ${file}: ${chalk.red("(current)")}`));
-    console.log(chalk.bold(`+++ ${file}: ${chalk.green(`(profile: ${profile_name})`)}`));
+    log(chalk.bold(`\n--- ${file}: ${chalk.red("(current)")}`));
+    log(
+      chalk.bold(`+++ ${file}: ${chalk.green(`(profile: ${profile_name})`)}`),
+    );
 
     const profile_lines = profile_content.split("\n");
     const target_lines = target_content.split("\n");
@@ -181,87 +285,172 @@ function cmd_diff(agent, profile_name) {
       const pl = profile_lines[i];
       const tl = target_lines[i];
       if (pl !== tl) {
-        if (tl !== undefined) console.log(chalk.red(`- ${tl}`));
-        if (pl !== undefined) console.log(chalk.green(`+ ${pl}`));
+        if (tl !== undefined) log(chalk.red(`- ${tl}`));
+        if (pl !== undefined) log(chalk.green(`+ ${pl}`));
       }
     }
   }
-  console.log("");
+  log("");
 }
 
 function show_info(agent) {
+  debug_log(`info: agent=${agent}`);
+
   const current = read_current_profile(agent);
   const profiles = list_profiles(agent);
   const target = AGENT_TARGETS[agent];
 
-  console.log(chalk.bold(`\n${agent} profile info:`));
-  console.log(`  target dir: ${target}`);
-  console.log(`  current profile: ${current ? chalk.green(current) : chalk.yellow("(none set)")}`);
-  console.log(`  available profiles: ${profiles.length ? profiles.join(", ") : chalk.yellow("(none)")}`);
+  log(chalk.bold(`\n${agent} profile info:`));
+  log(`  target dir: ${target}`);
+  log(
+    `  current profile: ${current ? chalk.green(current) : chalk.yellow("(none set)")}`,
+  );
+  log(
+    `  available profiles: ${profiles.length ? profiles.join(", ") : chalk.yellow("(none)")}`,
+  );
 
   if (!fs.existsSync(target)) {
-    console.log(`  ${chalk.yellow("target directory does not exist")}`);
+    log(`  ${chalk.yellow("target directory does not exist")}`);
   }
-  console.log("");
+  log("");
 }
 
 function cmd_list(agent) {
+  debug_log(`list: agent=${agent}`);
+
   const profiles = list_profiles(agent);
   const current = read_current_profile(agent);
-  console.log(chalk.bold(`\n${agent} profiles:`));
+  log(chalk.bold(`\n${agent} profiles:`));
   for (const p of profiles) {
     const marker = p === current ? chalk.green(" *") : "  ";
-    console.log(`  ${marker} ${p}`);
+    log(`  ${marker} ${p}`);
   }
   if (!profiles.length) {
-    console.log(chalk.yellow("  (none)"));
+    log(chalk.yellow("  (none)"));
   }
-  console.log("");
+  log("");
 }
 
 yargs
   .scriptName(SCRIPT_NAME)
   .usage("$0 <command> [agent] [profile]")
+  .version(VERSION)
+  .option("debug", {
+    describe: "print verbose debug logs",
+    type: "boolean",
+    default: false,
+  })
+  .option("quiet", {
+    describe: "print only warnings and errors",
+    type: "boolean",
+    default: false,
+  })
+  .option("dry-run", {
+    alias: "d",
+    describe: "print what would be done without actually doing it",
+    type: "boolean",
+    default: false,
+  })
+  .middleware((argv) => {
+    DEBUG = argv.debug;
+    QUIET = argv.quiet;
+    DRY_RUN = argv.dryRun;
+  })
+  .strict()
   .command(
     "switch <agent> <profile>",
-    "switch agent to a profile",
+    "switch agent to a saved profile",
     (y) => {
-      y.positional("agent", { describe: "agent name (e.g. codex)", type: "string" });
-      y.positional("profile", { describe: "profile name", type: "string" });
+      y.positional("agent", {
+        describe: "agent name (e.g. codex)",
+        type: "string",
+      });
+      y.positional("profile", {
+        describe: "profile name to switch to",
+        type: "string",
+      });
+      y.example("$0 switch codex work", '# switch codex to the "work" profile');
+      y.example(
+        "$0 switch codex personal --dry-run",
+        "# preview what switching would do",
+      );
     },
     (argv) => switch_profile(argv.agent, argv.profile),
   )
   .command(
     "save <agent> <profile>",
-    "save current config as a new profile",
+    "save current agent config as a new profile",
     (y) => {
-      y.positional("agent", { describe: "agent name (e.g. codex)", type: "string" });
-      y.positional("profile", { describe: "new profile name", type: "string" });
+      y.positional("agent", {
+        describe: "agent name (e.g. codex)",
+        type: "string",
+      });
+      y.positional("profile", {
+        describe: "name for the new profile",
+        type: "string",
+      });
+      y.example(
+        "$0 save codex work",
+        '# save current codex config as profile "work"',
+      );
+      y.example(
+        "$0 save codex personal --dry-run",
+        "# preview what saving would do",
+      );
     },
     (argv) => cmd_save(argv.agent, argv.profile),
   )
   .command(
     "diff <agent> <profile>",
-    "diff current config against a profile",
+    "diff current config against a saved profile",
     (y) => {
-      y.positional("agent", { describe: "agent name (e.g. codex)", type: "string" });
-      y.positional("profile", { describe: "profile name to diff against", type: "string" });
+      y.positional("agent", {
+        describe: "agent name (e.g. codex)",
+        type: "string",
+      });
+      y.positional("profile", {
+        describe: "profile name to diff against",
+        type: "string",
+      });
+      y.example(
+        "$0 diff codex work",
+        '# show differences between current config and "work" profile',
+      );
+      y.example(
+        "$0 diff codex personal --debug",
+        "# diff with verbose debug output",
+      );
     },
     (argv) => cmd_diff(argv.agent, argv.profile),
   )
   .command(
     "info [agent]",
-    "show current profile info",
+    "show current profile info for an agent",
     (y) => {
-      y.positional("agent", { describe: "agent name (e.g. codex)", type: "string", default: "codex" });
+      y.positional("agent", {
+        describe: "agent name (e.g. codex)",
+        type: "string",
+        default: "codex",
+      });
+      y.example("$0 info", "# show profile info for the default agent (codex)");
+      y.example("$0 info codex", "# show profile info for codex");
     },
     (argv) => show_info(argv.agent),
   )
   .command(
     "list [agent]",
-    "list available profiles",
+    "list all saved profiles for an agent",
     (y) => {
-      y.positional("agent", { describe: "agent name (e.g. codex)", type: "string", default: "codex" });
+      y.positional("agent", {
+        describe: "agent name (e.g. codex)",
+        type: "string",
+        default: "codex",
+      });
+      y.example("$0 list", "# list profiles for the default agent (codex)");
+      y.example(
+        "$0 list codex --quiet",
+        "# list profile names only (quiet mode)",
+      );
     },
     (argv) => cmd_list(argv.agent),
   )
