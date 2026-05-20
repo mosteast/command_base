@@ -1,0 +1,392 @@
+#!/usr/bin/env node
+
+"use strict";
+
+const fs = require("fs-extra");
+const chalk = require("chalk");
+const yargs = require("yargs");
+
+const package_json = require("../package.json");
+const {
+  get_backup_root,
+  app_dir_under_root,
+  next_id,
+  resolve_restore_id,
+  backup_snapshot_dir,
+} = require("../lib/app_config/backup_root");
+const {
+  get_provider,
+  supported_apps,
+} = require("../lib/app_config/provider_registry");
+const {
+  ensure_readme_at_backup_root,
+} = require("../lib/app_config/ensure_backup_readme");
+
+const SCRIPT_NAME = "app_config";
+const VERSION = package_json.version;
+
+function build_help_text(script_name) {
+  return [
+    `${chalk.bold("Usage")}`,
+    `  ${script_name} backup <app>`,
+    `  ${script_name} restore <app> [--id <n>]`,
+    "",
+    `${chalk.bold("Description")}`,
+    "  Back up and restore application configuration under iCloud __app_config_backup",
+    "  with incrementing numeric snapshot ids (1, 2, 3, ...).",
+    "",
+    `${chalk.bold("Environment")}`,
+    "  APP_CONFIG_BACKUP_ROOT     Override backup root (default: ~/Library/Mobile Documents/.../__app_config_backup)",
+    "",
+    `${chalk.bold("Options")}`,
+    "  -d, --dry-run            Preview actions without writing files (default: false)",
+    "  --quiet                  Print only warnings and errors (default: false)",
+    "  --debug                  Verbose debug logs (and IO traces) (default: false)",
+    "  -v, --version            Show version number and exit",
+    "  -h, --help               Show this help message",
+    "",
+    `${chalk.bold("Restore options")}`,
+    "  --id <n>                 Restore snapshot id (default: latest / largest id)",
+    "  --no-safety-backup       Skip the automatic safety backup before restore (default: false)",
+    "",
+    `${chalk.bold("Supported apps")}`,
+    `  ${supported_apps().join(", ")}`,
+    "",
+    `${chalk.bold("Examples")}`,
+    `  # Back up Cursor to the next numeric folder under APP_NAME`,
+    `  ${script_name} backup cursor`,
+    "",
+    `  # Restore latest Cursor backup`,
+    `  ${script_name} restore cursor`,
+    "",
+    `  # Restore snapshot 3 only`,
+    `  ${script_name} restore cursor --id 3`,
+    "",
+    `  # Preview restore without writing`,
+    `  ${script_name} restore cursor --dry-run`,
+  ].join("\n");
+}
+
+function build_subcommand_help(command) {
+  if (command === "backup") {
+    return [
+      `${chalk.bold("Usage")}`,
+      `  ${SCRIPT_NAME} backup <app>`,
+      "",
+      `${chalk.bold("Description")}`,
+      "  Create the next incremental backup (numeric id) for the application.",
+      "",
+      `${chalk.bold("Options")}`,
+      "  -d, --dry-run            Preview actions without writing files (default: false)",
+      "  --quiet                  Print only warnings and errors (default: false)",
+      "  --debug                  Print verbose debug logs (default: false)",
+      "  -v, --version            Show version number and exit",
+      "  -h, --help               Show this help message",
+      "",
+      `${chalk.bold("Examples")}`,
+      `  # Back up Cursor to the next numeric snapshot folder`,
+      `  ${SCRIPT_NAME} backup cursor`,
+      "",
+      `  # Preview backup without writing files`,
+      `  ${SCRIPT_NAME} backup cursor --dry-run`,
+    ].join("\n");
+  }
+  if (command === "restore") {
+    return [
+      `${chalk.bold("Usage")}`,
+      `  ${SCRIPT_NAME} restore <app> [--id <n>]`,
+      "",
+      `${chalk.bold("Description")}`,
+      "  Restore from a snapshot (latest / largest id by default).",
+      "",
+      `${chalk.bold("Options")}`,
+      "  --id <n>                 Snapshot id to restore",
+      "  --no-safety-backup       Skip the automatic safety backup before restore (default: false)",
+      "  -d, --dry-run            Preview actions without writing files (default: false)",
+      "  --quiet                  Print only warnings and errors (default: false)",
+      "  --debug                  Print verbose debug logs (default: false)",
+      "  -v, --version            Show version number and exit",
+      "  -h, --help               Show this help message",
+      "",
+      `${chalk.bold("Examples")}`,
+      `  # Restore the latest Cursor snapshot`,
+      `  ${SCRIPT_NAME} restore cursor`,
+      "",
+      `  # Restore snapshot id 3 only`,
+      `  ${SCRIPT_NAME} restore cursor --id 3`,
+      "",
+      `  # Preview restore without writing files`,
+      `  ${SCRIPT_NAME} restore cursor --dry-run`,
+    ].join("\n");
+  }
+  return build_help_text(SCRIPT_NAME);
+}
+
+function debug_log(enabled, msg) {
+  if (enabled) console.error(chalk.cyan(`[DEBUG] ${msg}`));
+}
+
+function log(quiet, msg) {
+  if (!quiet) console.log(msg);
+}
+
+/**
+ * @param {string} app
+ * @param {{ debug: boolean, quiet: boolean, dry_run: boolean }} ctx
+ * @param {{ backup_root?: string }} opts
+ * @returns {{ id: number, snapshot_dir: string }}
+ */
+function run_backup(app, ctx, opts = {}) {
+  const backup_root = opts.backup_root || get_backup_root();
+  ensure_readme_at_backup_root(backup_root, { dry_run: ctx.dry_run });
+  const app_dir = app_dir_under_root(backup_root, app);
+  const id = next_id(app_dir);
+  const snapshot_dir = backup_snapshot_dir(backup_root, app, id);
+
+  debug_log(ctx.debug, `stage: ensure snapshot dir ${snapshot_dir}`);
+  if (!ctx.dry_run) {
+    fs.ensureDirSync(snapshot_dir);
+  }
+
+  const provider = get_provider(app);
+  debug_log(ctx.debug, `stage: provider backup (${app})`);
+  provider.backup(snapshot_dir, ctx);
+
+  log(
+    ctx.quiet,
+    chalk.green(`Backup complete: ${app} #${id} → ${snapshot_dir}`),
+  );
+  return { id, snapshot_dir };
+}
+
+/**
+ * @param {string} app
+ * @param {number | undefined} id_explicit
+ * @param {boolean} safety_backup
+ * @param {{ debug: boolean, quiet: boolean, dry_run: boolean }} ctx
+ */
+function run_restore(app, id_explicit, safety_backup, ctx) {
+  const backup_root = get_backup_root();
+  const app_dir = app_dir_under_root(backup_root, app);
+  const id_num =
+    id_explicit !== undefined && id_explicit !== null
+      ? Number(id_explicit)
+      : undefined;
+  const id = resolve_restore_id(app_dir, id_num);
+  const snapshot_dir = backup_snapshot_dir(backup_root, app, id);
+
+  debug_log(ctx.debug, `stage: restore from ${snapshot_dir}`);
+
+  if (safety_backup) {
+    debug_log(ctx.debug, "stage: pre-restore safety backup");
+    if (ctx.dry_run) {
+      log(
+        ctx.quiet,
+        chalk.dim("[dry-run] would run safety backup before restore"),
+      );
+    } else {
+      run_backup(app, ctx, { backup_root });
+    }
+  }
+
+  const provider = get_provider(app);
+  debug_log(ctx.debug, `stage: provider restore (${app})`);
+  provider.restore(snapshot_dir, ctx);
+
+  log(ctx.quiet, chalk.green(`Restore complete: ${app} #${id}`));
+}
+
+function first_positional_arg(argv_slice) {
+  for (const a of argv_slice) {
+    if (a === "--") return null;
+    if (!a.startsWith("-")) return a;
+  }
+  return null;
+}
+
+function infer_help_command(argv_slice) {
+  const first = first_positional_arg(argv_slice);
+  if (first === "backup" || first === "restore") return first;
+  return null;
+}
+
+function print_help_for_command(help_command) {
+  if (help_command === "backup") {
+    console.log(build_subcommand_help("backup"));
+    return;
+  }
+  if (help_command === "restore") {
+    console.log(build_subcommand_help("restore"));
+    return;
+  }
+  console.log(build_help_text(SCRIPT_NAME));
+}
+
+function exit_usage_error(message, help_command = null) {
+  console.error(chalk.red(message));
+  print_help_for_command(help_command);
+  process.exit(1);
+}
+
+function is_cli_usage_error(error) {
+  if (!error) return false;
+  if (error.is_usage_error) return true;
+  const msg = error.message || String(error);
+  return /^unknown app "/.test(msg);
+}
+
+function parse_cli() {
+  return (
+    yargs(process.argv.slice(2))
+      .scriptName(SCRIPT_NAME)
+      .help(false)
+      .version(false)
+      .option("dry-run", {
+        alias: "d",
+        type: "boolean",
+        default: false,
+        describe: "Preview actions without writing files",
+      })
+      .option("quiet", {
+        type: "boolean",
+        default: false,
+        describe: "Print only warnings and errors",
+      })
+      .option("debug", {
+        type: "boolean",
+        default: false,
+        describe: "Print verbose debug logs",
+      })
+      .option("version", {
+        alias: "v",
+        type: "boolean",
+        describe: "Show version number and exit",
+      })
+      .option("help", {
+        alias: "h",
+        type: "boolean",
+        describe: "Show help message",
+      })
+      .command(
+        "backup [app]",
+        "create the next incremental backup for an application",
+        (y) => {
+          y.positional("app", {
+            describe: `application key (supported: ${supported_apps().join(", ")})`,
+            type: "string",
+          });
+          y.example(
+            "$0 backup cursor",
+            "# back up Cursor preferences to the next id folder",
+          );
+          y.example(
+            "$0 backup cursor --dry-run",
+            "# preview backup paths without writing",
+          );
+        },
+        (argv) => {
+          if (!argv.app) {
+            exit_usage_error(
+              "Error: application name is required for backup.",
+              "backup",
+            );
+          }
+          const ctx = {
+            debug: argv.debug,
+            quiet: argv.quiet,
+            dry_run: argv.dryRun,
+          };
+          run_backup(argv.app, ctx);
+        },
+      )
+      .command(
+        "restore [app]",
+        "restore a backup (latest by default)",
+        (y) => {
+          y.positional("app", {
+            describe: `application key (supported: ${supported_apps().join(", ")})`,
+            type: "string",
+          });
+          y.option("id", {
+            type: "number",
+            describe: "snapshot id to restore (default: latest)",
+          });
+          y.option("safety-backup", {
+            type: "boolean",
+            default: true,
+            describe:
+              "take a fresh backup before overwriting live config (default: true)",
+          });
+          y.example("$0 restore cursor", "# restore the latest snapshot");
+          y.example("$0 restore cursor --id 3", "# restore snapshot 3");
+          y.example(
+            "$0 restore cursor --no-safety-backup",
+            "# restore without pre-backup",
+          );
+        },
+        (argv) => {
+          if (!argv.app) {
+            exit_usage_error(
+              "Error: application name is required for restore.",
+              "restore",
+            );
+          }
+          const ctx = {
+            debug: argv.debug,
+            quiet: argv.quiet,
+            dry_run: argv.dryRun,
+          };
+          run_restore(argv.app, argv.id, argv.safetyBackup, ctx);
+        },
+      )
+      .demandCommand(
+        1,
+        "Error: please specify a command (backup | restore).",
+      )
+      .strict()
+      .fail((msg, err) => {
+        if (err) throw err;
+        exit_usage_error(msg, infer_help_command(process.argv.slice(2)));
+      })
+      .usage(build_help_text(SCRIPT_NAME))
+      .wrap(Math.min(yargs.terminalWidth(), 100)).argv
+  );
+}
+
+function main() {
+  const argv_slice = process.argv.slice(2);
+  const first_cmd = first_positional_arg(argv_slice);
+  const has_help = argv_slice.includes("--help") || argv_slice.includes("-h");
+  const has_version =
+    argv_slice.includes("--version") || argv_slice.includes("-v");
+  if (has_help && first_cmd === "backup") {
+    console.log(build_subcommand_help("backup"));
+    process.exit(0);
+  }
+  if (has_help && first_cmd === "restore") {
+    console.log(build_subcommand_help("restore"));
+    process.exit(0);
+  }
+  if (has_help && first_cmd !== "backup" && first_cmd !== "restore") {
+    console.log(build_help_text(SCRIPT_NAME));
+    process.exit(0);
+  }
+  if (has_version) {
+    console.log(VERSION);
+    process.exit(0);
+  }
+
+  parse_cli();
+}
+
+try {
+  main();
+} catch (e) {
+  console.error(chalk.red(e.message || e));
+  if (is_cli_usage_error(e)) {
+    print_help_for_command(infer_help_command(process.argv.slice(2)));
+  } else if (process.argv.includes("--debug")) {
+    console.error(e.stack);
+  }
+  process.exit(1);
+}

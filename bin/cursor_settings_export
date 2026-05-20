@@ -1,19 +1,7 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-# Define backup directory with timestamp
-TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
-BACKUP_DIR="$HOME/Library/Mobile Documents/com~apple~CloudDocs/main/config_base/cursor/$TIMESTAMP"
-mkdir -p "$BACKUP_DIR"
+echo -e "\033[33mcursor_settings_export is deprecated; use: app_config backup cursor\033[0m" >&2
 
-# Cursor settings directory (for macOS)
-CURSOR_CONFIG_DIR="$HOME/Library/Application Support/Cursor/User"
-
-# Export settings files
-echo "Backing up Cursor settings to $BACKUP_DIR..."
-cp -r "$CURSOR_CONFIG_DIR" "$BACKUP_DIR"
-
-# Export installed extensions
-echo "Exporting installed extensions..."
-cursor --list-extensions > "$BACKUP_DIR/extensions.txt"
-
-echo "Backup complete!"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+exec "${SCRIPT_DIR}/app_config" backup cursor "$@"

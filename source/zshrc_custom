@@ -7,6 +7,7 @@
 export COMMAND_BASE_ASR_RUNTIME="$HOME/.local/share/command_base/asr_runtime"
 export PYTHON_BIN="$COMMAND_BASE_ASR_RUNTIME/bin/python"
 export HF_HUB_DISABLE_XET=1
+export APP_CONFIG_BACKUP_ROOT="$HOME/Library/Mobile Documents/com~apple~CloudDocs/main/config_base/__app_config_backup"
 export PATH="$COMMAND_BASE_ASR_RUNTIME/bin:$HOME/dev_lib/flutter/bin:$HOME/bin:$HOME/code_base/command_base/bin:$HOME/code_base/mosteast/giao/bin:/usr/local/mysql/bin:/opt/homebrew/bin:$PATH"
 export ZPLUG_HOME=/opt/homebrew/opt/zplug
 
