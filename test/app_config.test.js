@@ -20,6 +20,7 @@ const {
   ensure_readme_at_backup_root,
   readme_at_backup_root,
 } = require("../lib/app_config/ensure_backup_readme");
+const package_json = require("../package.json");
 
 const cli_entry = path.resolve(__dirname, "../bin/app_config");
 
@@ -132,11 +133,7 @@ describe("cursor_provider backup", () => {
     );
     await fs.ensureDir(user_base);
     await fs.writeFile(path.join(user_base, "settings.json"), "{}", "utf8");
-    await fs.writeFile(
-      path.join(user_base, "keybindings.json"),
-      "[]",
-      "utf8",
-    );
+    await fs.writeFile(path.join(user_base, "keybindings.json"), "[]", "utf8");
     await fs.ensureDir(path.join(user_base, "snippets"));
     await fs.ensureDir(path.join(user_base, "globalStorage"));
     await fs.ensureDir(path.join(home, ".cursor", "extensions"));
@@ -374,5 +371,40 @@ describe("app_config backup dry-run (temp root)", () => {
     expect(result.exit_code).toBe(0);
     const app_dir = app_dir_under_root(tmp, "cursor");
     expect(await fs.pathExists(app_dir)).toBe(false);
+  });
+});
+
+describe("app_config backup report", () => {
+  it("writes report.json in each completed backup snapshot", async () => {
+    const backup_root = await fs.mkdtemp(path.join(os.tmpdir(), "acb-cli-"));
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), "home-"));
+    const fake_path = await fs.mkdtemp(path.join(os.tmpdir(), "path-"));
+
+    const result = await run_cli(["backup", "cursor", "--quiet"], {
+      env: {
+        APP_CONFIG_BACKUP_ROOT: backup_root,
+        HOME: home,
+        PATH: fake_path,
+      },
+    });
+
+    expect(result.exit_code).toBe(0);
+    const report_path = path.join(backup_root, "cursor", "1", "report.json");
+    expect(await fs.pathExists(report_path)).toBe(true);
+
+    const report = await fs.readJson(report_path);
+    expect(report).toMatchObject({
+      schema_version: 1,
+      app_name: "cursor",
+      backup_id: 1,
+      tool_name: "app_config",
+      tool_version: package_json.version,
+      status: "completed",
+      provider_manifest: "manifest.json",
+    });
+    expect(report.app_version).toEqual(expect.any(String));
+    expect(report.backup_timestamp).toMatch(
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
+    );
   });
 });

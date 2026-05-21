@@ -21,6 +21,10 @@ const {
 const {
   ensure_readme_at_backup_root,
 } = require("../lib/app_config/ensure_backup_readme");
+const {
+  build_backup_report,
+  write_backup_report,
+} = require("../lib/app_config/backup_report");
 
 const SCRIPT_NAME = "app_config";
 const VERSION = package_json.version;
@@ -34,6 +38,7 @@ function build_help_text(script_name) {
     `${chalk.bold("Description")}`,
     "  Back up and restore application configuration under iCloud __app_config_backup",
     "  with incrementing numeric snapshot ids (1, 2, 3, ...).",
+    "  Each completed snapshot includes report.json with backup metadata.",
     "",
     `${chalk.bold("Environment")}`,
     "  APP_CONFIG_BACKUP_ROOT     Override backup root (default: ~/Library/Mobile Documents/.../__app_config_backup)",
@@ -75,6 +80,7 @@ function build_subcommand_help(command) {
       "",
       `${chalk.bold("Description")}`,
       "  Create the next incremental backup (numeric id) for the application.",
+      "  Each completed snapshot includes report.json with backup metadata.",
       "",
       `${chalk.bold("Options")}`,
       "  -d, --dry-run            Preview actions without writing files (default: false)",
@@ -134,7 +140,7 @@ function log(quiet, msg) {
  * @param {string} app
  * @param {{ debug: boolean, quiet: boolean, dry_run: boolean }} ctx
  * @param {{ backup_root?: string }} opts
- * @returns {{ id: number, snapshot_dir: string }}
+ * @returns {{ id: number, snapshot_dir: string, report: object }}
  */
 function run_backup(app, ctx, opts = {}) {
   const backup_root = opts.backup_root || get_backup_root();
@@ -150,13 +156,28 @@ function run_backup(app, ctx, opts = {}) {
 
   const provider = get_provider(app);
   debug_log(ctx.debug, `stage: provider backup (${app})`);
-  provider.backup(snapshot_dir, ctx);
+  const provider_result = provider.backup(snapshot_dir, ctx) || {};
+
+  debug_log(ctx.debug, `stage: write backup report (${app})`);
+  const report = build_backup_report({
+    app_name: provider.key,
+    app_version: provider_result.app_version,
+    backup_id: id,
+    backup_timestamp: new Date().toISOString(),
+    tool_name: SCRIPT_NAME,
+    tool_version: VERSION,
+    status: "completed",
+    provider_manifest: provider.manifest_name,
+    included_paths: provider_result.included_paths,
+    paths_skipped_missing: provider_result.paths_skipped_missing,
+  });
+  write_backup_report(snapshot_dir, report, ctx);
 
   log(
     ctx.quiet,
     chalk.green(`Backup complete: ${app} #${id} → ${snapshot_dir}`),
   );
-  return { id, snapshot_dir };
+  return { id, snapshot_dir, report };
 }
 
 /**
@@ -236,121 +257,116 @@ function is_cli_usage_error(error) {
 }
 
 function parse_cli() {
-  return (
-    yargs(process.argv.slice(2))
-      .scriptName(SCRIPT_NAME)
-      .help(false)
-      .version(false)
-      .option("dry-run", {
-        alias: "d",
-        type: "boolean",
-        default: false,
-        describe: "Preview actions without writing files",
-      })
-      .option("quiet", {
-        type: "boolean",
-        default: false,
-        describe: "Print only warnings and errors",
-      })
-      .option("debug", {
-        type: "boolean",
-        default: false,
-        describe: "Print verbose debug logs",
-      })
-      .option("version", {
-        alias: "v",
-        type: "boolean",
-        describe: "Show version number and exit",
-      })
-      .option("help", {
-        alias: "h",
-        type: "boolean",
-        describe: "Show help message",
-      })
-      .command(
-        "backup [app]",
-        "create the next incremental backup for an application",
-        (y) => {
-          y.positional("app", {
-            describe: `application key (supported: ${supported_apps().join(", ")})`,
-            type: "string",
-          });
-          y.example(
-            "$0 backup cursor",
-            "# back up Cursor preferences to the next id folder",
+  return yargs(process.argv.slice(2))
+    .scriptName(SCRIPT_NAME)
+    .help(false)
+    .version(false)
+    .option("dry-run", {
+      alias: "d",
+      type: "boolean",
+      default: false,
+      describe: "Preview actions without writing files",
+    })
+    .option("quiet", {
+      type: "boolean",
+      default: false,
+      describe: "Print only warnings and errors",
+    })
+    .option("debug", {
+      type: "boolean",
+      default: false,
+      describe: "Print verbose debug logs",
+    })
+    .option("version", {
+      alias: "v",
+      type: "boolean",
+      describe: "Show version number and exit",
+    })
+    .option("help", {
+      alias: "h",
+      type: "boolean",
+      describe: "Show help message",
+    })
+    .command(
+      "backup [app]",
+      "create the next incremental backup for an application",
+      (y) => {
+        y.positional("app", {
+          describe: `application key (supported: ${supported_apps().join(", ")})`,
+          type: "string",
+        });
+        y.example(
+          "$0 backup cursor",
+          "# back up Cursor preferences to the next id folder",
+        );
+        y.example(
+          "$0 backup cursor --dry-run",
+          "# preview backup paths without writing",
+        );
+      },
+      (argv) => {
+        if (!argv.app) {
+          exit_usage_error(
+            "Error: application name is required for backup.",
+            "backup",
           );
-          y.example(
-            "$0 backup cursor --dry-run",
-            "# preview backup paths without writing",
+        }
+        const ctx = {
+          debug: argv.debug,
+          quiet: argv.quiet,
+          dry_run: argv.dryRun,
+        };
+        run_backup(argv.app, ctx);
+      },
+    )
+    .command(
+      "restore [app]",
+      "restore a backup (latest by default)",
+      (y) => {
+        y.positional("app", {
+          describe: `application key (supported: ${supported_apps().join(", ")})`,
+          type: "string",
+        });
+        y.option("id", {
+          type: "number",
+          describe: "snapshot id to restore (default: latest)",
+        });
+        y.option("safety-backup", {
+          type: "boolean",
+          default: true,
+          describe:
+            "take a fresh backup before overwriting live config (default: true)",
+        });
+        y.example("$0 restore cursor", "# restore the latest snapshot");
+        y.example("$0 restore cursor --id 3", "# restore snapshot 3");
+        y.example(
+          "$0 restore cursor --no-safety-backup",
+          "# restore without pre-backup",
+        );
+      },
+      (argv) => {
+        if (!argv.app) {
+          exit_usage_error(
+            "Error: application name is required for restore.",
+            "restore",
           );
-        },
-        (argv) => {
-          if (!argv.app) {
-            exit_usage_error(
-              "Error: application name is required for backup.",
-              "backup",
-            );
-          }
-          const ctx = {
-            debug: argv.debug,
-            quiet: argv.quiet,
-            dry_run: argv.dryRun,
-          };
-          run_backup(argv.app, ctx);
-        },
-      )
-      .command(
-        "restore [app]",
-        "restore a backup (latest by default)",
-        (y) => {
-          y.positional("app", {
-            describe: `application key (supported: ${supported_apps().join(", ")})`,
-            type: "string",
-          });
-          y.option("id", {
-            type: "number",
-            describe: "snapshot id to restore (default: latest)",
-          });
-          y.option("safety-backup", {
-            type: "boolean",
-            default: true,
-            describe:
-              "take a fresh backup before overwriting live config (default: true)",
-          });
-          y.example("$0 restore cursor", "# restore the latest snapshot");
-          y.example("$0 restore cursor --id 3", "# restore snapshot 3");
-          y.example(
-            "$0 restore cursor --no-safety-backup",
-            "# restore without pre-backup",
-          );
-        },
-        (argv) => {
-          if (!argv.app) {
-            exit_usage_error(
-              "Error: application name is required for restore.",
-              "restore",
-            );
-          }
-          const ctx = {
-            debug: argv.debug,
-            quiet: argv.quiet,
-            dry_run: argv.dryRun,
-          };
-          run_restore(argv.app, argv.id, argv.safetyBackup, ctx);
-        },
-      )
-      .demandCommand(
-        1,
-        "Error: please specify a command (backup | restore).",
-      )
-      .strict()
-      .fail((msg, err) => {
-        if (err) throw err;
-        exit_usage_error(msg, infer_help_command(process.argv.slice(2)));
-      })
-      .usage(build_help_text(SCRIPT_NAME))
-      .wrap(Math.min(yargs.terminalWidth(), 100)).argv
-  );
+        }
+        const ctx = {
+          debug: argv.debug,
+          quiet: argv.quiet,
+          dry_run: argv.dryRun,
+        };
+        run_restore(argv.app, argv.id, argv.safetyBackup, ctx);
+      },
+    )
+    .demandCommand(1, "Error: please specify a command (backup | restore).")
+    .strict()
+    .fail((msg, err) => {
+      if (err) throw err;
+      exit_usage_error(msg, infer_help_command(process.argv.slice(2)));
+    })
+    .usage(build_help_text(SCRIPT_NAME))
+    .wrap(Math.min(yargs.terminalWidth(), 100)).argv;
 }
 
 function main() {
