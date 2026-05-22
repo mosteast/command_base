@@ -61,3 +61,9 @@ export all_proxy=socks5://127.0.0.1:7890
 alias typora="/Applications/Typora.app/Contents/MacOS/Typora"
 
 export XTTS_SPEAKERS_JSON="$PWD/lib/tts/xtts_v2/xtts_speakers.json"
+
+# ================================================
+# Android
+# ================================================
+export ANDROID_HOME="$HOME/Library/Android/sdk"
+export PATH="$ANDROID_HOME/emulator:$ANDROID_HOME/platform-tools:$PATH"
