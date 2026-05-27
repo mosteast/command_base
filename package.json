@@ -15,7 +15,7 @@
   "author": "",
   "main": "index.js",
   "scripts": {
-    "format": "npx sort-package-json && git diff --name-only | xargs -r npx prettier --write",
+    "format": "npx sort-package-json && git diff --name-only --diff-filter=d -z | xargs -0 -r npx prettier --write --ignore-unknown",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "dependencies": {

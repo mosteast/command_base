@@ -1004,6 +1004,7 @@ run_yt_dlp_stdout_to_file_with_log_internal() {
         return 0
     fi
 
+
     log_io "create temp yt-dlp log file"
     if ! log_file=$(mktemp -t yt_dlp_log.XXXXXX); then
         log_warn "Unable to create temp log file; running yt-dlp without format detection."
