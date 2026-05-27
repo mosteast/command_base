@@ -653,6 +653,7 @@ module.exports = {
   expand_patterns,
   file_has_content,
   run_ai_command,
+  execute_with_adapter,
   build_fallback_user_prompt,
   build_input_section,
   unwrap_single_markdown_fence,

@@ -36,10 +36,19 @@ function create_claude_code_adapter(support_context) {
             },
           );
         } catch (error) {
+          if (request.disable_fallback) {
+            throw error;
+          }
           request.logger?.warn?.(
             `claude CLI invocation failed (${error.message}), falling back to Anthropic API`,
           );
         }
+      }
+
+      if (request.disable_fallback) {
+        throw new Error(
+          `claude CLI command '${cli_command}' is not installed or not on PATH.`,
+        );
       }
 
       return request_with_anthropic(context, request);

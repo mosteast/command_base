@@ -18,6 +18,8 @@ LEVEL_DEBUG=3
 
 log_threshold=$LEVEL_INFO
 dry_run=false
+ai_commit_message=false
+ai_only=false
 
 handle_error() {
   local exit_code=$?
@@ -41,10 +43,18 @@ Options:
   --debug           Print verbose debug logs.
   --quiet           Print only warnings and errors.
   -d, --dry-run     Print the planned actions without executing them.
+  --ai              Ask AI to generate the commit message after formatting.
+  --ai-only         Format, generate and print the AI commit message, then exit.
 
 Examples:
   # Format code, commit with a custom message, and push
   \$0 "Run format before commit"
+
+  # Format code, generate the commit message with AI, and push
+  \$0 --ai
+
+  # Format code and preview the AI-generated commit message only
+  \$0 --ai-only
 
   # Preview the commands without executing them
   \$0 --dry-run
@@ -165,6 +175,16 @@ run() {
         g_flags+=("--dry-run")
         shift
         ;;
+      --ai)
+        ai_commit_message=true
+        g_flags+=("--ai")
+        shift
+        ;;
+      --ai-only)
+        ai_only=true
+        g_flags+=("--ai-only")
+        shift
+        ;;
       --)
         shift
         while (($#)); do
@@ -186,6 +206,16 @@ run() {
   local commit_message=""
   if [ "${#positional[@]}" -gt 0 ]; then
     commit_message="${positional[*]}"
+  fi
+
+  if [ "$ai_commit_message" = true ] && [ "$ai_only" = true ]; then
+    log_error "--ai and --ai-only cannot be combined."
+    exit 1
+  fi
+
+  if { [ "$ai_commit_message" = true ] || [ "$ai_only" = true ]; } && [ -n "$commit_message" ]; then
+    log_error "--ai/--ai-only cannot be combined with an explicit commit message."
+    exit 1
   fi
 
   ensure_dependency npm

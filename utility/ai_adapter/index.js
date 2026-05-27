@@ -2,6 +2,7 @@
 
 const { create_codex_adapter } = require("./codex_adapter");
 const { create_claude_code_adapter } = require("./claude_code_adapter");
+const { create_cursor_cli_adapter } = require("./cursor_cli_adapter");
 const { create_openai_adapter } = require("./openai_adapter");
 const { create_openrouter_adapter } = require("./openrouter_adapter");
 const { create_gemini_adapter } = require("./gemini_adapter");
@@ -9,6 +10,7 @@ const { create_gemini_adapter } = require("./gemini_adapter");
 const adapter_factories = Object.freeze({
   codex: create_codex_adapter,
   "claude-code": create_claude_code_adapter,
+  "cursor-cli": create_cursor_cli_adapter,
   openai: create_openai_adapter,
   openrouter: create_openrouter_adapter,
   gemini: create_gemini_adapter,

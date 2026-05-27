@@ -28,6 +28,12 @@ function create_codex_adapter(support_context) {
         if (model_flag && request.model) {
           command_args.push(model_flag, request.model);
         }
+        if (request.reasoning) {
+          command_args.push(
+            "-c",
+            `model_reasoning_effort=${request.reasoning}`,
+          );
+        }
         if (process.env.CODEX_CLI_NO_STREAM === "1") {
           request.logger?.warn?.(
             "Ignoring legacy CODEX_CLI_NO_STREAM=1 (codex-cli no longer supports --no-stream).",
@@ -81,6 +87,9 @@ function create_codex_adapter(support_context) {
 
           throw new Error("codex-cli returned an empty last message");
         } catch (error) {
+          if (request.disable_fallback) {
+            throw error;
+          }
           request.logger?.warn?.(
             `codex CLI invocation failed (${error.message}), falling back to OpenAI API`,
           );
@@ -89,6 +98,12 @@ function create_codex_adapter(support_context) {
             await safe_cleanup_output_last_message(output_last_message_path);
           }
         }
+      }
+
+      if (request.disable_fallback) {
+        throw new Error(
+          `codex CLI command '${cli_command}' is not installed or not on PATH.`,
+        );
       }
 
       if (!context.invoke_adapter) {

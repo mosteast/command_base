@@ -3,6 +3,7 @@
 set -euo pipefail
 
 script_name=$(basename "$0")
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 script_version="0.1.0"
 
 GREEN=$'\033[32m'
@@ -18,6 +19,8 @@ LEVEL_DEBUG=3
 
 log_threshold=$LEVEL_INFO
 dry_run=false
+ai_commit_message=false
+ai_only=false
 has_staged_changes=false
 has_branch_ahead=false
 has_upstream=false
@@ -45,10 +48,18 @@ Options:
   --debug           Print verbose debug logs.
   --quiet           Print only warnings and errors.
   -d, --dry-run     Print the planned actions without executing them.
+  --ai              Generate the commit message from staged changes using AI.
+  --ai-only         Generate and print the AI commit message, then exit.
 
 Examples:
   # Commit all changes with a custom message
   \$0 "Add payment gateway integration"
+
+  # Commit all changes with an AI-generated message
+  \$0 --ai
+
+  # Preview the AI-generated commit message without committing or pushing
+  \$0 --ai-only
 
   # Preview actions without committing or pushing
   \$0 --dry-run
@@ -147,10 +158,41 @@ detect_merge_in_progress() {
   fi
 }
 
+generate_ai_commit_message() {
+  local helper_path="${script_dir}/../utility/git_commit_message_ai.js"
+  local -a helper_args=()
+
+  if [ "$log_threshold" -ge "$LEVEL_DEBUG" ]; then
+    helper_args+=("--debug")
+  fi
+  if [ "$log_threshold" -le "$LEVEL_WARN" ]; then
+    helper_args+=("--quiet")
+  fi
+
+  log_debug "Generating AI commit message from staged changes."
+  if [ "${#helper_args[@]}" -gt 0 ]; then
+    log_debug "Command: $(format_command node "$helper_path" "${helper_args[@]}")"
+    node "$helper_path" "${helper_args[@]}"
+  else
+    log_debug "Command: $(format_command node "$helper_path")"
+    node "$helper_path"
+  fi
+}
+
 collect_commit_message() {
   local provided_message=$1
   if [ -n "$provided_message" ]; then
     echo "$provided_message"
+    return
+  fi
+
+  if [ "$ai_commit_message" = true ] || [ "$ai_only" = true ]; then
+    if [ "$dry_run" = true ]; then
+      log_info "Dry run: AI commit message generation would use staged changes."
+      echo "[AI generated commit message]"
+      return
+    fi
+    generate_ai_commit_message
     return
   fi
 
@@ -297,6 +339,14 @@ run() {
         dry_run=true
         shift
         ;;
+      --ai)
+        ai_commit_message=true
+        shift
+        ;;
+      --ai-only)
+        ai_only=true
+        shift
+        ;;
       --)
         shift
         while (($#)); do
@@ -319,21 +369,51 @@ run() {
     commit_message_input="${positional[*]}"
   fi
 
+  if [ "$ai_commit_message" = true ] && [ "$ai_only" = true ]; then
+    log_error "--ai and --ai-only cannot be combined."
+    exit 1
+  fi
+
+  if { [ "$ai_commit_message" = true ] || [ "$ai_only" = true ]; } && [ -n "$commit_message_input" ]; then
+    log_error "--ai/--ai-only cannot be combined with an explicit commit message."
+    exit 1
+  fi
+
   ensure_dependency git
   ensure_dependency date
+  if [ "$ai_commit_message" = true ] || [ "$ai_only" = true ]; then
+    ensure_dependency node
+  fi
   verify_git_repository
   detect_merge_in_progress
+  if { [ "$ai_commit_message" = true ] || [ "$ai_only" = true ]; } && [ "$merge_in_progress" = true ]; then
+    log_error "--ai/--ai-only cannot be used while a merge commit is in progress."
+    exit 1
+  fi
 
   execute_step "Staging all changes." git add --all
 
   assess_repository_state
 
-  local commit_message
-  commit_message=$(collect_commit_message "$commit_message_input")
-  if [ "$merge_in_progress" = true ] && [ -z "$commit_message" ]; then
-    log_info "Using merge message from MERGE_MSG."
-  else
-    log_info "Using commit message: ${commit_message}"
+  if [ "$ai_only" = true ]; then
+    if [ "$has_staged_changes" = false ]; then
+      log_warn "No staged changes detected; skipping AI commit message generation."
+      return 0
+    fi
+    collect_commit_message ""
+    return 0
+  fi
+
+  local commit_message=""
+  if [ "$has_staged_changes" = true ] || [ "$merge_in_progress" = true ]; then
+    commit_message=$(collect_commit_message "$commit_message_input")
+    if [ "$merge_in_progress" = true ] && [ -z "$commit_message" ]; then
+      log_info "Using merge message from MERGE_MSG."
+    else
+      log_info "Using commit message: ${commit_message}"
+    fi
+  elif [ "$ai_commit_message" = true ]; then
+    log_info "No staged changes detected; skipping AI commit message generation."
   fi
 
   if [ "$dry_run" = true ]; then
