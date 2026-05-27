@@ -43,6 +43,14 @@ async function create_temp_dir() {
   return fs.mkdtemp(path.join(os.tmpdir(), "xsave-yt-dlp-test-"));
 }
 
+function build_fake_yt_dlp_env(temp_root, fake_yt_dlp, fake_yt_dlp_log) {
+  return {
+    HOME: temp_root,
+    PATH: `${fake_yt_dlp.bin_dir}:${process.env.PATH || ""}`,
+    FAKE_YT_DLP_LOG: fake_yt_dlp_log,
+  };
+}
+
 async function find_files_with_suffix(root_dir, suffix) {
   const matches = [];
   const entries = await fs.readdir(root_dir, { withFileTypes: true });
@@ -123,6 +131,29 @@ printf '%s\\n' "[download] Downloading playlist: Example - Videos"
 printf '%s\\n' "ERROR: [youtube] abc123: Sign in to confirm you're not a bot. Use --cookies-from-browser or --cookies for the authentication."
 printf '%s\\n' "[download] Finished downloading playlist: Example - Videos"
 exit 0
+`,
+    "utf8",
+  );
+  await fs.chmod(script_path, 0o755);
+
+  return { bin_dir };
+}
+
+async function create_failing_fake_yt_dlp_bin(temp_root, exit_code = 42) {
+  const bin_dir = path.join(temp_root, "fake_bin_failing");
+  const script_path = path.join(bin_dir, "yt-dlp");
+
+  await fs.mkdir(bin_dir, { recursive: true });
+  await fs.writeFile(
+    script_path,
+    `#!/usr/bin/env bash
+set -u
+
+log_file="\${FAKE_YT_DLP_LOG:?}"
+printf '%s\\n' "$*" >> "$log_file"
+printf '%s\\n' "[download] Downloading playlist: Example - Videos"
+printf '%s\\n' "ERROR: simulated yt-dlp failure"
+exit ${exit_code}
 `,
     "utf8",
   );
@@ -349,6 +380,55 @@ describe("xsave_yt_dlp match filters", () => {
   });
 });
 
+describe("xsave_yt_dlp impersonation defaults", () => {
+  it("adds chrome impersonation by default for Rumble channels", async () => {
+    const result = await run_cli([
+      "--dry-run",
+      "--debug",
+      "--channel",
+      "https://rumble.com/user/littlegrass2021",
+    ]);
+
+    const stdout_text = strip_ansi(result.stdout);
+
+    expect(result.exit_code).toBe(0);
+    expect(stdout_text).toContain("--impersonate chrome");
+    expect(stdout_text).not.toContain("Chrome/121.0.0.0");
+  });
+
+  it("keeps an explicit impersonation option for Rumble channels", async () => {
+    const result = await run_cli([
+      "--dry-run",
+      "--debug",
+      "--channel",
+      "https://rumble.com/user/littlegrass2021",
+      "--",
+      "--impersonate",
+      "safari",
+    ]);
+
+    const stdout_text = strip_ansi(result.stdout);
+
+    expect(result.exit_code).toBe(0);
+    expect(stdout_text).toContain("--impersonate safari");
+    expect(stdout_text).not.toContain("--impersonate chrome");
+  });
+
+  it("does not add impersonation by default for YouTube channels", async () => {
+    const result = await run_cli([
+      "--dry-run",
+      "--debug",
+      "--channel",
+      "https://www.youtube.com/@user1",
+    ]);
+
+    const stdout_text = strip_ansi(result.stdout);
+
+    expect(result.exit_code).toBe(0);
+    expect(stdout_text).not.toContain("--impersonate");
+  });
+});
+
 describe("xsave_yt_dlp comment extraction", () => {
   it("adds a YouTube max comments extractor arg during metadata export", async () => {
     const result = await run_cli([
@@ -419,10 +499,7 @@ describe("xsave_yt_dlp comment extraction", () => {
           "--no-write-comments",
         ],
         {
-          env: {
-            PATH: `${fake_yt_dlp.bin_dir}:${process.env.PATH || ""}`,
-            FAKE_YT_DLP_LOG: fake_yt_dlp_log,
-          },
+          env: build_fake_yt_dlp_env(temp_root, fake_yt_dlp, fake_yt_dlp_log),
         },
       );
 
@@ -554,10 +631,7 @@ describe("xsave_yt_dlp bilibili channel naming", () => {
           output_dir,
         ],
         {
-          env: {
-            PATH: `${fake_yt_dlp.bin_dir}:${process.env.PATH || ""}`,
-            FAKE_YT_DLP_LOG: fake_yt_dlp_log,
-          },
+          env: build_fake_yt_dlp_env(temp_root, fake_yt_dlp, fake_yt_dlp_log),
         },
       );
 
@@ -602,10 +676,7 @@ describe("xsave_yt_dlp youtube auth fallback", () => {
           output_dir,
         ],
         {
-          env: {
-            PATH: `${fake_yt_dlp.bin_dir}:${process.env.PATH || ""}`,
-            FAKE_YT_DLP_LOG: fake_yt_dlp_log,
-          },
+          env: build_fake_yt_dlp_env(temp_root, fake_yt_dlp, fake_yt_dlp_log),
         },
       );
 
@@ -686,10 +757,7 @@ describe("xsave_yt_dlp youtube auth fallback", () => {
             output_dir,
           ],
           {
-            env: {
-              PATH: `${fake_yt_dlp.bin_dir}:${process.env.PATH || ""}`,
-              FAKE_YT_DLP_LOG: fake_yt_dlp_log,
-            },
+            env: build_fake_yt_dlp_env(temp_root, fake_yt_dlp, fake_yt_dlp_log),
           },
         ),
       ).rejects.toMatchObject({
@@ -704,6 +772,56 @@ describe("xsave_yt_dlp youtube auth fallback", () => {
       expect(
         invocation_lines.some((line) => line.includes("--skip-download")),
       ).toBe(false);
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("xsave_yt_dlp retry handling", () => {
+  it("reports and propagates the real yt-dlp exit status", async () => {
+    const temp_root = await create_temp_dir();
+    const output_dir = path.join(temp_root, "output");
+    const fake_yt_dlp_log = path.join(temp_root, "fake_yt_dlp.log");
+
+    await fs.mkdir(output_dir, { recursive: true });
+    await fs.writeFile(fake_yt_dlp_log, "", "utf8");
+
+    try {
+      const fake_yt_dlp = await create_failing_fake_yt_dlp_bin(temp_root, 42);
+
+      let captured_error;
+      try {
+        await run_cli(
+          [
+            "--debug",
+            "--retry-count",
+            "1",
+            "--no-danmaku",
+            "--channel",
+            "https://www.youtube.com/@example",
+            "--output",
+            output_dir,
+          ],
+          {
+            env: build_fake_yt_dlp_env(temp_root, fake_yt_dlp, fake_yt_dlp_log),
+          },
+        );
+      } catch (error) {
+        captured_error = error;
+      }
+
+      const stdout_text = strip_ansi(captured_error?.stdout || "");
+      const invocation_lines = (await fs.readFile(fake_yt_dlp_log, "utf8"))
+        .split(/\r?\n/)
+        .filter(Boolean);
+
+      expect(captured_error).toMatchObject({ exit_code: 42 });
+      expect(stdout_text).toContain(
+        "Channel download: https://www.youtube.com/@example/videos failed on attempt 1 (exit code 42).",
+      );
+      expect(stdout_text).not.toContain("exit code 0");
+      expect(invocation_lines).toHaveLength(1);
     } finally {
       await fs.rm(temp_root, { recursive: true, force: true });
     }
@@ -736,10 +854,7 @@ describe("xsave_yt_dlp channel library layout", () => {
           output_dir,
         ],
         {
-          env: {
-            PATH: `${fake_yt_dlp.bin_dir}:${process.env.PATH || ""}`,
-            FAKE_YT_DLP_LOG: fake_yt_dlp_log,
-          },
+          env: build_fake_yt_dlp_env(temp_root, fake_yt_dlp, fake_yt_dlp_log),
         },
       );
 

@@ -51,19 +51,19 @@ function build_help_text(script_name) {
     "",
     `${chalk.bold("Examples")}`,
     "  # Convert a single HTML file into a sibling EPUB without a cover image",
-    "  $0 \"ebook/book.html\"",
+    '  $0 "ebook/book.html"',
     "",
     "  # Convert using explicit input option and a local cover image",
-    "  $0 --input \"ebook/book.html\" --cover \"/Users/me/cover.jpg\"",
+    '  $0 --input "ebook/book.html" --cover "/Users/me/cover.jpg"',
     "",
     "  # Convert using explicit input option and custom output path",
-    "  $0 --input \"ebook/book.html\" --cover \"cover.jpg\" --output \"ebook/book.epub\"",
+    '  $0 --input "ebook/book.html" --cover "cover.jpg" --output "ebook/book.epub"',
     "",
     "  # Convert multiple HTML files via glob into one output directory",
-    "  $0 \"ebook/**/*.html\" --cover \"cover.png\" --out-dir \"dist/epub\"",
+    '  $0 "ebook/**/*.html" --cover "cover.png" --out-dir "dist/epub"',
     "",
     "  # Preview work only, without writing files",
-    "  $0 \"ebook/*.html\" --cover \"cover.jpg\" --dry-run --debug",
+    '  $0 "ebook/*.html" --cover "cover.jpg" --dry-run --debug',
   ].join("\n");
 }
 
@@ -136,7 +136,8 @@ function parse_cli_arguments() {
     .option("cover-url-match", {
       type: "string",
       default: "",
-      describe: "Substring used to match and replace cover image URL in HTML body (with --cover)",
+      describe:
+        "Substring used to match and replace cover image URL in HTML body (with --cover)",
     })
     .option("refresh", {
       type: "boolean",
@@ -274,7 +275,10 @@ function decode_html(value) {
 }
 
 function extract_tag_text(html_text, tag_name) {
-  const regex = new RegExp(`<${tag_name}\\b[^>]*>([\\s\\S]*?)<\\/${tag_name}>`, "i");
+  const regex = new RegExp(
+    `<${tag_name}\\b[^>]*>([\\s\\S]*?)<\\/${tag_name}>`,
+    "i",
+  );
   const match = String(html_text || "").match(regex);
   if (!match) return "";
   return decode_html(strip_tags(match[1])).trim();
@@ -299,11 +303,15 @@ function extract_styles(html_text) {
     chunks.push((match[1] || "").trim());
   }
   const style_text = chunks.join("\n\n").trim();
-  return style_text || "body { font-family: serif; line-height: 1.5; margin: 1em; }";
+  return (
+    style_text || "body { font-family: serif; line-height: 1.5; margin: 1em; }"
+  );
 }
 
 function extract_body(html_text) {
-  const match = String(html_text || "").match(/<body\b[^>]*>([\s\S]*?)<\/body>/i);
+  const match = String(html_text || "").match(
+    /<body\b[^>]*>([\s\S]*?)<\/body>/i,
+  );
   return (match ? match[1] : String(html_text || "")).trim();
 }
 
@@ -358,7 +366,8 @@ function extract_toc_entries(body_html) {
     /<nav\b[^>]*\bid=(["'])toc\1[^>]*>([\s\S]*?)<\/nav>/i,
   );
   const source = nav_match ? nav_match[2] : String(body_html || "");
-  const anchor_regex = /<a\b[^>]*\bhref=(["'])(.*?)\1[^>]*>([\s\S]*?)<\/a\s*>/gi;
+  const anchor_regex =
+    /<a\b[^>]*\bhref=(["'])(.*?)\1[^>]*>([\s\S]*?)<\/a\s*>/gi;
   const entries = [];
   let match;
   while ((match = anchor_regex.exec(source))) {
@@ -373,7 +382,8 @@ function extract_toc_entries(body_html) {
 
   if (entries.length > 0) return entries;
 
-  const heading_regex = /<h([1-6])\b[^>]*\bid=(["'])(.*?)\2[^>]*>([\s\S]*?)<\/h\1>/gi;
+  const heading_regex =
+    /<h([1-6])\b[^>]*\bid=(["'])(.*?)\2[^>]*>([\s\S]*?)<\/h\1>/gi;
   while ((match = heading_regex.exec(source))) {
     const id = (match[3] || "").trim();
     const label = decode_html(strip_tags(match[4] || "")).trim();
@@ -497,7 +507,9 @@ function build_content_opf({
     );
   }
 
-  manifest_lines.push('    <item id="content" href="content.xhtml" media-type="application/xhtml+xml" />');
+  manifest_lines.push(
+    '    <item id="content" href="content.xhtml" media-type="application/xhtml+xml" />',
+  );
 
   if (has_cover) {
     manifest_lines.push(
@@ -514,10 +526,16 @@ function build_content_opf({
 
   const guide_lines = ["  <guide>"];
   if (has_cover) {
-    guide_lines.push('    <reference type="cover" title="Cover" href="cover.xhtml" />');
+    guide_lines.push(
+      '    <reference type="cover" title="Cover" href="cover.xhtml" />',
+    );
   }
-  guide_lines.push('    <reference type="toc" title="Table of Contents" href="content.xhtml#toc" />');
-  guide_lines.push('    <reference type="text" title="Start" href="content.xhtml" />');
+  guide_lines.push(
+    '    <reference type="toc" title="Table of Contents" href="content.xhtml#toc" />',
+  );
+  guide_lines.push(
+    '    <reference type="text" title="Start" href="content.xhtml" />',
+  );
   guide_lines.push("  </guide>");
 
   return [
@@ -656,10 +674,18 @@ async function write_epub_tree({
   }
 
   logger.debug(`IO write - ${path.join(temp_root, "mimetype")}`);
-  await fs.writeFile(path.join(temp_root, "mimetype"), "application/epub+zip", "utf8");
+  await fs.writeFile(
+    path.join(temp_root, "mimetype"),
+    "application/epub+zip",
+    "utf8",
+  );
 
   logger.debug(`IO write - ${path.join(meta_inf_dir, "container.xml")}`);
-  await fs.writeFile(path.join(meta_inf_dir, "container.xml"), container_xml, "utf8");
+  await fs.writeFile(
+    path.join(meta_inf_dir, "container.xml"),
+    container_xml,
+    "utf8",
+  );
 
   logger.debug(`IO write - ${path.join(oebps_dir, "content.opf")}`);
   await fs.writeFile(path.join(oebps_dir, "content.opf"), content_opf, "utf8");
@@ -668,13 +694,23 @@ async function write_epub_tree({
   await fs.writeFile(path.join(oebps_dir, "toc.ncx"), toc_ncx, "utf8");
 
   logger.debug(`IO write - ${path.join(oebps_dir, "content.xhtml")}`);
-  await fs.writeFile(path.join(oebps_dir, "content.xhtml"), content_xhtml, "utf8");
+  await fs.writeFile(
+    path.join(oebps_dir, "content.xhtml"),
+    content_xhtml,
+    "utf8",
+  );
 
   if (has_cover) {
     logger.debug(`IO write - ${path.join(oebps_dir, "cover.xhtml")}`);
-    await fs.writeFile(path.join(oebps_dir, "cover.xhtml"), cover_xhtml, "utf8");
+    await fs.writeFile(
+      path.join(oebps_dir, "cover.xhtml"),
+      cover_xhtml,
+      "utf8",
+    );
 
-    logger.debug(`IO copy - ${cover_path} -> ${path.join(images_dir, cover_file_name)}`);
+    logger.debug(
+      `IO copy - ${cover_path} -> ${path.join(images_dir, cover_file_name)}`,
+    );
     await fs.copyFile(cover_path, path.join(images_dir, cover_file_name));
   }
 }
@@ -723,19 +759,24 @@ async function convert_single_file({
   const normalized_html = raw_html.replace(/\r\n?/g, "\n");
 
   const title_from_html = extract_tag_text(normalized_html, "title");
-  const author_from_html = extract_by_class_tag_text(normalized_html, "book-author") || "Unknown";
+  const author_from_html =
+    extract_by_class_tag_text(normalized_html, "book-author") || "Unknown";
   const style_text = extract_styles(normalized_html);
   const body_html = extract_body(normalized_html);
 
   const has_cover = Boolean(cover_path && cover_file_name && cover_media_type);
-  const cover_matcher = options.cover_url_match || infer_cover_matcher(cover_path);
+  const cover_matcher =
+    options.cover_url_match || infer_cover_matcher(cover_path);
   const replaced_body_html = has_cover
     ? replace_cover_image_in_body(body_html, cover_matcher, cover_file_name)
     : body_html;
   const xhtml_body = normalize_html_for_xhtml(replaced_body_html);
   const toc_entries = extract_toc_entries(replaced_body_html);
 
-  const title = options.override_title || title_from_html || path.basename(strip_extension(input_path));
+  const title =
+    options.override_title ||
+    title_from_html ||
+    path.basename(strip_extension(input_path));
   const author = options.override_author || author_from_html;
   const book_id = `urn:uuid:${random_uuid()}`;
   const modified = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
@@ -748,7 +789,9 @@ async function convert_single_file({
     lang: options.lang,
   });
 
-  const cover_xhtml = has_cover ? build_cover_xhtml({ lang: options.lang, cover_file_name }) : "";
+  const cover_xhtml = has_cover
+    ? build_cover_xhtml({ lang: options.lang, cover_file_name })
+    : "";
 
   const toc_ncx = build_toc_ncx({
     book_id,
@@ -798,7 +841,9 @@ async function convert_single_file({
     await package_epub({ temp_root, output_path, logger });
 
     logger.success(`Converted: ${input_path} -> ${output_path}`);
-    logger.info(`Metadata: title="${title}", author="${author}", toc=${toc_entries.length}`);
+    logger.info(
+      `Metadata: title="${title}", author="${author}", toc=${toc_entries.length}`,
+    );
     return { converted: true, skipped: false, dry_run: false };
   } finally {
     logger.debug(`IO remove - temp root ${temp_root}`);
@@ -862,7 +907,9 @@ async function main() {
   }
 
   if (options.output_path && html_inputs.length > 1) {
-    throw new Error("--output supports only one input file. Use --out-dir for multiple files.");
+    throw new Error(
+      "--output supports only one input file. Use --out-dir for multiple files.",
+    );
   }
 
   let converted_count = 0;

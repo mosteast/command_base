@@ -672,12 +672,42 @@ normalize_channel_url() {
     printf "%s" "$url"
 }
 
-# Pinned UA is kept for extractor quirks on some sites; Bilibili treats a stale UA as bot traffic.
+# Pinned UA is kept for extractor quirks on some sites; Bilibili and Rumble treat stale browser identity as bot traffic.
 should_append_legacy_ytdlp_user_agent() {
     case "$1" in
-        bilibili) return 1 ;;
+        bilibili|rumble) return 1 ;;
         *) return 0 ;;
     esac
+}
+
+yt_dlp_option_is_present() {
+    local option_name="$1"
+    shift
+    local arg
+    for arg in "$@"; do
+        case "$arg" in
+            "$option_name"|"$option_name="*)
+                return 0
+                ;;
+        esac
+    done
+    return 1
+}
+
+build_default_impersonate_opts() {
+    local platform="$1"
+    shift
+    default_impersonate_opts=()
+
+    if [ "$platform" != "rumble" ]; then
+        return 0
+    fi
+
+    if yt_dlp_option_is_present "--impersonate" "$@"; then
+        return 0
+    fi
+
+    default_impersonate_opts=(--impersonate chrome)
 }
 
 contains_non_ascii() {
@@ -749,7 +779,9 @@ retry_command() {
             log_step "${description} (attempt ${attempt})"
             log_io "$(format_command "$@")"
         fi
-        if "$@"; then
+        "$@"
+        local exit_code=$?
+        if [ "$exit_code" -eq 0 ]; then
             if [ $attempt -gt 1 ]; then
                 log_success "${description} succeeded on attempt ${attempt}."
             else
@@ -758,7 +790,6 @@ retry_command() {
             return 0
         fi
 
-        local exit_code=$?
         log_warn "${description} failed on attempt ${attempt} (exit code ${exit_code})."
 
         if [ "${yt_dlp_last_non_retriable_error}" = true ]; then
@@ -1108,7 +1139,8 @@ run_video_yt_dlp() {
     if should_append_legacy_ytdlp_user_agent "$video_platform_for_ua"; then
         yt_dlp_args+=(--add-header "User-Agent:Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36")
     fi
-    yt_dlp_args+=("${EXTRA_OPTS[@]}" "$url")
+    build_default_impersonate_opts "$video_platform_for_ua" "${EXTRA_OPTS[@]}"
+    yt_dlp_args+=("${default_impersonate_opts[@]}" "${EXTRA_OPTS[@]}" "$url")
 
     run_yt_dlp_with_log yt-dlp "${yt_dlp_args[@]}"
 }
@@ -1185,7 +1217,8 @@ run_video_metadata_yt_dlp() {
     if should_append_legacy_ytdlp_user_agent "$video_platform_for_ua"; then
         yt_dlp_args+=(--add-header "User-Agent:Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36")
     fi
-    yt_dlp_args+=("${EXTRA_OPTS[@]}" "$url")
+    build_default_impersonate_opts "$video_platform_for_ua" "${EXTRA_OPTS[@]}"
+    yt_dlp_args+=("${default_impersonate_opts[@]}" "${EXTRA_OPTS[@]}" "$url")
 
     run_yt_dlp_with_log yt-dlp "${yt_dlp_args[@]}"
 }
@@ -2359,7 +2392,8 @@ if [ -n "$CHANNEL_URL" ]; then
     if should_append_legacy_ytdlp_user_agent "$channel_platform"; then
         channel_tail_args+=(--add-header "User-Agent:Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36")
     fi
-    channel_tail_args+=("${EXTRA_OPTS[@]}")
+    build_default_impersonate_opts "$channel_platform" "${EXTRA_OPTS[@]}"
+    channel_tail_args+=("${default_impersonate_opts[@]}" "${EXTRA_OPTS[@]}")
     channel_metadata_base_args=(
         --playlist-reverse
         "${yt_dlp_color_opts[@]}"
@@ -2405,9 +2439,7 @@ if [ -n "$CHANNEL_URL" ]; then
             "${channel_tail_args[@]}" \
             "$CHANNEL_URL"
         fallback_status=$?
-        if [ "$fallback_status" -ne 0 ]; then
-            channel_status=$fallback_status
-        fi
+        channel_status=$fallback_status
     elif [ "$channel_platform" = "youtube" ] && [ -n "$fallback_player_client" ]; then
         channel_cookie_fallback_label="${youtube_cookie_fallback_client:-default}"
         if [ "$channel_primary_player_error" = true ] || [ "$channel_primary_auth_error" = true ]; then
@@ -2425,9 +2457,7 @@ if [ -n "$CHANNEL_URL" ]; then
                 "${channel_tail_args[@]}" \
                 "$CHANNEL_URL"
             fallback_status=$?
-            if [ "$fallback_status" -ne 0 ]; then
-                channel_status=$fallback_status
-            fi
+            channel_status=$fallback_status
             if [ "$yt_dlp_last_player_error" = true ] || [ "$yt_dlp_last_auth_error" = true ]; then
                 if [ "$yt_dlp_last_auth_error" = true ]; then
                     log_warn "Fallback client '${channel_cookie_fallback_label}' still hit YouTube auth challenges; retrying without cookies."
@@ -2442,9 +2472,7 @@ if [ -n "$CHANNEL_URL" ]; then
                     "${channel_tail_args[@]}" \
                     "$CHANNEL_URL"
                 fallback_status=$?
-                if [ "$fallback_status" -ne 0 ]; then
-                    channel_status=$fallback_status
-                fi
+                channel_status=$fallback_status
             fi
         elif [ "$channel_primary_format_error" = true ]; then
             log_warn "Primary download had format errors; retrying without cookies using '${fallback_player_client}'."
@@ -2456,9 +2484,7 @@ if [ -n "$CHANNEL_URL" ]; then
                 "${channel_tail_args[@]}" \
                 "$CHANNEL_URL"
             fallback_status=$?
-            if [ "$fallback_status" -ne 0 ]; then
-                channel_status=$fallback_status
-            fi
+            channel_status=$fallback_status
         fi
     fi
 
@@ -2509,9 +2535,7 @@ if [ -n "$CHANNEL_URL" ]; then
                 "${channel_tail_args[@]}" \
                 "$CHANNEL_URL"
             fallback_status=$?
-            if [ "$fallback_status" -ne 0 ]; then
-                channel_metadata_status=$fallback_status
-            fi
+            channel_metadata_status=$fallback_status
         elif [ "$channel_platform" = "youtube" ] && [ -n "$fallback_player_client" ] && { [ "$channel_metadata_player_error" = true ] || [ "$channel_metadata_auth_error" = true ]; }; then
             channel_cookie_fallback_label="${youtube_cookie_fallback_client:-default}"
             if [ "$channel_metadata_auth_error" = true ]; then
@@ -2528,9 +2552,7 @@ if [ -n "$CHANNEL_URL" ]; then
                 "${channel_tail_args[@]}" \
                 "$CHANNEL_URL"
             fallback_status=$?
-            if [ "$fallback_status" -ne 0 ]; then
-                channel_metadata_status=$fallback_status
-            fi
+            channel_metadata_status=$fallback_status
             if [ "$yt_dlp_last_player_error" = true ] || [ "$yt_dlp_last_auth_error" = true ]; then
                 if [ "$yt_dlp_last_auth_error" = true ]; then
                     log_warn "Fallback client '${channel_cookie_fallback_label}' still hit YouTube auth challenges; retrying metadata export without cookies."
@@ -2545,9 +2567,7 @@ if [ -n "$CHANNEL_URL" ]; then
                     "${channel_tail_args[@]}" \
                     "$CHANNEL_URL"
                 fallback_status=$?
-                if [ "$fallback_status" -ne 0 ]; then
-                    channel_metadata_status=$fallback_status
-                fi
+                channel_metadata_status=$fallback_status
             fi
         fi
 
@@ -2714,7 +2734,8 @@ elif [ -n "$PLAYLIST_URL" ]; then
     if should_append_legacy_ytdlp_user_agent "$playlist_platform"; then
         playlist_tail_args+=(--add-header "User-Agent:Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36")
     fi
-    playlist_tail_args+=("${EXTRA_OPTS[@]}")
+    build_default_impersonate_opts "$playlist_platform" "${EXTRA_OPTS[@]}"
+    playlist_tail_args+=("${default_impersonate_opts[@]}" "${EXTRA_OPTS[@]}")
     playlist_metadata_base_args=(
         --playlist-reverse
         "${yt_dlp_color_opts[@]}"
@@ -2758,9 +2779,7 @@ elif [ -n "$PLAYLIST_URL" ]; then
             "${playlist_tail_args[@]}" \
             "$PLAYLIST_URL"
         fallback_status=$?
-        if [ "$fallback_status" -ne 0 ]; then
-            playlist_status=$fallback_status
-        fi
+        playlist_status=$fallback_status
     elif [ "$playlist_platform" = "youtube" ] && [ -n "$fallback_player_client" ]; then
         playlist_cookie_fallback_label="${youtube_cookie_fallback_client:-default}"
         if [ "$playlist_primary_player_error" = true ] || [ "$playlist_primary_auth_error" = true ]; then
@@ -2777,9 +2796,7 @@ elif [ -n "$PLAYLIST_URL" ]; then
                 "${playlist_tail_args[@]}" \
                 "$PLAYLIST_URL"
             fallback_status=$?
-            if [ "$fallback_status" -ne 0 ]; then
-                playlist_status=$fallback_status
-            fi
+            playlist_status=$fallback_status
             if [ "$yt_dlp_last_player_error" = true ] || [ "$yt_dlp_last_auth_error" = true ]; then
                 if [ "$yt_dlp_last_auth_error" = true ]; then
                     log_warn "Fallback client '${playlist_cookie_fallback_label}' still hit YouTube auth challenges; retrying without cookies."
@@ -2793,9 +2810,7 @@ elif [ -n "$PLAYLIST_URL" ]; then
                     "${playlist_tail_args[@]}" \
                     "$PLAYLIST_URL"
                 fallback_status=$?
-                if [ "$fallback_status" -ne 0 ]; then
-                    playlist_status=$fallback_status
-                fi
+                playlist_status=$fallback_status
             fi
         elif [ "$playlist_primary_format_error" = true ]; then
             log_warn "Primary download had format errors; retrying without cookies using '${fallback_player_client}'."
@@ -2806,9 +2821,7 @@ elif [ -n "$PLAYLIST_URL" ]; then
                 "${playlist_tail_args[@]}" \
                 "$PLAYLIST_URL"
             fallback_status=$?
-            if [ "$fallback_status" -ne 0 ]; then
-                playlist_status=$fallback_status
-            fi
+            playlist_status=$fallback_status
         fi
     fi
 
@@ -2862,9 +2875,7 @@ elif [ -n "$PLAYLIST_URL" ]; then
             if [ "$fallback_status" -eq 0 ]; then
                 playlist_manifest_insecure_ssl=true
             fi
-            if [ "$fallback_status" -ne 0 ]; then
-                playlist_metadata_status=$fallback_status
-            fi
+            playlist_metadata_status=$fallback_status
         elif [ "$playlist_platform" = "youtube" ] && [ -n "$fallback_player_client" ] && { [ "$playlist_metadata_player_error" = true ] || [ "$playlist_metadata_auth_error" = true ]; }; then
             playlist_cookie_fallback_label="${youtube_cookie_fallback_client:-default}"
             if [ "$playlist_metadata_auth_error" = true ]; then
@@ -2884,9 +2895,7 @@ elif [ -n "$PLAYLIST_URL" ]; then
                 playlist_manifest_cookie_mode="$playlist_cookie_mode"
                 playlist_manifest_extractor_opts=("${playlist_cookie_fallback_extractor_opts[@]}")
             fi
-            if [ "$fallback_status" -ne 0 ]; then
-                playlist_metadata_status=$fallback_status
-            fi
+            playlist_metadata_status=$fallback_status
             if [ "$yt_dlp_last_player_error" = true ] || [ "$yt_dlp_last_auth_error" = true ]; then
                 if [ "$yt_dlp_last_auth_error" = true ]; then
                     log_warn "Fallback client '${playlist_cookie_fallback_label}' still hit YouTube auth challenges; retrying metadata export without cookies."
@@ -2904,9 +2913,7 @@ elif [ -n "$PLAYLIST_URL" ]; then
                     playlist_manifest_cookie_mode="none"
                     playlist_manifest_extractor_opts=("${playlist_nocookie_fallback_extractor_opts[@]}")
                 fi
-                if [ "$fallback_status" -ne 0 ]; then
-                    playlist_metadata_status=$fallback_status
-                fi
+                playlist_metadata_status=$fallback_status
             fi
         fi
 

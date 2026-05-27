@@ -160,8 +160,7 @@ function build_cli(command_name) {
     .option("to-hant", {
       type: "boolean",
       default: false,
-      describe:
-        "Convert to zh-Hant (Traditional).",
+      describe: "Convert to zh-Hant (Traditional).",
     })
     .option("dry-run", {
       type: "boolean",
@@ -237,16 +236,8 @@ function build_output_path(file_path, convert_to_hant) {
 }
 
 async function convert_file(file_path, options) {
-  const {
-    to_hant,
-    dry_run,
-    encoding,
-    stdout,
-    quiet,
-    replace,
-    refresh,
-    debug,
-  } = options;
+  const { to_hant, dry_run, encoding, stdout, quiet, replace, refresh, debug } =
+    options;
   const chalk_instance = ensure_chalk();
   const debug_enabled = Boolean(debug);
   const target_variant = to_hant ? "hant" : "hans";
@@ -258,10 +249,14 @@ async function convert_file(file_path, options) {
   };
   const relative_file_path = path.relative(process.cwd(), file_path);
   const input_variant = detect_generated_variant(file_path);
-  const output_path = replace ? file_path : build_output_path(file_path, to_hant);
+  const output_path = replace
+    ? file_path
+    : build_output_path(file_path, to_hant);
 
   if (!replace && !refresh && input_variant === target_variant) {
-    debug_log(`Skipping generated input without refresh: ${relative_file_path}`);
+    debug_log(
+      `Skipping generated input without refresh: ${relative_file_path}`,
+    );
     if (!quiet) {
       console.log(
         chalk_instance.yellow(
@@ -298,15 +293,11 @@ async function convert_file(file_path, options) {
     const converted_text = to_hant
       ? await convert_text_to_hant(original_text)
       : await convert_text_to_hans(original_text);
-    debug_log(
-      `Conversion complete (${target_label}): ${relative_file_path}`,
-    );
+    debug_log(`Conversion complete (${target_label}): ${relative_file_path}`);
 
     if (converted_text === original_text) {
       if (!quiet) {
-        console.log(
-          chalk_instance.yellow(`No changes: ${relative_file_path}`),
-        );
+        console.log(chalk_instance.yellow(`No changes: ${relative_file_path}`));
       }
       return { status: "unchanged" };
     }
@@ -352,9 +343,7 @@ async function convert_file(file_path, options) {
     };
   } catch (error) {
     console.error(
-      chalk_instance.red(
-        `Failed: ${relative_file_path} -> ${error.message}`,
-      ),
+      chalk_instance.red(`Failed: ${relative_file_path} -> ${error.message}`),
     );
     return { status: "failed", error };
   }

@@ -139,7 +139,9 @@ function parse_cli_arguments() {
   const patterns = (argv._ || []).map(String);
 
   if (patterns.length === 0) {
-    console.error(chalk.red("Error: At least one file path or glob pattern is required."));
+    console.error(
+      chalk.red("Error: At least one file path or glob pattern is required."),
+    );
     console.log(build_help_text(argv.$0 || "md_normalize"));
     process.exit(1);
   }
@@ -169,7 +171,9 @@ function expand_patterns(patterns, logger) {
 
     if (matches.length === 0) {
       const literal_path = path.resolve(pattern);
-      logger.debug(`Pattern matched no files; treating as literal path: ${literal_path}`);
+      logger.debug(
+        `Pattern matched no files; treating as literal path: ${literal_path}`,
+      );
       resolved_paths.add(literal_path);
       continue;
     }
@@ -279,7 +283,11 @@ async function localize_remote_images({
         path.relative(target_dir, local_image_path),
       );
 
-      next_markdown_text = replace_all(next_markdown_text, image_url, relative_path);
+      next_markdown_text = replace_all(
+        next_markdown_text,
+        image_url,
+        relative_path,
+      );
       localized_image_count += 1;
       logger.success(`Localized ${image_url} -> ${relative_path}`);
     } catch (error) {
@@ -293,12 +301,7 @@ async function localize_remote_images({
   };
 }
 
-async function normalize_file({
-  file_path,
-  refresh_mode,
-  dry_run,
-  logger,
-}) {
+async function normalize_file({ file_path, refresh_mode, dry_run, logger }) {
   const resolved_file_path = path.resolve(file_path);
   const file_name = path.basename(resolved_file_path);
 
@@ -355,7 +358,9 @@ async function normalize_file({
       logger.info(`Would write normalized file: ${target_md_file_path}`);
       logger.info(`Would remove original file: ${resolved_file_path}`);
     } else {
-      logger.info(`Would rewrite normalized file in place: ${target_md_file_path}`);
+      logger.info(
+        `Would rewrite normalized file in place: ${target_md_file_path}`,
+      );
     }
 
     return { status: "dry_run" };
@@ -422,6 +427,8 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error(chalk.red(`md_normalize failed: ${error.stack || error.message}`));
+  console.error(
+    chalk.red(`md_normalize failed: ${error.stack || error.message}`),
+  );
   process.exit(1);
 });

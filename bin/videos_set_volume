@@ -236,7 +236,9 @@ function build_runtime_options(argv) {
     .filter(Boolean);
 
   if (!raw_inputs.length) {
-    throw new Error("At least one input video file or glob pattern is required.");
+    throw new Error(
+      "At least one input video file or glob pattern is required.",
+    );
   }
 
   if (!argv.volume) {

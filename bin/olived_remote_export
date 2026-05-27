@@ -14,8 +14,7 @@ const package_json = require("../package.json");
 const DEFAULT_CONFIG_PATH = path.resolve(__dirname, "../secret/olived.json");
 const DEFAULT_REMOTE_HOST = "121.41.226.182";
 const DEFAULT_REMOTE_USER = "Administrator";
-const DEFAULT_REMOTE_PATH =
-  "C:\\Users\\Administrator\\Desktop\\live_olived";
+const DEFAULT_REMOTE_PATH = "C:\\Users\\Administrator\\Desktop\\live_olived";
 const DEFAULT_LOCAL_PATH =
   "/Users/hailang/Library/Mobile Documents/com~apple~CloudDocs/main/saved/video/live_olived";
 const DEFAULT_REMOTE_PORT = 22;
@@ -76,12 +75,18 @@ function show_help() {
   console.log(
     "  --exclude <glob>        Exclude matching paths (repeatable; default: none)",
   );
-  console.log("  --refresh              Overwrite existing files (default: false)");
+  console.log(
+    "  --refresh              Overwrite existing files (default: false)",
+  );
   console.log(
     "  --move                 Delete remote files after copy or when local matches (default: false)",
   );
-  console.log("  -d, --dry-run           Show planned actions only (default: false)");
-  console.log("  --quiet                 Only warnings and errors (default: false)");
+  console.log(
+    "  -d, --dry-run           Show planned actions only (default: false)",
+  );
+  console.log(
+    "  --quiet                 Only warnings and errors (default: false)",
+  );
   console.log("  --debug                 Print debug logs (default: false)");
   console.log("  --ssh-key <path>         SSH identity file");
   console.log(
@@ -395,7 +400,7 @@ function build_remote_list_script(remote_root) {
     `$root = '${sanitized_root}'`,
     "$root = $root.TrimEnd('\\')",
     "if (-not (Test-Path -LiteralPath $root)) {",
-    "  Write-Error (\"Missing path: \" + $root)",
+    '  Write-Error ("Missing path: " + $root)',
     "  exit 2",
     "}",
     "$items = Get-ChildItem -LiteralPath $root -File -Recurse -Force",
@@ -405,7 +410,7 @@ function build_remote_list_script(remote_root) {
     "  $full_b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($item.FullName))",
     "  $size = $item.Length",
     "  $mtime = [int64]$item.LastWriteTimeUtc.ToFileTimeUtc()",
-    "  Write-Output ($relative_b64 + \"`t\" + $full_b64 + \"`t\" + $size + \"`t\" + $mtime)",
+    '  Write-Output ($relative_b64 + "`t" + $full_b64 + "`t" + $size + "`t" + $mtime)',
     "}",
   ].join("; ");
 }
@@ -493,11 +498,12 @@ function matches_patterns(relative_path, include_patterns, exclude_patterns) {
     matchBase: true,
   };
 
-  const include_match = include_patterns.length === 0
-    ? true
-    : include_patterns.some((pattern) =>
-        minimatch(normalized_path, pattern, match_options),
-      );
+  const include_match =
+    include_patterns.length === 0
+      ? true
+      : include_patterns.some((pattern) =>
+          minimatch(normalized_path, pattern, match_options),
+        );
   if (!include_match) return false;
 
   if (exclude_patterns.length === 0) return true;
@@ -506,14 +512,19 @@ function matches_patterns(relative_path, include_patterns, exclude_patterns) {
   );
 }
 
-function filter_remote_entries(entries, include_patterns, exclude_patterns, logger) {
+function filter_remote_entries(
+  entries,
+  include_patterns,
+  exclude_patterns,
+  logger,
+) {
   log_step(logger, "Filter remote entries");
   const filtered = [];
   for (const entry of entries) {
-    if (!matches_patterns(entry.relative_path, include_patterns, exclude_patterns)) {
-      logger.debug(
-        `Skip by pattern ${entry.relative_path}`,
-      );
+    if (
+      !matches_patterns(entry.relative_path, include_patterns, exclude_patterns)
+    ) {
+      logger.debug(`Skip by pattern ${entry.relative_path}`);
       continue;
     }
     filtered.push(entry);
@@ -659,7 +670,8 @@ async function delete_remote_files(entries, options, logger) {
     },
   );
   if (result.exit_code !== 0) {
-    const error_message = result.stderr || result.stdout || "Unknown delete error";
+    const error_message =
+      result.stderr || result.stdout || "Unknown delete error";
     throw new Error(`Failed to delete remote files: ${error_message.trim()}`);
   }
 }
@@ -795,7 +807,8 @@ async function run() {
       argv.port !== undefined ? argv.port : config.remote_port,
       DEFAULT_REMOTE_PORT,
     ),
-    remote_path: argv["remote-path"] || config.remote_path || DEFAULT_REMOTE_PATH,
+    remote_path:
+      argv["remote-path"] || config.remote_path || DEFAULT_REMOTE_PATH,
     local_path: argv["local-path"] || config.local_path || DEFAULT_LOCAL_PATH,
     refresh: Boolean(argv.refresh),
     move: Boolean(argv.move),

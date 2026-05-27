@@ -117,7 +117,7 @@ function build_help_text(script_name) {
     "  $0 --scroll https://example.com https://news.example.com",
     "",
     "  # Load URLs from files using glob patterns",
-    "  $0 --url-file \"urls/*.txt\"",
+    '  $0 --url-file "urls/*.txt"',
     "",
     "  # Force re-save into a custom folder",
     "  $0 --refresh -o ./archive https://example.com",
@@ -499,7 +499,9 @@ function should_skip_url(url_value) {
 }
 
 function is_blob_url(url_value) {
-  return String(url_value || "").toLowerCase().startsWith("blob:");
+  return String(url_value || "")
+    .toLowerCase()
+    .startsWith("blob:");
 }
 
 function build_asset_relative_path(resource_url, content_type) {
@@ -558,7 +560,9 @@ function create_response_cache(logger) {
         url: response_url,
       });
     } catch (error) {
-      logger.debug(`response body failed for ${response_url}: ${error.message}`);
+      logger.debug(
+        `response body failed for ${response_url}: ${error.message}`,
+      );
     }
   }
 
@@ -711,67 +715,68 @@ async function rewrite_css_urls({
     /@import\s+(?:url\(\s*)?(?:'|")?([^'")\s]+)(?:'|")?\s*\)?/gi;
   const url_regex = /url\(\s*(['"]?)([^'")]+)\1\s*\)/gi;
 
-  let updated_text = await replace_async(css_text, import_regex, async (
-    full_match,
-    import_url,
-  ) => {
-    if (!import_url || should_skip_url(import_url)) return full_match;
-    const resolved_url = resolve_url(import_url, base_url);
-    if (!resolved_url) return full_match;
-    if (is_blob_url(resolved_url)) {
-      logger.warn(`skip blob url ${resolved_url}`);
-      return full_match;
-    }
-    const localized_path = await localize_css_resource({
-      css_url: resolved_url,
-      base_url,
-      response_cache,
-      request_context,
-      output_dir,
-      resource_cache,
-      resource_registry,
-      timeout_ms,
-      logger,
-    });
-    if (!localized_path) return full_match;
-    const relative_path = to_relative_posix_path(
-      css_relative_path,
-      localized_path,
-    );
-    return full_match.replace(import_url, relative_path);
-  });
+  let updated_text = await replace_async(
+    css_text,
+    import_regex,
+    async (full_match, import_url) => {
+      if (!import_url || should_skip_url(import_url)) return full_match;
+      const resolved_url = resolve_url(import_url, base_url);
+      if (!resolved_url) return full_match;
+      if (is_blob_url(resolved_url)) {
+        logger.warn(`skip blob url ${resolved_url}`);
+        return full_match;
+      }
+      const localized_path = await localize_css_resource({
+        css_url: resolved_url,
+        base_url,
+        response_cache,
+        request_context,
+        output_dir,
+        resource_cache,
+        resource_registry,
+        timeout_ms,
+        logger,
+      });
+      if (!localized_path) return full_match;
+      const relative_path = to_relative_posix_path(
+        css_relative_path,
+        localized_path,
+      );
+      return full_match.replace(import_url, relative_path);
+    },
+  );
 
-  updated_text = await replace_async(updated_text, url_regex, async (
-    full_match,
-    quote,
-    url_value,
-  ) => {
-    const trimmed = String(url_value || "").trim();
-    if (!trimmed || trimmed.startsWith("#")) return full_match;
-    if (should_skip_url(trimmed)) return full_match;
-    const resolved_url = resolve_url(trimmed, base_url);
-    if (!resolved_url) return full_match;
-    if (is_blob_url(resolved_url)) {
-      logger.warn(`skip blob url ${resolved_url}`);
-      return full_match;
-    }
-    const local_relative_path = await ensure_resource({
-      resource_url: resolved_url,
-      response_cache,
-      request_context,
-      output_dir,
-      resource_cache,
-      resource_registry,
-      timeout_ms,
-      logger,
-    });
-    if (!local_relative_path) return full_match;
-    const relative_path = to_relative_posix_path(
-      css_relative_path,
-      local_relative_path,
-    );
-    return `url(${quote}${relative_path}${quote})`;
-  });
+  updated_text = await replace_async(
+    updated_text,
+    url_regex,
+    async (full_match, quote, url_value) => {
+      const trimmed = String(url_value || "").trim();
+      if (!trimmed || trimmed.startsWith("#")) return full_match;
+      if (should_skip_url(trimmed)) return full_match;
+      const resolved_url = resolve_url(trimmed, base_url);
+      if (!resolved_url) return full_match;
+      if (is_blob_url(resolved_url)) {
+        logger.warn(`skip blob url ${resolved_url}`);
+        return full_match;
+      }
+      const local_relative_path = await ensure_resource({
+        resource_url: resolved_url,
+        response_cache,
+        request_context,
+        output_dir,
+        resource_cache,
+        resource_registry,
+        timeout_ms,
+        logger,
+      });
+      if (!local_relative_path) return full_match;
+      const relative_path = to_relative_posix_path(
+        css_relative_path,
+        local_relative_path,
+      );
+      return `url(${quote}${relative_path}${quote})`;
+    },
+  );
 
   return updated_text;
 }
@@ -807,7 +812,10 @@ async function localize_css_resource({
   const final_url = download.final_url || css_url;
   const normalized_final_url = normalize_resource_url(final_url);
   const content_type = download.content_type || "text/css";
-  const local_relative_path = build_asset_relative_path(final_url, content_type);
+  const local_relative_path = build_asset_relative_path(
+    final_url,
+    content_type,
+  );
   const css_base_url = resolve_url(final_url, base_url) || final_url;
 
   const css_text = download.body.toString("utf8");
@@ -1232,7 +1240,11 @@ async function save_page({
     };
 
     logger.io(`write ${manifest_path}`);
-    await fs.writeFile(manifest_path, JSON.stringify(manifest, null, 2), "utf8");
+    await fs.writeFile(
+      manifest_path,
+      JSON.stringify(manifest, null, 2),
+      "utf8",
+    );
 
     logger.success(
       `saved ${palette.path(output_dir_name)} (assets: ${manifest.asset_count})`,
@@ -1269,10 +1281,7 @@ async function run() {
   });
 
   const output_root = path.resolve(expand_user_path(argv["output-dir"]));
-  const timeout_ms = Math.max(
-    1000,
-    Number(argv.timeout) || default_timeout_ms,
-  );
+  const timeout_ms = Math.max(1000, Number(argv.timeout) || default_timeout_ms);
   const options = {
     timeout_ms,
     wait_after_load_ms: Math.max(

@@ -232,7 +232,10 @@ async function run_with_concurrency(items, concurrency_limit, runner) {
       const current_index = next_index;
       next_index += 1;
       try {
-        results[current_index] = await runner(items[current_index], current_index);
+        results[current_index] = await runner(
+          items[current_index],
+          current_index,
+        );
       } catch (error) {
         failures.push({
           index: current_index,
@@ -263,23 +266,24 @@ function build_runtime_options(argv) {
     .filter(Boolean);
 
   if (!raw_inputs.length) {
-    throw new Error("At least one input video file or glob pattern is required.");
+    throw new Error(
+      "At least one input video file or glob pattern is required.",
+    );
   }
 
-  const output_format = parse_output_format(argv.format || DEFAULT_OUTPUT_FORMAT);
+  const output_format = parse_output_format(
+    argv.format || DEFAULT_OUTPUT_FORMAT,
+  );
   const crop = argv.crop ? parse_crop_box(argv.crop) : undefined;
   const file_concurrency =
-    parse_number(argv.concurrency, "--concurrency") ??
-    DEFAULT_FILE_CONCURRENCY;
+    parse_number(argv.concurrency, "--concurrency") ?? DEFAULT_FILE_CONCURRENCY;
   const ocr_concurrency =
     parse_number(argv["ocr-concurrency"], "--ocr-concurrency") ??
     DEFAULT_OCR_CONCURRENCY;
-  const sample_fps =
-    parse_number(argv.fps, "--fps") ?? DEFAULT_SAMPLE_FPS;
+  const sample_fps = parse_number(argv.fps, "--fps") ?? DEFAULT_SAMPLE_FPS;
   const scale_multiplier =
     parse_number(argv.scale, "--scale") ?? DEFAULT_SCALE_MULTIPLIER;
-  const ocr_psm =
-    parse_number(argv["ocr-psm"], "--ocr-psm") ?? DEFAULT_OCR_PSM;
+  const ocr_psm = parse_number(argv["ocr-psm"], "--ocr-psm") ?? DEFAULT_OCR_PSM;
   const min_confidence =
     parse_number(argv["min-confidence"], "--min-confidence") ??
     DEFAULT_MIN_CONFIDENCE;
@@ -287,8 +291,7 @@ function build_runtime_options(argv) {
     parse_number(argv["min-duration"], "--min-duration") ??
     DEFAULT_MIN_DURATION_SECONDS;
   const merge_gap_seconds =
-    parse_number(argv["merge-gap"], "--merge-gap") ??
-    DEFAULT_MERGE_GAP_SECONDS;
+    parse_number(argv["merge-gap"], "--merge-gap") ?? DEFAULT_MERGE_GAP_SECONDS;
   const similarity_threshold =
     parse_number(argv.similarity, "--similarity") ?? DEFAULT_TEXT_SIMILARITY;
 

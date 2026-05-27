@@ -248,7 +248,9 @@ const ENV_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 /** @returns {string} */
 function sanitize_key_component(name) {
-  return String(name).replace(/[^A-Za-z0-9_]/g, "_").replace(/_+/g, "_");
+  return String(name)
+    .replace(/[^A-Za-z0-9_]/g, "_")
+    .replace(/_+/g, "_");
 }
 
 /** @returns {string} */
