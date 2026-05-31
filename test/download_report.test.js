@@ -7,6 +7,8 @@ import { describe, expect, it } from "vitest";
 const require = createRequire(import.meta.url);
 const {
   build_download_report,
+  create_default_report_dir,
+  create_default_report_root,
   compute_archive_line_delta,
   parse_tool_output_summary,
   render_download_report_markdown,
@@ -126,5 +128,49 @@ describe("download report helper", () => {
     } finally {
       await fs.rm(temp_root, { recursive: true, force: true });
     }
+  });
+
+  it("uses the largest existing numeric batch across report tool directories", async () => {
+    const temp_root = await create_temp_dir();
+    const report_root = path.join(temp_root, "report");
+
+    try {
+      await fs.mkdir(path.join(report_root, "gather", "1"), {
+        recursive: true,
+      });
+      await fs.mkdir(path.join(report_root, "xsave_yt_dlp", "2"), {
+        recursive: true,
+      });
+      await fs.mkdir(path.join(report_root, "xsave_yt_dlp", "draft"), {
+        recursive: true,
+      });
+
+      expect(create_default_report_dir("gather", { report_root })).toBe(
+        path.join(report_root, "gather", "3"),
+      );
+      expect(
+        create_default_report_dir("xsave_yt_dlp", {
+          report_root,
+          batch_number: 3,
+        }),
+      ).toBe(path.join(report_root, "xsave_yt_dlp", "3"));
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
+  });
+
+  it("builds the default report root under the iCloud saved tmp directory", () => {
+    expect(create_default_report_root("/tmp/example home")).toBe(
+      path.join(
+        "/tmp/example home",
+        "Library",
+        "Mobile Documents",
+        "com~apple~CloudDocs",
+        "main",
+        "saved",
+        "tmp",
+        "report",
+      ),
+    );
   });
 });

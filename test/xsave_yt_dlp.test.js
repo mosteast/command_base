@@ -381,6 +381,46 @@ describe("xsave_yt_dlp match filters", () => {
 });
 
 describe("xsave_yt_dlp report generation", () => {
+  it("writes default reports under the shared numeric report batch root", async () => {
+    const temp_root = await create_temp_dir();
+    const report_root = path.join(
+      temp_root,
+      "Library",
+      "Mobile Documents",
+      "com~apple~CloudDocs",
+      "main",
+      "saved",
+      "tmp",
+      "report",
+    );
+
+    try {
+      await fs.mkdir(path.join(report_root, "gather", "1"), {
+        recursive: true,
+      });
+
+      const result = await run_cli(
+        ["--dry-run", "--channel", "https://www.youtube.com/@user1"],
+        { env: { HOME: temp_root } },
+      );
+
+      const report_dir = path.join(report_root, "xsave_yt_dlp", "2");
+      const report = JSON.parse(
+        await fs.readFile(path.join(report_dir, "report.json"), "utf8"),
+      );
+      const stdout_text = strip_ansi(result.stdout);
+
+      expect(result.exit_code).toBe(0);
+      expect(report.tool_name).toBe("xsave_yt_dlp");
+      expect(report.artifact.report_markdown_path).toBe(
+        path.join(report_dir, "report.md"),
+      );
+      expect(stdout_text.match(/Report written:/g) || []).toHaveLength(1);
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
+  });
+
   it("writes JSON and Markdown reports for dry-runs", async () => {
     const temp_root = await create_temp_dir();
     const report_dir = path.join(temp_root, "report");

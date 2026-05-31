@@ -29,6 +29,7 @@ quiet_mode=false
 dry_run=false
 report_dir=""
 report_dir_provided=false
+report_silent=false
 report_enabled=false
 report_started_at=""
 report_input_json_file=""
@@ -110,9 +111,7 @@ format_command() {
 
 default_report_dir_for_tool() {
     local tool_name="$1"
-    local timestamp
-    timestamp=$(date -u +"%Y%m%dT%H%M%SZ")
-    printf "%s/.command_base/report/%s/%s_%s" "$HOME" "$tool_name" "$timestamp" "$$"
+    node "$download_report_script" --print-default-report-dir --tool-name "$tool_name"
 }
 
 count_non_empty_lines() {
@@ -168,7 +167,10 @@ NODE
 
 setup_download_report() {
     if [ "$report_dir_provided" != true ] || [ -z "$report_dir" ]; then
-        report_dir=$(default_report_dir_for_tool "xsave_gallery_dl")
+        if ! report_dir=$(default_report_dir_for_tool "xsave_gallery_dl"); then
+            log_error "Unable to resolve default report directory."
+            exit 1
+        fi
     else
         report_dir=$(expand_tilde_path "$report_dir")
     fi
@@ -229,7 +231,7 @@ finalize_download_report() {
         return 0
     fi
 
-    if [ "$quiet_mode" != true ]; then
+    if [ "$quiet_mode" != true ] && [ "$report_silent" != true ]; then
         log_info "Report written: ${report_dir}/report.md"
     fi
 }
@@ -473,7 +475,8 @@ ${color_blue}Options:${color_reset}
       --cookies <file>        Cookies file to load (default: ${default_cookies_file})
   -C <file>                   Alias for --cookies
       --no-cookies            Disable cookies (default: false)
-      --report-dir <dir>      Write report.json and report.md in this directory
+  --report-dir <dir>      Write report.json and report.md in this directory
+  --report-silent         Do not print the final report path (default: false)
       --refresh               Clear archive cache for this run (default: false)
       --archive-dir <dir>     Archive directory (default: ${archive_dir})
       --archive-file <file>   Use a specific archive file
@@ -576,6 +579,10 @@ while [[ $# -gt 0 ]]; do
                 log_error "Report directory is required after --report-dir."
                 exit 1
             fi
+            ;;
+        --report-silent)
+            report_silent=true
+            shift
             ;;
         --output-dir=*)
             output_dir="${1#*=}"

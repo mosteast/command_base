@@ -14,6 +14,9 @@ const {
   REPORT_JSON_NAME,
   build_download_report,
   create_default_report_dir,
+  create_default_report_root,
+  create_report_dir_for_batch,
+  get_next_report_batch_number,
   sanitize_report_path_component,
   write_download_report,
 } = require("../lib/download_report");
@@ -1633,18 +1636,25 @@ function build_platform_command(platform_key, url, refresh_mode, options) {
   };
 }
 
-function insert_report_dir_arg(args, report_dir) {
+function insert_args_before_passthrough(args, args_to_insert) {
   const safe_args = Array.isArray(args) ? [...args] : [];
   const passthrough_index = safe_args.indexOf("--");
-  const report_args = ["--report-dir", report_dir];
   if (passthrough_index === -1) {
-    return [...safe_args, ...report_args];
+    return [...safe_args, ...args_to_insert];
   }
   return [
     ...safe_args.slice(0, passthrough_index),
-    ...report_args,
+    ...args_to_insert,
     ...safe_args.slice(passthrough_index),
   ];
+}
+
+function insert_report_dir_arg(args, report_dir) {
+  return insert_args_before_passthrough(args, ["--report-dir", report_dir]);
+}
+
+function insert_report_silent_arg(args) {
+  return insert_args_before_passthrough(args, ["--report-silent"]);
 }
 
 function attach_child_report_dir(command_config, child_report_dir) {
@@ -1655,26 +1665,39 @@ function attach_child_report_dir(command_config, child_report_dir) {
   ) {
     return command_config;
   }
+  const child_args = insert_report_silent_arg(
+    insert_report_dir_arg(command_config.args, child_report_dir),
+  );
   return {
     ...command_config,
-    args: insert_report_dir_arg(command_config.args, child_report_dir),
+    args: child_args,
     display_args: Array.isArray(command_config.args)
       ? [...command_config.args]
       : command_config.args,
   };
 }
 
-function build_child_report_dir(report_dir, index, job) {
+function build_child_report_dir({
+  report_dir,
+  report_root,
+  report_batch_number,
+  use_shared_report_root,
+  command_name,
+  index,
+  job,
+}) {
   const index_text = String(index + 1).padStart(3, "0");
   const platform_text = sanitize_report_path_component(job.platform_key);
   const name_text = sanitize_report_path_component(
     job.name || job.handle || job.url || "source",
   ).slice(0, 80);
-  return path.join(
-    report_dir,
-    "child",
-    `${index_text}_${platform_text}_${name_text}`,
-  );
+  const child_root =
+    use_shared_report_root && command_name && report_batch_number
+      ? create_report_dir_for_batch(command_name, report_batch_number, {
+          report_root,
+        })
+      : path.join(report_dir, "child");
+  return path.join(child_root, `${index_text}_${platform_text}_${name_text}`);
 }
 
 async function read_child_report(child_report_dir, logger) {
@@ -2625,9 +2648,20 @@ async function run_custom_command_jobs(
 async function run_export_command() {
   const options = parse_cli_arguments();
   const report_started_at = new Date().toISOString();
+  const default_report_root = create_default_report_root();
+  const default_report_batch_number = options.report_dir
+    ? 0
+    : get_next_report_batch_number({ report_root: default_report_root });
   const report_dir = path.resolve(
-    expand_user_path(options.report_dir || create_default_report_dir("gather")),
+    expand_user_path(
+      options.report_dir ||
+        create_default_report_dir("gather", {
+          report_root: default_report_root,
+          batch_number: default_report_batch_number,
+        }),
+    ),
   );
+  const use_shared_report_root = !options.report_dir;
   const report_jobs = [];
   const logger = create_logger({
     command_name: options.command_name,
@@ -2836,7 +2870,15 @@ async function run_export_command() {
         const child_report_dir = REPORT_CHILD_COMMANDS.has(
           command_config.command,
         )
-          ? build_child_report_dir(report_dir, job_index, job)
+          ? build_child_report_dir({
+              report_dir,
+              report_root: default_report_root,
+              report_batch_number: default_report_batch_number,
+              use_shared_report_root,
+              command_name: command_config.command,
+              index: job_index,
+              job,
+            })
           : "";
         command_config = attach_child_report_dir(
           command_config,

@@ -39,6 +39,10 @@ async function create_temp_dir() {
   return fs.mkdtemp(path.join(os.tmpdir(), "gather-test-"));
 }
 
+function strip_ansi(text) {
+  return String(text || "").replace(/\u001b\[[0-9;]*m/g, "");
+}
+
 async function write_config_file(temp_root) {
   const config_path = path.join(temp_root, "gather.config.yaml");
   const config_text = [
@@ -227,11 +231,16 @@ async function write_stub_xsave_yt_dlp_command(temp_root) {
     "set -euo pipefail",
     "",
     'report_dir=""',
+    "report_silent=false",
     'while [ "$#" -gt 0 ]; do',
     '  case "$1" in',
     "    --report-dir)",
     '      report_dir="$2"',
     "      shift 2",
+    "      ;;",
+    "    --report-silent)",
+    "      report_silent=true",
+    "      shift",
     "      ;;",
     "    --)",
     "      shift",
@@ -267,6 +276,9 @@ async function write_stub_xsave_yt_dlp_command(temp_root) {
     "}",
     "JSON",
     'printf "%s\\n" "# fake child report" > "$report_dir/report.md"',
+    'if [ "$report_silent" != true ]; then',
+    '  printf "%s\\n" "Report written: $report_dir/report.md"',
+    "fi",
     "exit 0",
     "",
   ].join("\n");
@@ -404,6 +416,50 @@ describe("gather CLI platform selection", () => {
         },
       });
       expect(report.job[0].child_report_path).toContain("report.json");
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
+  });
+
+  it("uses one shared default batch for gather and child xsave reports", async () => {
+    const temp_root = await create_temp_dir();
+    const state_file = path.join(temp_root, "gather.state.json");
+    const report_root = path.join(
+      temp_root,
+      "Library",
+      "Mobile Documents",
+      "com~apple~CloudDocs",
+      "main",
+      "saved",
+      "tmp",
+      "report",
+    );
+
+    try {
+      await fs.mkdir(path.join(report_root, "xsave_yt_dlp", "1"), {
+        recursive: true,
+      });
+      const config_path = await write_config_file(temp_root);
+      const { bin_dir } = await write_stub_xsave_yt_dlp_command(temp_root);
+      const result = await run_cli(
+        ["--state-file", state_file, "--platform", "youtube", config_path],
+        {
+          HOME: temp_root,
+          PATH: `${bin_dir}:${process.env.PATH || ""}`,
+        },
+      );
+
+      const gather_report_dir = path.join(report_root, "gather", "2");
+      const child_report_root = path.join(report_root, "xsave_yt_dlp", "2");
+      const report = JSON.parse(
+        await fs.readFile(path.join(gather_report_dir, "report.json"), "utf8"),
+      );
+      const stdout_text = strip_ansi(result.stdout);
+
+      expect(result.exit_code).toBe(0);
+      expect(report.output.report_dir).toBe(gather_report_dir);
+      expect(report.job[0].child_report_path).toContain(child_report_root);
+      expect(stdout_text.match(/Report written:/g) || []).toHaveLength(1);
     } finally {
       await fs.rm(temp_root, { recursive: true, force: true });
     }
