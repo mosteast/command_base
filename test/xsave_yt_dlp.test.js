@@ -380,6 +380,55 @@ describe("xsave_yt_dlp match filters", () => {
   });
 });
 
+describe("xsave_yt_dlp report generation", () => {
+  it("writes JSON and Markdown reports for dry-runs", async () => {
+    const temp_root = await create_temp_dir();
+    const report_dir = path.join(temp_root, "report");
+
+    try {
+      const result = await run_cli([
+        "--dry-run",
+        "--report-dir",
+        report_dir,
+        "--channel",
+        "https://www.youtube.com/@user1",
+      ]);
+
+      const report = JSON.parse(
+        await fs.readFile(path.join(report_dir, "report.json"), "utf8"),
+      );
+      const markdown = await fs.readFile(
+        path.join(report_dir, "report.md"),
+        "utf8",
+      );
+
+      expect(result.exit_code).toBe(0);
+      expect(report).toMatchObject({
+        schema_version: 1,
+        tool_name: "xsave_yt_dlp",
+        status: "dry_run",
+        input: {
+          mode: "channel",
+          target: ["https://www.youtube.com/@user1"],
+        },
+        summary: {
+          total: 1,
+          dry_run: 1,
+          failed: 0,
+        },
+      });
+      expect(report.command.length).toBeGreaterThan(0);
+      expect(report.artifact.report_json_path).toBe(
+        path.join(report_dir, "report.json"),
+      );
+      expect(markdown).toContain("# xsave_yt_dlp Download Report");
+      expect(markdown).toContain("| dry_run | 1 |");
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("xsave_yt_dlp impersonation defaults", () => {
   it("adds chrome impersonation by default for Rumble channels", async () => {
     const result = await run_cli([

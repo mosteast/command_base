@@ -218,6 +218,65 @@ async function write_stub_f2_compat_command(temp_root) {
   return { bin_dir, script_path };
 }
 
+async function write_stub_xsave_yt_dlp_command(temp_root) {
+  const bin_dir = path.join(temp_root, "fake_xsave_bin");
+  const script_path = path.join(bin_dir, "xsave_yt_dlp");
+  const script_text = [
+    "#!/usr/bin/env bash",
+    "",
+    "set -euo pipefail",
+    "",
+    'report_dir=""',
+    'while [ "$#" -gt 0 ]; do',
+    '  case "$1" in',
+    "    --report-dir)",
+    '      report_dir="$2"',
+    "      shift 2",
+    "      ;;",
+    "    --)",
+    "      shift",
+    "      break",
+    "      ;;",
+    "    *)",
+    "      shift",
+    "      ;;",
+    "  esac",
+    "done",
+    "",
+    'if [ -z "$report_dir" ]; then',
+    "  exit 91",
+    "fi",
+    "",
+    'mkdir -p "$report_dir"',
+    'cat > "$report_dir/report.json" <<JSON',
+    "{",
+    '  "schema_version": 1,',
+    '  "tool_name": "xsave_yt_dlp",',
+    '  "tool_version": "fake",',
+    '  "status": "completed",',
+    '  "started_at": "2026-05-31T00:00:00.000Z",',
+    '  "ended_at": "2026-05-31T00:00:01.000Z",',
+    '  "duration_ms": 1000,',
+    '  "summary": {',
+    '    "total": 1,',
+    '    "executed": 1,',
+    '    "failed": 0,',
+    '    "downloaded_count": 2,',
+    '    "archive_entry_delta": 2',
+    "  }",
+    "}",
+    "JSON",
+    'printf "%s\\n" "# fake child report" > "$report_dir/report.md"',
+    "exit 0",
+    "",
+  ].join("\n");
+
+  await fs.mkdir(bin_dir, { recursive: true });
+  await fs.writeFile(script_path, script_text, "utf8");
+  await fs.chmod(script_path, 0o755);
+  return { bin_dir, script_path };
+}
+
 function extract_total_jobs(stdout_text) {
   const lines = String(stdout_text || "")
     .split(/\r?\n/)
@@ -249,6 +308,107 @@ function extract_total_commands(stdout_text) {
 }
 
 describe("gather CLI platform selection", () => {
+  it("writes a combined JSON and Markdown report for source dry-runs", async () => {
+    const temp_root = await create_temp_dir();
+    const state_file = path.join(temp_root, "gather.state.json");
+    const report_dir = path.join(temp_root, "report");
+
+    try {
+      const config_path = await write_config_file(temp_root);
+      const result = await run_cli([
+        "--dry-run",
+        "--report-dir",
+        report_dir,
+        "--state-file",
+        state_file,
+        config_path,
+      ]);
+
+      const report = JSON.parse(
+        await fs.readFile(path.join(report_dir, "report.json"), "utf8"),
+      );
+      const markdown = await fs.readFile(
+        path.join(report_dir, "report.md"),
+        "utf8",
+      );
+
+      expect(result.exit_code).toBe(0);
+      expect(report).toMatchObject({
+        schema_version: 1,
+        tool_name: "gather",
+        status: "dry_run",
+        summary: {
+          total: 3,
+          dry_run: 3,
+          failed: 0,
+        },
+      });
+      expect(report.job).toHaveLength(3);
+      expect(report.job[0]).toMatchObject({
+        platform: "youtube",
+        status: "dry_run",
+      });
+      expect(markdown).toContain("# gather Download Report");
+      expect(markdown).toContain("| dry_run | 3 |");
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
+  });
+
+  it("aggregates child xsave reports into the gather report", async () => {
+    const temp_root = await create_temp_dir();
+    const state_file = path.join(temp_root, "gather.state.json");
+    const report_dir = path.join(temp_root, "report");
+
+    try {
+      const config_path = await write_config_file(temp_root);
+      const { bin_dir } = await write_stub_xsave_yt_dlp_command(temp_root);
+      const result = await run_cli(
+        [
+          "--report-dir",
+          report_dir,
+          "--state-file",
+          state_file,
+          "--platform",
+          "youtube",
+          config_path,
+        ],
+        {
+          PATH: `${bin_dir}:${process.env.PATH || ""}`,
+        },
+      );
+
+      const report = JSON.parse(
+        await fs.readFile(path.join(report_dir, "report.json"), "utf8"),
+      );
+
+      expect(result.exit_code).toBe(0);
+      expect(report).toMatchObject({
+        tool_name: "gather",
+        status: "completed",
+        summary: {
+          total: 1,
+          executed: 1,
+          failed: 0,
+          downloaded_count: 2,
+          archive_entry_delta: 2,
+        },
+      });
+      expect(report.job).toHaveLength(1);
+      expect(report.job[0]).toMatchObject({
+        platform: "youtube",
+        status: "completed",
+        child_report: {
+          tool_name: "xsave_yt_dlp",
+          status: "completed",
+        },
+      });
+      expect(report.job[0].child_report_path).toContain("report.json");
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
+  });
+
   it("gathers all config entries when no platform filter is set", async () => {
     const temp_root = await create_temp_dir();
     const state_file = path.join(temp_root, "gather.state.json");

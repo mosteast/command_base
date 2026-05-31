@@ -20,6 +20,14 @@ fallback_player_client="android"
 debug_mode=false
 quiet_mode=false
 dry_run=false
+report_dir=""
+report_dir_provided=false
+report_enabled=false
+report_started_at=""
+report_input_json_file=""
+report_command_file=""
+report_archive_snapshot_file=""
+report_tool_log_file=""
 allow_insecure_ssl=false
 max_comments=""
 use_youtube_cookies=true
@@ -35,6 +43,7 @@ default_playlist_subtitle_langs="en,en-US,en-GB,zh-Hans,zh-Hant,zh-CN,zh"
 danmaku_subtitle_lang="danmaku"
 script_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd)
 danmaku_ass_converter_script="${script_dir}/../utility/danmaku_xml_to_ass.py"
+download_report_script="${script_dir}/../lib/download_report/write_report_cli.js"
 
 cleanup_ready=false
 cleanup_target_dirs=()
@@ -110,6 +119,160 @@ format_command() {
         formatted+=$(printf '%q ' "$arg")
     done
     printf "%s" "${formatted% }"
+}
+
+default_report_dir_for_tool() {
+    local tool_name="$1"
+    local timestamp
+    timestamp=$(date -u +"%Y%m%dT%H%M%SZ")
+    printf "%s/.command_base/report/%s/%s_%s" "$HOME" "$tool_name" "$timestamp" "$$"
+}
+
+count_non_empty_lines() {
+    local file_path="$1"
+    if [ ! -f "$file_path" ]; then
+        printf "%s" "0"
+        return 0
+    fi
+    awk 'NF { count += 1 } END { print count + 0 }' "$file_path"
+}
+
+report_snapshot_has_archive() {
+    local archive_path="$1"
+    if [ ! -f "$report_archive_snapshot_file" ]; then
+        return 1
+    fi
+    awk -F '\t' -v archive_path="$archive_path" '$1 == archive_path { found = 1 } END { exit(found ? 0 : 1) }' "$report_archive_snapshot_file"
+}
+
+report_add_archive_file() {
+    local archive_path="$1"
+    if [ "$report_enabled" != true ] || [ -z "$archive_path" ]; then
+        return 0
+    fi
+    if report_snapshot_has_archive "$archive_path"; then
+        return 0
+    fi
+    printf "%s\t%s\n" "$archive_path" "$(count_non_empty_lines "$archive_path")" >> "$report_archive_snapshot_file"
+}
+
+report_record_command() {
+    if [ "$report_enabled" != true ]; then
+        return 0
+    fi
+    printf "%s\n" "$(format_command "$@")" >> "$report_command_file"
+}
+
+write_yt_dlp_report_input() {
+    if [ "$report_enabled" != true ]; then
+        return 0
+    fi
+    local mode="$1"
+    shift
+    node - "$report_input_json_file" "$mode" "$@" <<'NODE'
+const fs = require("fs");
+const outputPath = process.argv[2];
+const mode = process.argv[3];
+const targets = process.argv.slice(4);
+fs.writeFileSync(
+  outputPath,
+  JSON.stringify({ mode, target: targets }, null, 2),
+  "utf8",
+);
+NODE
+}
+
+setup_download_report() {
+    if [ "$report_dir_provided" != true ] || [ -z "$report_dir" ]; then
+        report_dir=$(default_report_dir_for_tool "xsave_yt_dlp")
+    else
+        report_dir=$(expand_tilde_path "$report_dir")
+    fi
+
+    report_started_at=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
+    report_enabled=true
+    mkdir -p "$report_dir"
+    report_input_json_file="${report_dir}/input.json"
+    report_command_file="${report_dir}/command.txt"
+    report_archive_snapshot_file="${report_dir}/archive_before.tsv"
+    report_tool_log_file="${report_dir}/tool_output.log"
+    : > "$report_command_file"
+    : > "$report_archive_snapshot_file"
+    : > "$report_tool_log_file"
+}
+
+prepare_download_report_input() {
+    if [ "$report_enabled" != true ]; then
+        return 0
+    fi
+    if [ -n "$CHANNEL_URL" ]; then
+        write_yt_dlp_report_input "channel" "$CHANNEL_URL"
+        return 0
+    fi
+    if [ -n "$PLAYLIST_URL" ]; then
+        write_yt_dlp_report_input "playlist" "$PLAYLIST_URL"
+        return 0
+    fi
+    write_yt_dlp_report_input "video" "${VIDEO_URLS[@]}"
+}
+
+planned_download_count() {
+    if [ -n "$CHANNEL_URL" ] || [ -n "$PLAYLIST_URL" ]; then
+        printf "%s" "1"
+        return 0
+    fi
+    local count="${#VIDEO_URLS[@]}"
+    if [ "$count" -eq 0 ]; then
+        count=1
+    fi
+    printf "%s" "$count"
+}
+
+finalize_download_report() {
+    local exit_code="$1"
+    if [ "$report_enabled" != true ]; then
+        return 0
+    fi
+    local ended_at
+    ended_at=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
+    local planned_count
+    planned_count=$(planned_download_count)
+    local executed_count=0
+    if [ "$dry_run" != true ]; then
+        executed_count="$planned_count"
+    fi
+    local failed_count=0
+    if [ "$exit_code" -ne 0 ]; then
+        failed_count=1
+    fi
+    local dry_run_args=()
+    if [ "$dry_run" = true ]; then
+        dry_run_args=(--dry-run)
+    fi
+
+    if ! node "$download_report_script" \
+        --report-dir "$report_dir" \
+        --tool-name "xsave_yt_dlp" \
+        --tool-version "$script_version" \
+        --started-at "$report_started_at" \
+        --ended-at "$ended_at" \
+        --exit-code "$exit_code" \
+        --input-json-file "$report_input_json_file" \
+        --command-file "$report_command_file" \
+        --archive-snapshot-file "$report_archive_snapshot_file" \
+        --log-file "$report_tool_log_file" \
+        --output-dir "$OUTPUT_DIR" \
+        --planned "$planned_count" \
+        --executed "$executed_count" \
+        --failed "$failed_count" \
+        "${dry_run_args[@]}"; then
+        log_warn "Failed to write download report in '${report_dir}'."
+        return 0
+    fi
+
+    if [ "$quiet_mode" != true ]; then
+        log_info "Report written: ${report_dir}/report.md"
+    fi
 }
 
 expand_tilde_path() {
@@ -228,7 +391,14 @@ maybe_cleanup_zero_byte_files() {
     done
 }
 
-trap maybe_cleanup_zero_byte_files EXIT
+on_exit() {
+    local exit_code=$?
+    maybe_cleanup_zero_byte_files
+    finalize_download_report "$exit_code"
+    exit "$exit_code"
+}
+
+trap on_exit EXIT
 
 filter_cookie_incompatible_clients() {
     local raw_clients="$1"
@@ -324,6 +494,7 @@ ${color_blue}Options:${color_reset}
       --cookies <file>    Load cookies from a Netscape cookie file (default: disabled)
       --no-cookies        Disable browser/cookie-file auth for supported sites (default: false)
       --insecure          Allow insecure SSL requests when needed (default: false)
+      --report-dir <dir>  Write report.json and report.md in this directory
       --max-comment <n>  Limit YouTube comment extraction during metadata export (default: unlimited)
       --                 Pass additional options to yt-dlp
 
@@ -460,7 +631,7 @@ build_channel_library_video_output_template() {
     case "$platform" in
         bilibili)
             # Space playlists often reuse the numeric mid as playlist title/channel_id; coalescing onto those yields ID folders.
-            printf "%s" "$base_dir/%(uploader,channel,creator,playlist_uploader)s - Videos/%(title)s [%(id)s].%(ext)s"
+            printf "%s" "$base_dir/%(channel,creator,uploader,playlist_uploader)s - Videos/%(title)s [%(id)s].%(ext)s"
             ;;
         *)
             printf "%s" "$base_dir/%(channel,creator,uploader,playlist_uploader,channel_id)s - Videos/%(title)s [%(id)s].%(ext)s"
@@ -492,7 +663,7 @@ build_channel_output_template() {
             printf "%s" "$base_dir/%(playlist)s/%(n_entries+1-playlist_index)d.%(title)s.%(ext)s"
             ;;
         bilibili)
-            printf "%s" "$base_dir/%(uploader,channel,creator,playlist_uploader)s/%(title)s.%(ext)s"
+            printf "%s" "$base_dir/%(channel,creator,uploader,playlist_uploader)s/%(title)s.%(ext)s"
             ;;
         *)
             printf "%s" "$base_dir/%(channel,creator,uploader,playlist,channel_id)s/%(title)s.%(ext)s"
@@ -768,6 +939,7 @@ retry_command() {
     local attempt=1
 
     if [ "$dry_run" = true ]; then
+        report_record_command "$@"
         log_info "Dry-run: ${description}"
         log_info "Dry-run command: $(format_command "$@")"
         return 0
@@ -923,6 +1095,7 @@ run_yt_dlp_with_log_internal() {
     local fail_on_detected_error="$1"
     shift
     local log_file
+    report_record_command "$@"
     if [ "$dry_run" = true ]; then
         log_info "Dry-run: $(format_command "$@")"
         reset_yt_dlp_status_flags
@@ -943,7 +1116,7 @@ run_yt_dlp_with_log_internal() {
     if [ "$debug_mode" = true ] && [ "$quiet_mode" != true ]; then
         log_io "$(format_command "$@")"
     fi
-    "$@" 2>&1 | tee "$log_file"
+    "$@" 2>&1 | tee "$log_file" | tee -a "$report_tool_log_file"
     local exit_code=${PIPESTATUS[0]}
 
     reset_yt_dlp_status_flags
@@ -997,6 +1170,7 @@ run_yt_dlp_stdout_to_file_with_log_internal() {
     local output_file="$1"
     shift
     local log_file
+    report_record_command "$@"
     if [ "$dry_run" = true ]; then
         log_info "Dry-run: $(format_command "$@") > $(printf '%q' "$output_file")"
         : > "$output_file"
@@ -1019,7 +1193,7 @@ run_yt_dlp_stdout_to_file_with_log_internal() {
     if [ "$debug_mode" = true ] && [ "$quiet_mode" != true ]; then
         log_io "$(format_command "$@") > $(printf '%q' "$output_file")"
     fi
-    "$@" >"$output_file" 2> >(tee "$log_file" >&2)
+    "$@" >"$output_file" 2> >(tee "$log_file" | tee -a "$report_tool_log_file" >&2)
     local exit_code=$?
 
     reset_yt_dlp_status_flags
@@ -1810,6 +1984,25 @@ while [[ $# -gt 0 ]]; do
             dry_run=true
             shift
             ;;
+        --report-dir=*)
+            report_dir="${1#*=}"
+            if [ -z "$report_dir" ]; then
+                log_error "--report-dir cannot be empty."
+                exit 1
+            fi
+            report_dir_provided=true
+            shift
+            ;;
+        --report-dir)
+            if [ -n "$2" ]; then
+                report_dir="$2"
+                report_dir_provided=true
+                shift 2
+            else
+                log_error "Report directory is required after --report-dir."
+                exit 1
+            fi
+            ;;
         -c|--channel)
             if [ -n "$2" ]; then
                 CHANNEL_URL="$2"
@@ -2161,6 +2354,10 @@ if [ ${#EXTRA_OPTS[@]} -gt 0 ]; then
     EXTRA_OPTS=("${filtered_extra_opts[@]}")
 fi
 
+log_step "Prepare download report"
+setup_download_report
+prepare_download_report_input
+
 # Create download archive directory if it doesn't exist
 log_step "Prepare download archive directory"
 ARCHIVE_DIR="${HOME}/.yt-dlp/archives"
@@ -2334,6 +2531,16 @@ if [ -n "$CHANNEL_URL" ]; then
             else
                 log_warn "Refresh requested but no danmaku archive cache found for '$CHANNEL_URL'."
             fi
+        fi
+    fi
+
+    if [ "$only_danmaku" = true ]; then
+        report_add_archive_file "$DANMAKU_ARCHIVE_FILE"
+    else
+        report_add_archive_file "$ARCHIVE_FILE"
+        report_add_archive_file "$METADATA_ARCHIVE_FILE"
+        if should_export_danmaku_for_platform "$channel_platform"; then
+            report_add_archive_file "$DANMAKU_ARCHIVE_FILE"
         fi
     fi
 
@@ -2676,6 +2883,16 @@ elif [ -n "$PLAYLIST_URL" ]; then
             else
                 log_warn "Refresh requested but no danmaku archive cache found for '$PLAYLIST_URL'."
             fi
+        fi
+    fi
+
+    if [ "$only_danmaku" = true ]; then
+        report_add_archive_file "$DANMAKU_ARCHIVE_FILE"
+    else
+        report_add_archive_file "$ARCHIVE_FILE"
+        report_add_archive_file "$METADATA_ARCHIVE_FILE"
+        if should_export_danmaku_for_platform "$playlist_platform"; then
+            report_add_archive_file "$DANMAKU_ARCHIVE_FILE"
         fi
     fi
 
@@ -3055,6 +3272,16 @@ else
                     else
                         log_warn "Refresh requested but no danmaku archive found to clear."
                     fi
+                fi
+            fi
+
+            if [ "$only_danmaku" = true ]; then
+                report_add_archive_file "$manual_danmaku_archive_file"
+            else
+                report_add_archive_file "$manual_archive_file"
+                report_add_archive_file "$manual_metadata_archive_file"
+                if should_export_danmaku_for_platform "$url_platform"; then
+                    report_add_archive_file "$manual_danmaku_archive_file"
                 fi
             fi
 

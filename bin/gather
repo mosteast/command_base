@@ -10,6 +10,13 @@ const YAML = require("yaml");
 const { spawn } = require("child_process");
 
 const package_json = require("../package.json");
+const {
+  REPORT_JSON_NAME,
+  build_download_report,
+  create_default_report_dir,
+  sanitize_report_path_component,
+  write_download_report,
+} = require("../lib/download_report");
 
 const DEFAULT_CONFIG_PATH =
   "/Users/hailang/Library/Mobile Documents/com~apple~CloudDocs/main/saved/state/gather.config.yaml";
@@ -19,6 +26,7 @@ const DEFAULT_F2_OUTPUT_DIR =
   "/Users/hailang/Library/Mobile Documents/com~apple~CloudDocs/main/saved/f2";
 const F2_COMPAT_COMMAND = "f2_compat";
 const F2_COMMANDS = new Set(["f2", F2_COMPAT_COMMAND]);
+const REPORT_CHILD_COMMANDS = new Set(["xsave_yt_dlp", "xsave_gallery_dl"]);
 const DEFAULT_CONFIG_LINES = [
   "# Gather config",
   "# Each source item requires a name and handle.",
@@ -300,6 +308,7 @@ function build_help_text(script_name) {
     `      --f2-output-dir <path>   f2 download output directory (default: ${chalk.gray(
       DEFAULT_F2_OUTPUT_DIR,
     )})`,
+    "      --report-dir <path>      Write report.json and report.md in this directory",
     "  -r, --refresh [mode]         Refresh yt-dlp output (youtube, bilibili, rumble, bitchute; media, info, all; info skips media/subtitles)",
     "      --max-comment <n>        Limit YouTube comment extraction for yt-dlp jobs (default: unlimited)",
     "      --skip <name...>         Skip yt-dlp outputs: comment (default: none)",
@@ -641,6 +650,10 @@ function parse_cli_arguments() {
       type: "string",
       describe: `f2 download output directory (default: ${DEFAULT_F2_OUTPUT_DIR})`,
     })
+    .option("report-dir", {
+      type: "string",
+      describe: "Write report.json and report.md in this directory",
+    })
     .option("refresh", {
       alias: "r",
       type: "string",
@@ -837,6 +850,7 @@ function parse_cli_arguments() {
     include_platforms,
     exclude_platforms,
     state_file: argv["state-file"] ? String(argv["state-file"]) : "",
+    report_dir: argv["report-dir"] ? String(argv["report-dir"]) : "",
     f2_output_dir: normalize_f2_output_dir(
       argv["f2-output-dir"] === undefined
         ? DEFAULT_F2_OUTPUT_DIR
@@ -1619,6 +1633,232 @@ function build_platform_command(platform_key, url, refresh_mode, options) {
   };
 }
 
+function insert_report_dir_arg(args, report_dir) {
+  const safe_args = Array.isArray(args) ? [...args] : [];
+  const passthrough_index = safe_args.indexOf("--");
+  const report_args = ["--report-dir", report_dir];
+  if (passthrough_index === -1) {
+    return [...safe_args, ...report_args];
+  }
+  return [
+    ...safe_args.slice(0, passthrough_index),
+    ...report_args,
+    ...safe_args.slice(passthrough_index),
+  ];
+}
+
+function attach_child_report_dir(command_config, child_report_dir) {
+  if (
+    !command_config ||
+    !child_report_dir ||
+    !REPORT_CHILD_COMMANDS.has(command_config.command)
+  ) {
+    return command_config;
+  }
+  return {
+    ...command_config,
+    args: insert_report_dir_arg(command_config.args, child_report_dir),
+    display_args: Array.isArray(command_config.args)
+      ? [...command_config.args]
+      : command_config.args,
+  };
+}
+
+function build_child_report_dir(report_dir, index, job) {
+  const index_text = String(index + 1).padStart(3, "0");
+  const platform_text = sanitize_report_path_component(job.platform_key);
+  const name_text = sanitize_report_path_component(
+    job.name || job.handle || job.url || "source",
+  ).slice(0, 80);
+  return path.join(
+    report_dir,
+    "child",
+    `${index_text}_${platform_text}_${name_text}`,
+  );
+}
+
+async function read_child_report(child_report_dir, logger) {
+  if (!child_report_dir) return { report: null, path: "" };
+  const child_report_path = path.join(child_report_dir, REPORT_JSON_NAME);
+  try {
+    logger.debug(`IO: read child report ${child_report_path}`);
+    const raw_text = await fs.readFile(child_report_path, "utf8");
+    return { report: JSON.parse(raw_text), path: child_report_path };
+  } catch (error) {
+    if (error && error.code === "ENOENT") {
+      logger.warn(`Child report missing: ${child_report_path}`);
+      return { report: null, path: child_report_path, missing: true };
+    }
+    logger.warn(
+      `Unable to read child report ${child_report_path}: ${format_error_message(error)}`,
+    );
+    return {
+      report: null,
+      path: child_report_path,
+      error: format_error_message(error),
+    };
+  }
+}
+
+function status_from_job_result(result) {
+  if (result && result.aborted) return "aborted";
+  if (result && result.dry_run) return "dry_run";
+  if (result && result.ok) return "completed";
+  return "failed";
+}
+
+function build_source_report_job({
+  job,
+  command_config,
+  result,
+  child_report_info,
+}) {
+  const child_report = child_report_info && child_report_info.report;
+  const missing_child_report =
+    child_report_info && (child_report_info.missing || child_report_info.error);
+  const status =
+    child_report && typeof child_report.status === "string"
+      ? child_report.status
+      : missing_child_report
+        ? "missing_report"
+        : status_from_job_result(result);
+
+  return {
+    type: "source",
+    name: job.name || "",
+    platform: job.platform_key,
+    handle: job.handle,
+    url: job.url,
+    source_file: job.source_file,
+    status,
+    command: result.command_text,
+    exit_code: result.exit_code,
+    child_report_path: child_report_info ? child_report_info.path : "",
+    child_report: child_report || undefined,
+  };
+}
+
+function build_command_report_job(job, result) {
+  return {
+    type: "command",
+    name: job.name || "",
+    platform: job.platform_key || "",
+    source_file: job.source_file || "",
+    status: status_from_job_result(result),
+    command: result.command_text,
+    exit_code: result.exit_code,
+  };
+}
+
+function number_from_summary(summary, field_name) {
+  if (!summary || typeof summary !== "object") return 0;
+  const value = Number(summary[field_name]);
+  return Number.isFinite(value) ? value : 0;
+}
+
+function build_gather_report_summary(report_jobs) {
+  const summary = {
+    total: report_jobs.length,
+    planned: report_jobs.length,
+    executed: 0,
+    dry_run: 0,
+    failed: 0,
+    aborted: 0,
+    downloaded_count: 0,
+    skipped_count: 0,
+    warning_count: 0,
+    error_count: 0,
+    archive_entry_delta: 0,
+  };
+
+  for (const report_job of report_jobs) {
+    if (report_job.status === "dry_run") {
+      summary.dry_run += 1;
+    } else if (report_job.status === "aborted") {
+      summary.aborted += 1;
+      summary.failed += 1;
+    } else if (
+      report_job.status === "failed" ||
+      report_job.status === "missing_report"
+    ) {
+      summary.executed += 1;
+      summary.failed += 1;
+    } else {
+      summary.executed += 1;
+    }
+
+    const child_summary =
+      report_job.child_report &&
+      typeof report_job.child_report.summary === "object"
+        ? report_job.child_report.summary
+        : {};
+    summary.downloaded_count += number_from_summary(
+      child_summary,
+      "downloaded_count",
+    );
+    summary.skipped_count += number_from_summary(
+      child_summary,
+      "skipped_count",
+    );
+    summary.warning_count += number_from_summary(
+      child_summary,
+      "warning_count",
+    );
+    summary.error_count += number_from_summary(child_summary, "error_count");
+    summary.archive_entry_delta += number_from_summary(
+      child_summary,
+      "archive_entry_delta",
+    );
+  }
+
+  return summary;
+}
+
+function resolve_gather_report_status(summary) {
+  if (summary.aborted > 0) return "aborted";
+  if (summary.failed > 0) return "failed";
+  if (summary.dry_run > 0 && summary.executed === 0) return "dry_run";
+  return "completed";
+}
+
+async function write_gather_download_report({
+  report_dir,
+  started_at,
+  options,
+  config_files,
+  report_jobs,
+  logger,
+}) {
+  const summary = build_gather_report_summary(report_jobs);
+  const ended_at = new Date().toISOString();
+  const report = build_download_report({
+    tool_name: "gather",
+    tool_version: package_json.version,
+    status: resolve_gather_report_status(summary),
+    started_at,
+    ended_at,
+    input: {
+      config: config_files,
+      platform: options.include_platforms,
+      exclude_platform: options.exclude_platforms,
+      range: options.range_list,
+    },
+    output: {
+      report_dir,
+      state_file: options.state_file || DEFAULT_STATE_FILE,
+    },
+    command: [format_command(process.argv[1], process.argv.slice(2))],
+    summary,
+    artifact: {},
+    job: report_jobs,
+  });
+  const result = await write_download_report(report_dir, report);
+  if (!options.quiet_mode) {
+    logger.info(`Report written: ${palette.path(result.markdown_path)}`);
+  }
+  return result;
+}
+
 function normalize_f2_path_part(raw_value) {
   const text = String(raw_value || "")
     .trim()
@@ -2095,6 +2335,10 @@ function filter_command_jobs(job_list, options) {
 async function run_export_job(job, command_config, options, logger) {
   const command_text = format_command(
     command_config.command,
+    command_config.display_args || command_config.args,
+  );
+  const actual_command_text = format_command(
+    command_config.command,
     command_config.args,
   );
   const name_suffix = job.name ? ` (${job.name})` : "";
@@ -2108,7 +2352,8 @@ async function run_export_job(job, command_config, options, logger) {
     );
     return {
       ok: false,
-      command_text,
+      command_text: actual_command_text,
+      display_command_text: command_text,
       exit_code: shutdown_state.exit_code || 130,
       aborted: true,
     };
@@ -2116,11 +2361,17 @@ async function run_export_job(job, command_config, options, logger) {
 
   if (options.dry_run) {
     logger.success("Dry-run mode: command not executed.");
-    return { ok: true, command_text, exit_code: 0, dry_run: true };
+    return {
+      ok: true,
+      command_text: actual_command_text,
+      display_command_text: command_text,
+      exit_code: 0,
+      dry_run: true,
+    };
   }
 
   await cleanup_empty_files_before_export(command_config, options, logger);
-  logger.debug(`IO: spawn ${command_text}`);
+  logger.debug(`IO: spawn ${actual_command_text}`);
 
   return new Promise((resolve) => {
     const stdio_mode = options.quiet_mode
@@ -2134,7 +2385,7 @@ async function run_export_job(job, command_config, options, logger) {
     child.on("error", (error) => {
       clear_active_child();
       logger.error(`Failed to launch ${command_config.command}.`, error);
-      resolve({ ok: false, command_text, exit_code: 1 });
+      resolve({ ok: false, command_text: actual_command_text, exit_code: 1 });
     });
 
     child.on("close", (code, signal) => {
@@ -2142,27 +2393,54 @@ async function run_export_job(job, command_config, options, logger) {
       if (signal) {
         if (shutdown_state.requested) {
           logger.warn(`Stopped by ${signal}: ${command_text}`);
-          resolve({ ok: false, command_text, exit_code: 1, aborted: true });
+          resolve({
+            ok: false,
+            command_text: actual_command_text,
+            display_command_text: command_text,
+            exit_code: 1,
+            aborted: true,
+          });
         } else {
           logger.error(
             `Command terminated by signal ${signal}: ${command_text}`,
           );
-          resolve({ ok: false, command_text, exit_code: 1 });
+          resolve({
+            ok: false,
+            command_text: actual_command_text,
+            display_command_text: command_text,
+            exit_code: 1,
+          });
         }
         return;
       }
       const exit_code = typeof code === "number" ? code : 1;
       if (shutdown_state.requested) {
         logger.warn(`Stopped: ${command_text}`);
-        resolve({ ok: false, command_text, exit_code, aborted: true });
+        resolve({
+          ok: false,
+          command_text: actual_command_text,
+          display_command_text: command_text,
+          exit_code,
+          aborted: true,
+        });
         return;
       }
       if (exit_code === 0) {
         logger.success(`Success: ${command_text}`);
-        resolve({ ok: true, command_text, exit_code });
+        resolve({
+          ok: true,
+          command_text: actual_command_text,
+          display_command_text: command_text,
+          exit_code,
+        });
       } else {
         logger.error(`Failed (exit ${exit_code}): ${command_text}`);
-        resolve({ ok: false, command_text, exit_code });
+        resolve({
+          ok: false,
+          command_text: actual_command_text,
+          display_command_text: command_text,
+          exit_code,
+        });
       }
     });
   });
@@ -2288,6 +2566,7 @@ async function run_custom_command_jobs(
   let failed = 0;
   let dry_run_count = 0;
   let aborted = 0;
+  const job_reports = [];
 
   for (let index = 0; index < command_jobs.length; index += 1) {
     const job = command_jobs[index];
@@ -2300,6 +2579,7 @@ async function run_custom_command_jobs(
     }
 
     const result = await run_custom_command_job(job, options, logger);
+    job_reports.push(build_command_report_job(job, result));
     if (result.aborted) {
       aborted += 1;
       break;
@@ -2338,11 +2618,17 @@ async function run_custom_command_jobs(
     dry_run: dry_run_count,
     aborted,
     has_jobs: true,
+    job_reports,
   };
 }
 
 async function run_export_command() {
   const options = parse_cli_arguments();
+  const report_started_at = new Date().toISOString();
+  const report_dir = path.resolve(
+    expand_user_path(options.report_dir || create_default_report_dir("gather")),
+  );
+  const report_jobs = [];
   const logger = create_logger({
     command_name: options.command_name,
     quiet_mode: options.quiet_mode,
@@ -2442,6 +2728,7 @@ async function run_export_command() {
 
   let source_failed = 0;
   let command_failed = 0;
+  let config_files_for_report = config_files;
 
   if (options.run_source_jobs) {
     logger.debug("Step: build job list");
@@ -2529,7 +2816,7 @@ async function run_export_command() {
           break;
         }
 
-        const command_config = build_platform_command(
+        let command_config = build_platform_command(
           job.platform_key,
           job.url,
           refresh_mode,
@@ -2546,11 +2833,37 @@ async function run_export_command() {
           continue;
         }
 
+        const child_report_dir = REPORT_CHILD_COMMANDS.has(
+          command_config.command,
+        )
+          ? build_child_report_dir(report_dir, job_index, job)
+          : "";
+        command_config = attach_child_report_dir(
+          command_config,
+          child_report_dir,
+        );
+
         const result = await run_export_job(
           job,
           command_config,
           options,
           logger,
+        );
+        const child_report_info = result.dry_run
+          ? {
+              report: null,
+              path: child_report_dir
+                ? path.join(child_report_dir, REPORT_JSON_NAME)
+                : "",
+            }
+          : await read_child_report(child_report_dir, logger);
+        report_jobs.push(
+          build_source_report_job({
+            job,
+            command_config,
+            result,
+            child_report_info,
+          }),
         );
         if (result.aborted) {
           aborted += 1;
@@ -2599,6 +2912,14 @@ async function run_export_command() {
   }
 
   if (shutdown_state.requested) {
+    await write_gather_download_report({
+      report_dir,
+      started_at: report_started_at,
+      options,
+      config_files: config_files_for_report,
+      report_jobs,
+      logger,
+    });
     logger.warn(`Stopped by ${shutdown_state.signal}.`);
     process.exit(shutdown_state.exit_code || 130);
   }
@@ -2611,12 +2932,30 @@ async function run_export_command() {
       { warn_when_empty: !options.run_source_jobs },
     );
     command_failed = command_result.failed;
+    report_jobs.push(...(command_result.job_reports || []));
   }
 
   if (shutdown_state.requested) {
+    await write_gather_download_report({
+      report_dir,
+      started_at: report_started_at,
+      options,
+      config_files: config_files_for_report,
+      report_jobs,
+      logger,
+    });
     logger.warn(`Stopped by ${shutdown_state.signal}.`);
     process.exit(shutdown_state.exit_code || 130);
   }
+
+  await write_gather_download_report({
+    report_dir,
+    started_at: report_started_at,
+    options,
+    config_files: config_files_for_report,
+    report_jobs,
+    logger,
+  });
 
   if (source_failed > 0 || command_failed > 0) {
     process.exit(1);

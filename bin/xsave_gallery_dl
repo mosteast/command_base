@@ -27,8 +27,18 @@ refresh=false
 debug_mode=false
 quiet_mode=false
 dry_run=false
+report_dir=""
+report_dir_provided=false
+report_enabled=false
+report_started_at=""
+report_input_json_file=""
+report_command_file=""
+report_archive_snapshot_file=""
+report_tool_log_file=""
 script_version="1.0.3"
 minimum_gallery_dl_version="1.31.10"
+script_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd)
+download_report_script="${script_dir}/../lib/download_report/write_report_cli.js"
 
 # Color codes for output readability
 color_reset=$'\033[0m'
@@ -97,6 +107,140 @@ format_command() {
     done
     printf "%s" "${formatted% }"
 }
+
+default_report_dir_for_tool() {
+    local tool_name="$1"
+    local timestamp
+    timestamp=$(date -u +"%Y%m%dT%H%M%SZ")
+    printf "%s/.command_base/report/%s/%s_%s" "$HOME" "$tool_name" "$timestamp" "$$"
+}
+
+count_non_empty_lines() {
+    local file_path="$1"
+    if [ ! -f "$file_path" ]; then
+        printf "%s" "0"
+        return 0
+    fi
+    awk 'NF { count += 1 } END { print count + 0 }' "$file_path"
+}
+
+report_snapshot_has_archive() {
+    local archive_path="$1"
+    if [ ! -f "$report_archive_snapshot_file" ]; then
+        return 1
+    fi
+    awk -F '\t' -v archive_path="$archive_path" '$1 == archive_path { found = 1 } END { exit(found ? 0 : 1) }' "$report_archive_snapshot_file"
+}
+
+report_add_archive_file() {
+    local archive_path="$1"
+    if [ "$report_enabled" != true ] || [ -z "$archive_path" ]; then
+        return 0
+    fi
+    if report_snapshot_has_archive "$archive_path"; then
+        return 0
+    fi
+    printf "%s\t%s\n" "$archive_path" "$(count_non_empty_lines "$archive_path")" >> "$report_archive_snapshot_file"
+}
+
+report_record_command() {
+    if [ "$report_enabled" != true ]; then
+        return 0
+    fi
+    printf "%s\n" "$(format_command "$@")" >> "$report_command_file"
+}
+
+write_gallery_report_input() {
+    if [ "$report_enabled" != true ]; then
+        return 0
+    fi
+    node - "$report_input_json_file" "${input_targets[@]}" <<'NODE'
+const fs = require("fs");
+const outputPath = process.argv[2];
+const targets = process.argv.slice(3);
+fs.writeFileSync(
+  outputPath,
+  JSON.stringify({ target: targets }, null, 2),
+  "utf8",
+);
+NODE
+}
+
+setup_download_report() {
+    if [ "$report_dir_provided" != true ] || [ -z "$report_dir" ]; then
+        report_dir=$(default_report_dir_for_tool "xsave_gallery_dl")
+    else
+        report_dir=$(expand_tilde_path "$report_dir")
+    fi
+
+    report_started_at=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
+    report_enabled=true
+    mkdir -p "$report_dir"
+    report_input_json_file="${report_dir}/input.json"
+    report_command_file="${report_dir}/command.txt"
+    report_archive_snapshot_file="${report_dir}/archive_before.tsv"
+    report_tool_log_file="${report_dir}/tool_output.log"
+    : > "$report_command_file"
+    : > "$report_archive_snapshot_file"
+    : > "$report_tool_log_file"
+}
+
+finalize_download_report() {
+    local exit_code="$1"
+    if [ "$report_enabled" != true ]; then
+        return 0
+    fi
+    local ended_at
+    ended_at=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
+    local planned_count="${#input_targets[@]}"
+    if [ "$planned_count" -eq 0 ]; then
+        planned_count=1
+    fi
+    local executed_count=0
+    if [ "$dry_run" != true ]; then
+        executed_count="$planned_count"
+    fi
+    local failed_count=0
+    if [ "$exit_code" -ne 0 ]; then
+        failed_count=1
+    fi
+    local dry_run_args=()
+    if [ "$dry_run" = true ]; then
+        dry_run_args=(--dry-run)
+    fi
+
+    if ! node "$download_report_script" \
+        --report-dir "$report_dir" \
+        --tool-name "xsave_gallery_dl" \
+        --tool-version "$script_version" \
+        --started-at "$report_started_at" \
+        --ended-at "$ended_at" \
+        --exit-code "$exit_code" \
+        --input-json-file "$report_input_json_file" \
+        --command-file "$report_command_file" \
+        --archive-snapshot-file "$report_archive_snapshot_file" \
+        --log-file "$report_tool_log_file" \
+        --output-dir "$output_dir" \
+        --planned "$planned_count" \
+        --executed "$executed_count" \
+        --failed "$failed_count" \
+        "${dry_run_args[@]}"; then
+        log_warn "Failed to write download report in '${report_dir}'."
+        return 0
+    fi
+
+    if [ "$quiet_mode" != true ]; then
+        log_info "Report written: ${report_dir}/report.md"
+    fi
+}
+
+on_exit() {
+    local exit_code=$?
+    finalize_download_report "$exit_code"
+    exit "$exit_code"
+}
+
+trap on_exit EXIT
 
 expand_tilde_path() {
     local path="$1"
@@ -329,6 +473,7 @@ ${color_blue}Options:${color_reset}
       --cookies <file>        Cookies file to load (default: ${default_cookies_file})
   -C <file>                   Alias for --cookies
       --no-cookies            Disable cookies (default: false)
+      --report-dir <dir>      Write report.json and report.md in this directory
       --refresh               Clear archive cache for this run (default: false)
       --archive-dir <dir>     Archive directory (default: ${archive_dir})
       --archive-file <file>   Use a specific archive file
@@ -412,6 +557,25 @@ while [[ $# -gt 0 ]]; do
         -d|--dry-run)
             dry_run=true
             shift
+            ;;
+        --report-dir=*)
+            report_dir="${1#*=}"
+            if [ -z "$report_dir" ]; then
+                log_error "--report-dir cannot be empty."
+                exit 1
+            fi
+            report_dir_provided=true
+            shift
+            ;;
+        --report-dir)
+            if [ -n "$2" ]; then
+                report_dir="$2"
+                report_dir_provided=true
+                shift 2
+            else
+                log_error "Report directory is required after --report-dir."
+                exit 1
+            fi
             ;;
         --output-dir=*)
             output_dir="${1#*=}"
@@ -587,6 +751,10 @@ if [ "$archive_file_provided" = true ]; then
     archive_file=$(expand_tilde_path "$archive_file")
 fi
 
+log_step "Prepare download report"
+setup_download_report
+write_gallery_report_input
+
 log_step "Check gallery-dl availability"
 if ! command -v gallery-dl >/dev/null 2>&1; then
     log_error "gallery-dl not found in PATH."
@@ -665,6 +833,7 @@ if [ "$use_archive" = true ]; then
     fi
 
     archive_opts=(--download-archive "$archive_file")
+    report_add_archive_file "$archive_file"
 else
     if [ "$refresh" = true ]; then
         log_warn "Refresh requested but archive is disabled; ignoring."
@@ -714,6 +883,7 @@ elif [ "$debug_mode" = true ]; then
 fi
 
 gallery_dl_command=(gallery-dl "${gallery_dl_args[@]}" "${extra_opts[@]}" "${input_targets[@]}")
+report_record_command "${gallery_dl_command[@]}"
 
 log_step "Run gallery-dl"
 if [ "$dry_run" = true ]; then
@@ -723,8 +893,8 @@ if [ "$dry_run" = true ]; then
 fi
 
 log_io "$(format_command "${gallery_dl_command[@]}")"
-"${gallery_dl_command[@]}"
-exit_code=$?
+"${gallery_dl_command[@]}" 2>&1 | tee -a "$report_tool_log_file"
+exit_code=${PIPESTATUS[0]}
 if [ "$exit_code" -eq 0 ]; then
     log_success "gallery-dl completed successfully."
 else

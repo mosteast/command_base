@@ -71,6 +71,53 @@ exit 99
   return { bin_dir };
 }
 
+async function create_successful_fake_gallery_dl_bin(temp_root) {
+  const bin_dir = path.join(temp_root, "fake_bin_success");
+  const script_path = path.join(bin_dir, "gallery-dl");
+
+  await fs.mkdir(bin_dir, { recursive: true });
+  await fs.writeFile(
+    script_path,
+    `#!/usr/bin/env bash
+set -euo pipefail
+
+log_file="\${FAKE_GALLERY_DL_LOG:?}"
+printf '%s\\n' "$*" >> "$log_file"
+
+if [ "\${1:-}" = "--version" ]; then
+  printf '%s\\n' "1.31.10"
+  exit 0
+fi
+
+archive_file=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --download-archive)
+      archive_file="$2"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+
+if [ -n "$archive_file" ]; then
+  mkdir -p "$(dirname "$archive_file")"
+  printf '%s\\n' "twitter_123" "twitter_456" >> "$archive_file"
+fi
+
+printf '%s\\n' "[download] https://x.com/example/123"
+printf '%s\\n' "WARNING: simulated warning"
+exit 0
+`,
+    "utf8",
+  );
+  await fs.chmod(script_path, 0o755);
+
+  return { bin_dir };
+}
+
 describe("xsave_gallery_dl gallery-dl version guard", () => {
   it("fails early with an actionable error for outdated gallery-dl versions", async () => {
     const temp_root = await create_temp_dir();
@@ -172,6 +219,73 @@ describe("xsave_gallery_dl gallery-dl version guard", () => {
       expect(stdout_text).toContain("Dry-run command: gallery-dl");
       expect(stdout_text).toContain("https://x.com/example");
       expect(invocation_lines).toEqual(["--version"]);
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("xsave_gallery_dl report generation", () => {
+  it("writes JSON and Markdown reports with archive-derived counts", async () => {
+    const temp_root = await create_temp_dir();
+    const fake_gallery_dl_log = path.join(temp_root, "fake_gallery_dl.log");
+    const output_dir = path.join(temp_root, "output");
+    const report_dir = path.join(temp_root, "report");
+
+    await fs.writeFile(fake_gallery_dl_log, "", "utf8");
+
+    try {
+      const fake_gallery_dl =
+        await create_successful_fake_gallery_dl_bin(temp_root);
+
+      const result = await run_cli(
+        [
+          "--report-dir",
+          report_dir,
+          "--no-cookies",
+          "--output-dir",
+          output_dir,
+          "https://x.com/example",
+        ],
+        {
+          env: {
+            PATH: `${fake_gallery_dl.bin_dir}:${process.env.PATH || ""}`,
+            FAKE_GALLERY_DL_LOG: fake_gallery_dl_log,
+          },
+        },
+      );
+
+      const report = JSON.parse(
+        await fs.readFile(path.join(report_dir, "report.json"), "utf8"),
+      );
+      const markdown = await fs.readFile(
+        path.join(report_dir, "report.md"),
+        "utf8",
+      );
+
+      expect(result.exit_code).toBe(0);
+      expect(report).toMatchObject({
+        schema_version: 1,
+        tool_name: "xsave_gallery_dl",
+        status: "completed",
+        input: {
+          target: ["https://x.com/example"],
+        },
+        output: {
+          directory: output_dir,
+        },
+        summary: {
+          total: 1,
+          executed: 1,
+          failed: 0,
+          archive_entry_delta: 2,
+          downloaded_count: 2,
+          warning_count: 1,
+        },
+      });
+      expect(report.artifact.archive_file[0].delta_count).toBe(2);
+      expect(markdown).toContain("# xsave_gallery_dl Download Report");
+      expect(markdown).toContain("| downloaded_count | 2 |");
     } finally {
       await fs.rm(temp_root, { recursive: true, force: true });
     }
