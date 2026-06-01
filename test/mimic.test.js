@@ -282,6 +282,51 @@ describe("mimic helpers", () => {
     }
   });
 
+  it("allows dry-run without git or gh installed", async () => {
+    const temp_dir = await fs.mkdtemp(path.join(os.tmpdir(), "mimic-dry-run-"));
+    const workspace_dir = path.join(temp_dir, "workspace");
+    const old_cwd = process.cwd();
+    const old_path = process.env.PATH;
+
+    await fs.mkdir(workspace_dir);
+
+    try {
+      process.chdir(workspace_dir);
+      process.env.PATH = temp_dir;
+
+      await expect(
+        mimic.mimic_repository(
+          {
+            repo_uri: "mosteast/prompt",
+            dir_path: "",
+            branch: "",
+            keep_origin: false,
+            keep_branch: false,
+            parent_remote_name: "parent",
+            fork_branch_name: "master",
+            create_remote: false,
+            remote_name: "",
+            remote_alias: "",
+            remote_visibility: "private",
+            dry_run: true,
+            quiet_mode: false,
+            debug_mode: false,
+          },
+          create_test_logger(),
+        ),
+      ).resolves.toBeUndefined();
+
+      await expect(
+        fs.stat(path.join(workspace_dir, "prompt")),
+      ).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    } finally {
+      process.chdir(old_cwd);
+      process.env.PATH = old_path;
+    }
+  });
+
   it("handles empty source repositories with unborn branches", async () => {
     const temp_dir = await fs.mkdtemp(path.join(os.tmpdir(), "mimic-empty-"));
     const source_repo = path.join(temp_dir, "source.git");

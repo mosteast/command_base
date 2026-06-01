@@ -666,7 +666,11 @@ async function create_remote_repository(
 }
 
 async function mimic_repository(options, logger) {
-  ensure_required_binaries(logger);
+  if (!options.dry_run) {
+    ensure_required_binaries(logger);
+  } else {
+    logger.debug("Skipping required binary checks during dry-run.");
+  }
 
   const working_directory = process.cwd();
   logger.debug(`Working directory: ${working_directory}`);
