@@ -27,10 +27,10 @@ function create_cli_argv(overrides = {}) {
     branch: "",
     "keep-origin": false,
     "keep-branch": false,
-    "parent-name": "parent",
+    parent: "parent",
     "fork-branch": "master",
     "create-remote": false,
-    "remote-name": "",
+    remote: "",
     "remote-alias": "",
     "remote-visibility": "private",
     "dry-run": false,
@@ -160,6 +160,40 @@ describe("mimic helpers", () => {
     expect(help_text).toContain(
       "--debug                       Show verbose debug logs (default: false)",
     );
+  });
+
+  it("documents canonical flags and deprecated aliases in help", () => {
+    const help_text = mimic.build_help_text("mimic");
+
+    expect(help_text).toContain(
+      "--parent <name>               Name to assign to the parent remote (default: parent; deprecated alias: --parent-name)",
+    );
+    expect(help_text).toContain(
+      "--remote <name>               Name for the new remote repo (default: target dir name; deprecated alias: --remote-name)",
+    );
+    expect(help_text).toContain(
+      "$0 mosteast/giao demo --parent upstream --fork-branch worktree",
+    );
+    expect(help_text).toContain(
+      "$0 mosteast/giao demo --keep-origin --parent upstream --create-remote --remote myuser/demo --remote-alias fork",
+    );
+  });
+
+  it("accepts deprecated aliases for parent and remote", () => {
+    const cli_result = mimic.parse_cli_arguments([
+      "mosteast/giao",
+      "workspace/demo",
+      "--parent-name",
+      "upstream",
+      "--remote-name",
+      "myuser/demo",
+      "--create-remote",
+    ]);
+
+    expect(cli_result.action).toBe("run");
+    expect(cli_result.options.parent_remote_name).toBe("upstream");
+    expect(cli_result.options.remote_name).toBe("myuser/demo");
+    expect(cli_result.options.create_remote).toBe(true);
   });
 
   it("prints the version number only", async () => {

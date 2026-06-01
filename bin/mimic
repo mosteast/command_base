@@ -75,10 +75,10 @@ function build_help_text(script_name) {
     "  -b, --branch <name>           Clone a specific branch (default: repo default)",
     "  --keep-origin                 Preserve the original origin remote (default: false)",
     "  --keep-branch                 Skip renaming the default branch (default: false)",
-    "  --parent-name <name>          Name to assign to the parent remote (default: parent)",
+    "  --parent <name>               Name to assign to the parent remote (default: parent; deprecated alias: --parent-name)",
     "  --fork-branch <name>          Working branch created from parent (default: master)",
     "  --create-remote               Create a brand new GitHub repo via gh (default: false)",
-    "  --remote-name <name>          Name for the new remote repo (default: target dir name)",
+    "  --remote <name>               Name for the new remote repo (default: target dir name; deprecated alias: --remote-name)",
     "  --remote-alias <name>         Git remote alias for the new repo (default: origin, or fork with --keep-origin)",
     "  --remote-visibility <value>   Visibility for the new repo (public|private|internal)",
     "  -d, --dry-run                 Show planned commands without running them (default: false)",
@@ -91,14 +91,17 @@ function build_help_text(script_name) {
     "  # Clone a repo and prepare parent/master branches",
     "  $0 mosteast/giao forked/giao",
     "",
-    "  # Clone a feature branch and keep original naming",
-    "  $0 mosteast/giao --branch feature/login --keep-origin --keep-branch",
+    "  # Clone a feature branch and rename the parent branch to upstream",
+    "  $0 mosteast/giao demo --branch feature/login --parent upstream",
     "",
-    "  # Clone and immediately create a private remote fork",
-    "  $0 mosteast/giao demo --create-remote --remote-name myuser/demo",
+    "  # Clone into a working branch while keeping the parent remote as upstream",
+    "  $0 mosteast/giao demo --parent upstream --fork-branch worktree",
     "",
-    '  # Keep origin untouched and create the new repo as remote "fork"',
-    "  $0 mosteast/giao demo --keep-origin --create-remote --remote-alias fork",
+    "  # Clone and immediately create a private remote fork with an explicit repo name",
+    "  $0 mosteast/giao demo --create-remote --remote myuser/demo",
+    "",
+    '  # Keep origin untouched, create the new repo as remote "fork", and rename the parent branch',
+    "  $0 mosteast/giao demo --keep-origin --parent upstream --create-remote --remote myuser/demo --remote-alias fork",
   ].join("\n");
 }
 
@@ -141,8 +144,8 @@ function build_argument_parser(raw_argv = hide_process_argv(process.argv)) {
       default: false,
       describe: "Keep the default branch name untouched",
     })
-    .option("parent-name", {
-      alias: ["parent_name"],
+    .option("parent", {
+      alias: ["parent_name", "parent-name"],
       type: "string",
       default: DEFAULT_PARENT_REMOTE,
       describe: "Name to assign to the parent remote/branch",
@@ -159,8 +162,8 @@ function build_argument_parser(raw_argv = hide_process_argv(process.argv)) {
       default: false,
       describe: "Create a brand-new remote repo using gh",
     })
-    .option("remote-name", {
-      alias: ["remote_name"],
+    .option("remote", {
+      alias: ["remote_name", "remote-name"],
       type: "string",
       default: "",
       describe:
@@ -247,20 +250,23 @@ function normalize_cli_options(argv) {
     throw create_usage_error("Error: <repo_uri> is required.");
   }
 
+  const parent_option = argv.parent ?? argv["parent-name"] ?? argv.parent_name;
+  const remote_option = argv.remote ?? argv["remote-name"] ?? argv.remote_name;
+
   const options = {
     repo_uri,
     dir_path: argv.dir_path ? String(argv.dir_path) : "",
     branch: argv.branch ? String(argv.branch) : "",
     keep_origin: Boolean(argv["keep-origin"]),
     keep_branch: Boolean(argv["keep-branch"]),
-    parent_remote_name: argv["parent-name"]
-      ? String(argv["parent-name"])
+    parent_remote_name: parent_option
+      ? String(parent_option)
       : DEFAULT_PARENT_REMOTE,
     fork_branch_name: argv["fork-branch"]
       ? String(argv["fork-branch"])
       : DEFAULT_FORK_BRANCH,
     create_remote: Boolean(argv["create-remote"]),
-    remote_name: argv["remote-name"] ? String(argv["remote-name"]) : "",
+    remote_name: remote_option ? String(remote_option) : "",
     remote_alias: argv["remote-alias"] ? String(argv["remote-alias"]) : "",
     remote_visibility: argv["remote-visibility"]
       ? String(argv["remote-visibility"])
@@ -312,7 +318,7 @@ function parse_cli_arguments(raw_argv = hide_process_argv(process.argv)) {
 
 function validate_cli_options(options) {
   if (!options.parent_remote_name) {
-    throw create_usage_error("Error: --parent-name cannot be empty.");
+    throw create_usage_error("Error: --parent cannot be empty.");
   }
 
   if (!options.fork_branch_name) {
@@ -324,7 +330,7 @@ function validate_cli_options(options) {
     options.parent_remote_name === DEFAULT_REMOTE_ALIAS
   ) {
     throw create_usage_error(
-      "Error: --parent-name must differ from origin unless --keep-origin is used.",
+      "Error: --parent must differ from origin unless --keep-origin is used.",
     );
   }
 
@@ -333,7 +339,7 @@ function validate_cli_options(options) {
     options.parent_remote_name === options.fork_branch_name
   ) {
     throw create_usage_error(
-      "Error: --parent-name and --fork-branch must differ unless --keep-branch is used.",
+      "Error: --parent and --fork-branch must differ unless --keep-branch is used.",
     );
   }
 
