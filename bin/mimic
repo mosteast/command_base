@@ -45,8 +45,13 @@ function create_logger({ quiet_mode, debug_mode }) {
     },
     error(message, error) {
       console.error(format_message(chalk.red(message)));
-      if (debug_mode && error) {
-        console.error(chalk.red(error.stack || String(error)));
+      if (error) {
+        const detail = debug_mode
+          ? error.stack || String(error)
+          : error.message || String(error);
+        if (detail) {
+          console.error(chalk.red(detail));
+        }
       }
     },
     debug(message) {
@@ -76,11 +81,11 @@ function build_help_text(script_name) {
     "  --remote-name <name>          Name for the new remote repo (default: target dir name)",
     "  --remote-alias <name>         Git remote alias for the new repo (default: origin, or fork with --keep-origin)",
     "  --remote-visibility <value>   Visibility for the new repo (public|private|internal)",
-    "  -d, --dry-run                 Show planned commands without running them",
-    "  --quiet                       Print only warnings and errors",
-    "  --debug                       Show verbose debug logs",
-    "  -v, --version                 Show version and exit",
-    "  -h, --help                    Show this help message",
+    "  -d, --dry-run                 Show planned commands without running them (default: false)",
+    "  --quiet                       Print only warnings and errors (default: false)",
+    "  --debug                       Show verbose debug logs (default: false)",
+    "  -v, --version                 Show version number only (default: false)",
+    "  -h, --help                    Show this help message (default: false)",
     "",
     chalk.bold("Examples"),
     "  # Clone a repo and prepare parent/master branches",
@@ -194,12 +199,20 @@ function build_argument_parser(raw_argv = hide_process_argv(process.argv)) {
     .option("version", {
       alias: ["v"],
       type: "boolean",
-      describe: "Show version information",
+      default: false,
+      describe: "Show version number only",
     })
     .option("help", {
       alias: ["h"],
       type: "boolean",
+      default: false,
       describe: "Show help message",
+    })
+    .strict()
+    .fail((message, error) => {
+      throw create_usage_error(
+        `Error: ${message || (error && error.message) || "Invalid arguments."}`,
+      );
     })
     .usage("$0 <repo_uri> [dir_path] [options]")
     .wrap(Math.min(100, process.stdout.columns || 100));
@@ -421,19 +434,18 @@ async function ensure_target_directory_available(target_path, logger) {
   logger.debug(`Before filesystem check: ${target_path}`);
   try {
     await fs.stat(target_path);
-    throw new Error(
-      `Target path already exists: ${path.relative(process.cwd(), target_path) || target_path}`,
-    );
   } catch (error) {
     if (error && error.code === "ENOENT") {
       return;
     }
-    if (error && error.code !== "ENOENT") {
-      throw new Error(
-        `Unable to verify target directory: ${error.message || String(error)}`,
-      );
-    }
+    throw new Error(
+      `Unable to verify target directory: ${error.message || String(error)}`,
+    );
   }
+
+  throw new Error(
+    `Target path already exists: ${path.relative(process.cwd(), target_path) || target_path}`,
+  );
 }
 
 async function run_process(binary_name, args, run_options, logger) {
@@ -487,7 +499,7 @@ async function get_current_branch(repo_cwd, options, logger) {
 
   const result = await run_process(
     "git",
-    ["rev-parse", "--abbrev-ref", "HEAD"],
+    ["branch", "--show-current"],
     { cwd: repo_cwd, dry_run: false },
     logger,
   );
