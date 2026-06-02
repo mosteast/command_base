@@ -170,10 +170,15 @@ function build_commit_message_prompt(change_context) {
     "Write a Git commit message for the staged changes below.",
     "",
     "Rules:",
-    "- Return exactly one single-line commit message.",
+    "- Return plain text only.",
+    "- Start with a concise English imperative subject line.",
     "- Use concise English imperative mood.",
-    "- Do not include markdown, quotes, explanations, prefixes, or code fences.",
-    "- Prefer 72 characters or fewer when the change can be summarized clearly.",
+    "- If the changes can be summarized as one clear purpose, return only the subject line.",
+    "- If the changes serve multiple purposes, add a blank line and then summarize each purpose as a top-level '- ...' bullet.",
+    "- For broader or more complex changes, use a bullet tree where each top-level '- ...' bullet is a purpose and nested '  - ...' bullets capture notable subchanges under that purpose.",
+    "- Use '-' for every bullet and two spaces for nested bullet indentation.",
+    "- Do not include quotes, explanations, prefixes, or code fences.",
+    "- Prefer 72 characters or fewer for the subject line when the change can be summarized clearly.",
     "",
     "## git status --short",
     "```text",
@@ -214,7 +219,7 @@ async function generate_ai_commit_message(change_context, options) {
         system_prompt,
         user_prompt,
         temperature: 0.2,
-        max_tokens: 120,
+        max_tokens: 240,
         logger,
         disable_fallback: true,
       });
@@ -256,22 +261,96 @@ function normalize_commit_message(raw_output) {
     text = fenced_match[1].trim();
   }
 
-  const first_line =
-    text
-      .split("\n")
-      .map((line) => line.trim())
-      .find((line) => line.length > 0) || "";
+  text = strip_wrapping_quote(text);
 
-  text = first_line
+  const lines = text
+    .split("\n")
+    .map((line) => line.replace(/\s+$/u, ""))
+    .filter((line, index, array) => {
+      if (line.trim().length > 0) {
+        return true;
+      }
+      const has_non_empty_before = array
+        .slice(0, index)
+        .some((entry) => entry.trim().length > 0);
+      const has_non_empty_after = array
+        .slice(index + 1)
+        .some((entry) => entry.trim().length > 0);
+      return has_non_empty_before && has_non_empty_after;
+    });
+
+  if (lines.length === 0) {
+    return "";
+  }
+
+  const subject_line = normalize_commit_message_subject(lines[0]);
+  if (!subject_line) {
+    return "";
+  }
+
+  const body_lines = normalize_commit_message_body(lines.slice(1));
+  if (body_lines.length === 0) {
+    return subject_line;
+  }
+
+  return [subject_line, "", ...body_lines].join("\n");
+}
+
+function normalize_commit_message_subject(line) {
+  let text = typeof line === "string" ? line.trim() : "";
+  if (!text) {
+    return "";
+  }
+
+  text = strip_wrapping_quote(text);
+
+  text = text
     .replace(/^[-*]\s+/u, "")
     .replace(/^git\s+commit\s+-m\s+/iu, "")
     .replace(/\s+/gu, " ")
     .trim();
 
   text = strip_wrapping_quote(text);
-  text = text.replace(/[.]\s*$/u, "").trim();
+  return text.replace(/[.]\s*$/u, "").trim();
+}
 
-  return text;
+function normalize_commit_message_body(lines) {
+  const normalized_lines = [];
+  let previous_blank = false;
+
+  for (const raw_line of lines) {
+    const trimmed_line = raw_line.trim();
+    if (!trimmed_line) {
+      if (!previous_blank && normalized_lines.length > 0) {
+        normalized_lines.push("");
+        previous_blank = true;
+      }
+      continue;
+    }
+
+    const bullet_match = raw_line.match(/^(\s*)[-*]\s+(.*)$/u);
+    if (bullet_match) {
+      const indentation = bullet_match[1].replace(/\t/gu, "  ");
+      const depth = Math.floor(indentation.length / 2);
+      const normalized_indentation = "  ".repeat(depth);
+      normalized_lines.push(
+        `${normalized_indentation}- ${bullet_match[2].trim()}`,
+      );
+    } else {
+      normalized_lines.push(trimmed_line);
+    }
+
+    previous_blank = false;
+  }
+
+  while (
+    normalized_lines.length > 0 &&
+    normalized_lines[normalized_lines.length - 1] === ""
+  ) {
+    normalized_lines.pop();
+  }
+
+  return normalized_lines;
 }
 
 function strip_wrapping_quote(text) {
@@ -323,5 +402,7 @@ module.exports = {
   collect_staged_change_context,
   generate_ai_commit_message,
   normalize_commit_message,
+  normalize_commit_message_body,
+  normalize_commit_message_subject,
   parse_argv,
 };

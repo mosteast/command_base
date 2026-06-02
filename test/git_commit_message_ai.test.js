@@ -3,6 +3,7 @@ import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
 const {
+  build_commit_message_prompt,
   default_ai_commit_attempts,
   generate_ai_commit_message,
   normalize_commit_message,
@@ -54,6 +55,34 @@ describe("git commit message ai helper", () => {
         '```text\ngit commit -m "Improve AI fallback"\n```',
       ),
     ).toBe("Improve AI fallback");
+  });
+
+  it("preserves structured multi-purpose commit messages with nested bullets", () => {
+    expect(
+      normalize_commit_message(`\`\`\`markdown
+Refine AI commit message formatting
+
+- Group multi-purpose changes by intent
+- Support richer summaries for larger refactors
+  - Preserve nested bullet structure
+  - Keep bullet list bodies instead of truncating to one line
+\`\`\``),
+    ).toBe(`Refine AI commit message formatting
+
+- Group multi-purpose changes by intent
+- Support richer summaries for larger refactors
+  - Preserve nested bullet structure
+  - Keep bullet list bodies instead of truncating to one line`);
+  });
+
+  it("asks the AI for bullet lists when staged changes have multiple purposes", () => {
+    expect(
+      build_commit_message_prompt({
+        status: "M utility/git_commit_message_ai.js",
+        stat: "utility/git_commit_message_ai.js | 12 +++++++++---",
+        diff: "diff --git a/utility/git_commit_message_ai.js b/utility/git_commit_message_ai.js",
+      }),
+    ).toContain("If the changes serve multiple purposes");
   });
 
   it("keeps the requested default fallback order explicit", () => {
