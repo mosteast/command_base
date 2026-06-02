@@ -103,6 +103,21 @@ log_debug() {
   log_emit "$LEVEL_DEBUG" "$BLUE" "DEBUG" "$*"
 }
 
+log_selected_commit_message() {
+  local message=$1
+  local message_line=""
+
+  if [ "$log_threshold" -lt "$LEVEL_INFO" ]; then
+    return 0
+  fi
+
+  >&2 printf "%b[%s]%b Using commit message:\n\n" "$GREEN" "INFO" "$RESET"
+  while IFS= read -r message_line || [ -n "$message_line" ]; do
+    >&2 printf "  %s\n" "$message_line"
+  done <<< "$message"
+  >&2 printf "\n"
+}
+
 format_command() {
   local formatted=""
   local arg
@@ -410,7 +425,7 @@ run() {
     if [ "$merge_in_progress" = true ] && [ -z "$commit_message" ]; then
       log_info "Using merge message from MERGE_MSG."
     else
-      log_info "Using commit message: ${commit_message}"
+      log_selected_commit_message "$commit_message"
     fi
   elif [ "$ai_commit_message" = true ]; then
     log_info "No staged changes detected; skipping AI commit message generation."
