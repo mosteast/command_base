@@ -13,7 +13,6 @@ const {
 
 const script_version = "0.1.0";
 
-const GREEN = "\x1b[32m";
 const YELLOW = "\x1b[33m";
 const BLUE = "\x1b[34m";
 const RED = "\x1b[31m";
@@ -66,7 +65,7 @@ function create_logger(options) {
     },
     info(message) {
       if (!quiet) {
-        process.stderr.write(`${GREEN}[INFO]${RESET} ${message}\n`);
+        process.stderr.write(`\n${message}\n`);
       }
     },
     debug(message) {
@@ -481,7 +480,7 @@ function log_plan_preview(plan, logger) {
     for (const line of group.message.split("\n")) {
       process.stderr.write(`    | ${line}\n`);
     }
-    process.stderr.write("    files:\n");
+    process.stderr.write(`    files:\n`);
     for (const file of group.files) {
       process.stderr.write(`      - ${file}\n`);
     }

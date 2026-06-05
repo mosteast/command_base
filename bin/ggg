@@ -106,7 +106,10 @@ log_warn() {
 }
 
 log_info() {
-  log_emit "$LEVEL_INFO" "$GREEN" "INFO" "$*"
+  if [ "$log_threshold" -lt "$LEVEL_INFO" ]; then
+    return 0
+  fi
+  printf "\n%s\n" "$*"
 }
 
 log_debug() {
