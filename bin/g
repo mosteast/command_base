@@ -21,6 +21,8 @@ log_threshold=$LEVEL_INFO
 dry_run=false
 ai_commit_message=false
 ai_only=false
+smart_commit=false
+confirm_commit=false
 has_staged_changes=false
 has_branch_ahead=false
 has_upstream=false
@@ -50,6 +52,9 @@ Options:
   -d, --dry-run     Print the planned actions without executing them.
   --ai              Generate the commit message from staged changes using AI.
   --ai-only         Generate and print the AI commit message, then exit.
+  --smart           Ask AI whether changes should be split into multiple
+                    commits; commit each group separately, then push once.
+  --confirm         With --smart, print the plan and ask before committing.
 
 Examples:
   # Commit all changes with a custom message
@@ -60,6 +65,15 @@ Examples:
 
   # Preview the AI-generated commit message without committing or pushing
   \$0 --ai-only
+
+  # Split changes into logical commits, then push once
+  \$0 --smart
+
+  # Preview the smart split plan without committing
+  \$0 --smart --dry-run
+
+  # Review and approve the smart split plan before committing
+  \$0 --smart --confirm
 
   # Preview actions without committing or pushing
   \$0 --dry-run
@@ -328,6 +342,79 @@ push_changes() {
   fi
 }
 
+should_push_existing() {
+  log_debug "Command: git rev-parse --abbrev-ref --symbolic-full-name @{u}"
+  if git rev-parse --abbrev-ref --symbolic-full-name "@{u}" >/dev/null 2>&1; then
+    log_debug "Command: git rev-list --left-right --count @{u}...HEAD"
+    local ahead_output ahead_count=""
+    ahead_output=$(git rev-list --left-right --count "@{u}...HEAD")
+    read -r _ ahead_count <<<"$ahead_output"
+    if [ -n "$ahead_count" ] && [ "$ahead_count" -gt 0 ]; then
+      return 0
+    fi
+    return 1
+  fi
+
+  if git rev-parse --verify HEAD >/dev/null 2>&1; then
+    return 0
+  fi
+  return 1
+}
+
+run_smart_commit() {
+  local helper_path="${script_dir}/../utility/git_smart_commit_ai.js"
+  local -a helper_args=()
+
+  if [ "$dry_run" = true ]; then
+    helper_args+=("--dry-run")
+  fi
+  if [ "$confirm_commit" = true ]; then
+    helper_args+=("--confirm")
+  fi
+  if [ "$log_threshold" -ge "$LEVEL_DEBUG" ]; then
+    helper_args+=("--debug")
+  fi
+  if [ "$log_threshold" -le "$LEVEL_WARN" ]; then
+    helper_args+=("--quiet")
+  fi
+
+  log_debug "Generating and applying the smart commit plan."
+  log_debug "Command: $(format_command node "$helper_path" "${helper_args[@]}")"
+
+  local commit_count
+  if [ "${#helper_args[@]}" -gt 0 ]; then
+    commit_count=$(node "$helper_path" "${helper_args[@]}")
+  else
+    commit_count=$(node "$helper_path")
+  fi
+
+  if ! [[ "$commit_count" =~ ^[0-9]+$ ]]; then
+    log_error "Smart commit helper returned an unexpected result: ${commit_count}"
+    exit 1
+  fi
+
+  if [ "$dry_run" = true ]; then
+    if [ "$commit_count" -gt 0 ]; then
+      push_changes
+    else
+      log_info "Dry run: no changes to commit; push step skipped."
+    fi
+    return 0
+  fi
+
+  if [ "$commit_count" -eq 0 ]; then
+    if should_push_existing; then
+      push_changes
+    else
+      log_info "No commits created; skipping push."
+    fi
+    return 0
+  fi
+
+  log_info "Created ${commit_count} commit(s); pushing once."
+  push_changes
+}
+
 run() {
   local commit_message_input=""
   local -a positional=()
@@ -362,6 +449,14 @@ run() {
         ai_only=true
         shift
         ;;
+      --smart)
+        smart_commit=true
+        shift
+        ;;
+      --confirm)
+        confirm_commit=true
+        shift
+        ;;
       --)
         shift
         while (($#)); do
@@ -394,9 +489,25 @@ run() {
     exit 1
   fi
 
+  if [ "$smart_commit" = true ]; then
+    if [ "$ai_commit_message" = true ] || [ "$ai_only" = true ]; then
+      log_error "--smart cannot be combined with --ai/--ai-only."
+      exit 1
+    fi
+    if [ -n "$commit_message_input" ]; then
+      log_error "--smart cannot be combined with an explicit commit message."
+      exit 1
+    fi
+  fi
+
+  if [ "$confirm_commit" = true ] && [ "$smart_commit" = false ]; then
+    log_error "--confirm requires --smart."
+    exit 1
+  fi
+
   ensure_dependency git
   ensure_dependency date
-  if [ "$ai_commit_message" = true ] || [ "$ai_only" = true ]; then
+  if [ "$ai_commit_message" = true ] || [ "$ai_only" = true ] || [ "$smart_commit" = true ]; then
     ensure_dependency node
   fi
   verify_git_repository
@@ -404,6 +515,15 @@ run() {
   if { [ "$ai_commit_message" = true ] || [ "$ai_only" = true ]; } && [ "$merge_in_progress" = true ]; then
     log_error "--ai/--ai-only cannot be used while a merge commit is in progress."
     exit 1
+  fi
+  if [ "$smart_commit" = true ] && [ "$merge_in_progress" = true ]; then
+    log_error "--smart cannot be used while a merge commit is in progress."
+    exit 1
+  fi
+
+  if [ "$smart_commit" = true ]; then
+    run_smart_commit
+    return 0
   fi
 
   execute_step "Staging all changes." git add --all
