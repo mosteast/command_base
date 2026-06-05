@@ -389,7 +389,7 @@ async function generate_smart_commit_plan(
 
   for (const attempt of attempts) {
     logger.info(
-      `Trying ${attempt.label} for the commit split plan (model: ${attempt.model}).`,
+      `Trying ${attempt.label} for the commit split plan (model: ${attempt.model})...`,
     );
     try {
       const raw_output = await invoke_adapter(attempt.platform, {
