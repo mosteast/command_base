@@ -10,6 +10,7 @@ const package_json = require("../package.json");
 const {
   get_backup_root,
   app_dir_under_root,
+  safety_backup_root,
   next_id,
   resolve_restore_id,
   backup_snapshot_dir,
@@ -53,6 +54,7 @@ function build_help_text(script_name) {
     `${chalk.bold("Restore options")}`,
     "  --id <n>                 Restore snapshot id (default: latest / largest id)",
     "  --no-safety-backup       Skip the automatic safety backup before restore (default: false)",
+    "                           Safety backups are stored under safety_backup/<app>.",
     "",
     `${chalk.bold("Supported apps")}`,
     `  ${supported_apps().join(", ")}`,
@@ -108,6 +110,7 @@ function build_subcommand_help(command) {
       `${chalk.bold("Options")}`,
       "  --id <n>                 Snapshot id to restore",
       "  --no-safety-backup       Skip the automatic safety backup before restore (default: false)",
+      "                           Safety backups are stored under safety_backup/<app>.",
       "  -d, --dry-run            Preview actions without writing files (default: false)",
       "  --quiet                  Print only warnings and errors (default: false)",
       "  --debug                  Print verbose debug logs (default: false)",
@@ -139,11 +142,12 @@ function log(quiet, msg) {
 /**
  * @param {string} app
  * @param {{ debug: boolean, quiet: boolean, dry_run: boolean }} ctx
- * @param {{ backup_root?: string }} opts
+ * @param {{ backup_root?: string, completion_label?: string }} opts
  * @returns {{ id: number, snapshot_dir: string, report: object }}
  */
 function run_backup(app, ctx, opts = {}) {
   const backup_root = opts.backup_root || get_backup_root();
+  const completion_label = opts.completion_label || "Backup complete";
   ensure_readme_at_backup_root(backup_root, { dry_run: ctx.dry_run });
   const app_dir = app_dir_under_root(backup_root, app);
   const id = next_id(app_dir);
@@ -175,7 +179,7 @@ function run_backup(app, ctx, opts = {}) {
 
   log(
     ctx.quiet,
-    chalk.green(`Backup complete: ${app} #${id} → ${snapshot_dir}`),
+    chalk.green(`${completion_label}: ${app} #${id} → ${snapshot_dir}`),
   );
   return { id, snapshot_dir, report };
 }
@@ -206,7 +210,10 @@ function run_restore(app, id_explicit, safety_backup, ctx) {
         chalk.dim("[dry-run] would run safety backup before restore"),
       );
     } else {
-      run_backup(app, ctx, { backup_root });
+      run_backup(app, ctx, {
+        backup_root: safety_backup_root(backup_root),
+        completion_label: "Safety backup complete",
+      });
     }
   }
 

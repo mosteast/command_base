@@ -408,3 +408,62 @@ describe("app_config backup report", () => {
     );
   });
 });
+
+describe("app_config restore safety backup", () => {
+  it("stores automatic safety backups outside the manual backup id directory", async () => {
+    const backup_root = await fs.mkdtemp(path.join(os.tmpdir(), "acb-cli-"));
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), "home-"));
+    const fake_path = await fs.mkdtemp(path.join(os.tmpdir(), "path-"));
+    const rel = path.join(
+      "Library",
+      "Application Support",
+      "Cursor",
+      "User",
+      "settings.json",
+    );
+    const extension_rel = path.join(".cursor", "extensions");
+
+    await fs.ensureDir(
+      path.join(backup_root, "cursor", "1", path.dirname(rel)),
+    );
+    await fs.ensureDir(path.join(backup_root, "cursor", "1", extension_rel));
+    await fs.writeFile(
+      path.join(backup_root, "cursor", "1", rel),
+      '{"restored":true}',
+      "utf8",
+    );
+    await fs.writeJson(
+      path.join(backup_root, "cursor", "1", cursor_provider.MANIFEST_NAME),
+      {
+        included_paths: [rel, extension_rel],
+      },
+    );
+
+    await fs.ensureDir(path.join(home, path.dirname(rel)));
+    await fs.writeFile(path.join(home, rel), '{"current":true}', "utf8");
+
+    const result = await run_cli(
+      ["restore", "cursor", "--id", "1", "--quiet"],
+      {
+        env: {
+          APP_CONFIG_BACKUP_ROOT: backup_root,
+          HOME: home,
+          PATH: fake_path,
+        },
+      },
+    );
+
+    expect(result.exit_code).toBe(0);
+    expect(await fs.readFile(path.join(home, rel), "utf8")).toBe(
+      '{"restored":true}',
+    );
+    expect(await fs.pathExists(path.join(backup_root, "cursor", "2"))).toBe(
+      false,
+    );
+    expect(
+      await fs.pathExists(
+        path.join(backup_root, "safety_backup", "cursor", "1"),
+      ),
+    ).toBe(true);
+  });
+});
