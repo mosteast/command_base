@@ -372,7 +372,11 @@ function parse_smart_commit_plan(raw_output, changed_paths) {
   return { groups };
 }
 
-async function generate_smart_commit_plan(change_context, changed_paths, options) {
+async function generate_smart_commit_plan(
+  change_context,
+  changed_paths,
+  options,
+) {
   const resolved_options = options || {};
   const logger = resolved_options.logger || create_logger({});
   const attempts = resolved_options.attempts || default_ai_commit_attempts;
@@ -473,15 +477,13 @@ function log_plan_preview(plan, logger) {
   }
 
   plan.groups.forEach((group, index) => {
-    process.stderr.write(
-      `${GREEN}[INFO]${RESET}   commit ${index + 1}/${total}:\n`,
-    );
+    process.stderr.write(`  commit ${index + 1}/${total}:\n`);
     for (const line of group.message.split("\n")) {
-      process.stderr.write(`${GREEN}[INFO]${RESET}     | ${line}\n`);
+      process.stderr.write(`    | ${line}\n`);
     }
-    process.stderr.write(`${GREEN}[INFO]${RESET}     files:\n`);
+    process.stderr.write("    files:\n");
     for (const file of group.files) {
-      process.stderr.write(`${GREEN}[INFO]${RESET}       - ${file}\n`);
+      process.stderr.write(`      - ${file}\n`);
     }
   });
 }
@@ -571,8 +573,7 @@ async function main(argv) {
   }
 
   if (options.confirm) {
-    const subject =
-      total === 1 ? "this commit" : `these ${total} commits`;
+    const subject = total === 1 ? "this commit" : `these ${total} commits`;
     const approved = await prompt_yes_no(`Proceed with ${subject}? [y/N] `);
     if (!approved) {
       logger.warn("Aborted by user; no commits created.");
