@@ -7,9 +7,11 @@ const {
   expand_group_paths,
   extract_json_object,
   generate_smart_commit_plan,
+  parse_confirm_selection,
   parse_porcelain_status,
   parse_smart_commit_plan,
   resolve_commit_plan,
+  resolve_single_commit_plan,
 } = require("../utility/git_smart_commit_ai");
 
 const change_context = {
@@ -91,9 +93,9 @@ describe("git smart commit plan", () => {
     const json = JSON.stringify({
       groups: [{ message: "Only one", files: ["bin/g"] }],
     });
-    expect(() =>
-      parse_smart_commit_plan(json, ["bin/g", "README.md"]),
-    ).toThrow(/does not cover/u);
+    expect(() => parse_smart_commit_plan(json, ["bin/g", "README.md"])).toThrow(
+      /does not cover/u,
+    );
   });
 
   it("falls back to a single commit when the plan JSON is invalid", async () => {
@@ -122,9 +124,8 @@ describe("git smart commit plan", () => {
 
 describe("porcelain parsing", () => {
   it("parses statuses and expands renames to both paths", () => {
-    const output = [" M bin/g", "R  new.txt", "old.txt", "?? a.js"].join(
-      "\0",
-    ) + "\0";
+    const output =
+      [" M bin/g", "R  new.txt", "old.txt", "?? a.js"].join("\0") + "\0";
 
     const { display_paths, expansion } = parse_porcelain_status(output);
 
@@ -134,6 +135,103 @@ describe("porcelain parsing", () => {
       "new.txt",
       "old.txt",
     ]);
+  });
+});
+
+describe("confirm selection parsing", () => {
+  it("accepts every commit on a bare 'y'", () => {
+    const result = parse_confirm_selection("y", 3);
+    expect(result.ok).toBe(true);
+    expect(result.verb).toBe("y");
+    expect(result.accepted).toEqual([1, 2, 3]);
+    expect(result.rejected).toEqual([]);
+  });
+
+  it("accepts only the listed commits and rejects the rest with 'y 1 2'", () => {
+    const result = parse_confirm_selection("y 1 2", 4);
+    expect(result.accepted).toEqual([1, 2]);
+    expect(result.rejected).toEqual([3, 4]);
+  });
+
+  it("expands ranges and lists with 'y 2-4 6 8'", () => {
+    const result = parse_confirm_selection("y 2-4 6 8", 8);
+    expect(result.accepted).toEqual([2, 3, 4, 6, 8]);
+    expect(result.rejected).toEqual([1, 5, 7]);
+  });
+
+  it("rejects every commit on a bare 'n'", () => {
+    const result = parse_confirm_selection("n", 3);
+    expect(result.verb).toBe("n");
+    expect(result.accepted).toEqual([]);
+    expect(result.rejected).toEqual([1, 2, 3]);
+  });
+
+  it("rejects only the listed commits and keeps the rest with 'n 2-4 6 8'", () => {
+    const result = parse_confirm_selection("n 2-4 6 8", 8);
+    expect(result.rejected).toEqual([2, 3, 4, 6, 8]);
+    expect(result.accepted).toEqual([1, 5, 7]);
+  });
+
+  it("treats reversed ranges leniently", () => {
+    const result = parse_confirm_selection("y 4-2", 5);
+    expect(result.accepted).toEqual([2, 3, 4]);
+    expect(result.rejected).toEqual([1, 5]);
+  });
+
+  it("defaults empty input to accept all", () => {
+    const result = parse_confirm_selection("   ", 3);
+    expect(result.ok).toBe(true);
+    expect(result.verb).toBe("y");
+    expect(result.accepted).toEqual([1, 2, 3]);
+    expect(result.rejected).toEqual([]);
+  });
+
+  it("treats 'help', 'h' and '?' as a help request", () => {
+    for (const token of ["help", "HELP", "h", "?"]) {
+      const result = parse_confirm_selection(token, 3);
+      expect(result.ok).toBe(true);
+      expect(result.help).toBe(true);
+      expect(result.accepted).toBeUndefined();
+    }
+  });
+
+  it("rejects an unknown verb", () => {
+    const result = parse_confirm_selection("x 1", 3);
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/Unknown response/u);
+  });
+
+  it("rejects out-of-range selections", () => {
+    const result = parse_confirm_selection("y 9", 3);
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/out of range/u);
+  });
+
+  it("rejects malformed tokens", () => {
+    const result = parse_confirm_selection("y 1-", 3);
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/Invalid selection token/u);
+  });
+});
+
+describe("single commit plan", () => {
+  it("produces one group covering every changed file", async () => {
+    const invoke_adapter = vi.fn(async () => "Apply the combined change");
+    const plan = await resolve_single_commit_plan(
+      change_context,
+      ["bin/g", "README.md"],
+      {
+        invoke_adapter,
+        logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+      },
+    );
+
+    expect(plan.single).toBe(true);
+    expect(plan.groups).toHaveLength(1);
+    expect(plan.groups[0]).toEqual({
+      message: "Apply the combined change",
+      files: ["bin/g", "README.md"],
+    });
   });
 });
 

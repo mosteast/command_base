@@ -49,7 +49,9 @@ Options:
   --ai-only         Format, generate and print the AI commit message, then exit.
   --smart           Format, then ask AI whether changes should be split into
                     multiple commits; commit each group, then push once.
-  --confirm         With --smart, print the plan and ask before committing.
+  --confirm         With --smart or --ai, preview the plan and review it
+                    interactively before committing. Supports partial
+                    accept/reject with regeneration of the rejected commits.
 
 Examples:
   # Format code, commit with a custom message, and push
@@ -58,13 +60,16 @@ Examples:
   # Format code, generate the commit message with AI, and push
   \$0 --ai
 
+  # Format code, review the AI commit message interactively, then push
+  \$0 --ai --confirm
+
   # Format code and preview the AI-generated commit message only
   \$0 --ai-only
 
   # Format code, split changes into logical commits, then push once
   \$0 --smart
 
-  # Format code and review the smart split plan before committing
+  # Format code and review the smart split plan; accept, reject, or regenerate
   \$0 --smart --confirm
 
   # Preview the commands without executing them
@@ -253,8 +258,13 @@ run() {
     fi
   fi
 
-  if [ "$confirm_commit" = true ] && [ "$smart_commit" = false ]; then
-    log_error "--confirm requires --smart."
+  if [ "$confirm_commit" = true ] && [ "$ai_only" = true ]; then
+    log_error "--confirm cannot be combined with --ai-only."
+    exit 1
+  fi
+
+  if [ "$confirm_commit" = true ] && [ "$smart_commit" = false ] && [ "$ai_commit_message" = false ]; then
+    log_error "--confirm requires --smart or --ai."
     exit 1
   fi
 

@@ -23,6 +23,7 @@ ai_commit_message=false
 ai_only=false
 smart_commit=false
 confirm_commit=false
+single_smart=false
 has_staged_changes=false
 has_branch_ahead=false
 has_upstream=false
@@ -54,7 +55,9 @@ Options:
   --ai-only         Generate and print the AI commit message, then exit.
   --smart           Ask AI whether changes should be split into multiple
                     commits; commit each group separately, then push once.
-  --confirm         With --smart, print the plan and ask before committing.
+  --confirm         With --smart or --ai, preview the plan and review it
+                    interactively before committing. Supports partial
+                    accept/reject with regeneration of the rejected commits.
 
 Examples:
   # Commit all changes with a custom message
@@ -62,6 +65,9 @@ Examples:
 
   # Commit all changes with an AI-generated message
   \$0 --ai
+
+  # Review the AI commit message interactively before committing and pushing
+  \$0 --ai --confirm
 
   # Preview the AI-generated commit message without committing or pushing
   \$0 --ai-only
@@ -72,7 +78,7 @@ Examples:
   # Preview the smart split plan without committing
   \$0 --smart --dry-run
 
-  # Review and approve the smart split plan before committing
+  # Review the smart split plan; accept, reject, or regenerate commits
   \$0 --smart --confirm
 
   # Preview actions without committing or pushing
@@ -371,6 +377,9 @@ run_smart_commit() {
   if [ "$dry_run" = true ]; then
     helper_args+=("--dry-run")
   fi
+  if [ "$single_smart" = true ]; then
+    helper_args+=("--single")
+  fi
   if [ "$confirm_commit" = true ]; then
     helper_args+=("--confirm")
   fi
@@ -504,9 +513,18 @@ run() {
     fi
   fi
 
-  if [ "$confirm_commit" = true ] && [ "$smart_commit" = false ]; then
-    log_error "--confirm requires --smart."
+  if [ "$confirm_commit" = true ] && [ "$ai_only" = true ]; then
+    log_error "--confirm cannot be combined with --ai-only."
     exit 1
+  fi
+
+  if [ "$confirm_commit" = true ] && [ "$smart_commit" = false ] && [ "$ai_commit_message" = false ]; then
+    log_error "--confirm requires --smart or --ai."
+    exit 1
+  fi
+
+  if [ "$confirm_commit" = true ] && [ "$ai_commit_message" = true ] && [ "$smart_commit" = false ]; then
+    single_smart=true
   fi
 
   ensure_dependency git
@@ -525,7 +543,7 @@ run() {
     exit 1
   fi
 
-  if [ "$smart_commit" = true ]; then
+  if [ "$smart_commit" = true ] || [ "$single_smart" = true ]; then
     run_smart_commit
     return 0
   fi

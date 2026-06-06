@@ -32,7 +32,20 @@ Options:
   --debug           Print verbose debug logs.
   --quiet           Print only warnings and errors.
   -d, --dry-run     Print the planned commits without creating them.
-  --confirm         Print the plan and ask for confirmation before committing.
+  --single          Plan exactly one commit for all changes (no splitting),
+                    using the AI commit message generator.
+  --confirm         Print the plan and review it interactively before
+                    committing. Supports partial accept/reject with
+                    regeneration of the rejected commits (see Confirm grammar).
+
+Confirm grammar (with --confirm):
+  The prompt shows [Y/n/help]; type 'help' to print this grammar.
+  y (or Enter) Accept every planned commit (Enter defaults to accept all).
+  y 1 3        Accept only commits 1 and 3; regenerate the rest.
+  y 2-4 6 8    Accept commits 2-4, 6 and 8; regenerate the rest.
+  n            Reject every commit and regenerate the whole plan.
+  n 2-4 6 8    Reject commits 2-4, 6 and 8 (keep the rest) and regenerate
+               only the rejected files.
 
 Output:
   Prints the number of commits created to stdout (logs go to stderr).
@@ -41,10 +54,13 @@ Examples:
   # Split current changes into logical commits
   $0
 
+  # Plan a single commit with an AI-generated message
+  $0 --single
+
   # Preview the split plan without committing
   $0 --dry-run
 
-  # Ask for confirmation before committing
+  # Review the plan interactively and confirm before committing
   $0 --confirm`);
 }
 
@@ -81,6 +97,7 @@ function parse_argv(argv) {
     debug: false,
     quiet: false,
     dry_run: false,
+    single: false,
     confirm: false,
   };
 
@@ -103,6 +120,9 @@ function parse_argv(argv) {
       case "-d":
       case "--dry-run":
         options.dry_run = true;
+        break;
+      case "--single":
+        options.single = true;
         break;
       case "--confirm":
         options.confirm = true;
@@ -191,15 +211,20 @@ function parse_porcelain_status(output) {
 function collect_change_context(options) {
   const cached = Boolean(options?.cached);
   const logger = options?.logger || create_logger({});
+  const paths = Array.isArray(options?.paths)
+    ? options.paths.filter((entry) => typeof entry === "string" && entry.length)
+    : [];
+  const path_args = paths.length ? ["--", ...paths] : [];
+  const diff_path_args = paths.length ? ["--", ...paths] : ["--"];
 
   logger.debug("Reading git status.");
-  const status = run_git(["status", "--short"]);
+  const status = run_git(["status", "--short", ...path_args]);
 
   let stat;
   let diff;
   if (cached) {
     logger.debug("Reading staged git diff stat.");
-    stat = run_git(["diff", "--cached", "--stat"]);
+    stat = run_git(["diff", "--cached", "--stat", ...path_args]);
     logger.debug("Reading staged git diff.");
     diff = run_git([
       "diff",
@@ -207,12 +232,12 @@ function collect_change_context(options) {
       "--find-renames",
       "--find-copies",
       "--no-ext-diff",
-      "--",
+      ...diff_path_args,
     ]);
   } else {
     const base = git_has_head() ? ["HEAD"] : [];
     logger.debug("Reading working tree git diff stat.");
-    stat = run_git(["diff", ...base, "--stat"]);
+    stat = run_git(["diff", ...base, "--stat", ...path_args]);
     logger.debug("Reading working tree git diff.");
     diff = run_git([
       "diff",
@@ -220,7 +245,7 @@ function collect_change_context(options) {
       "--find-renames",
       "--find-copies",
       "--no-ext-diff",
-      "--",
+      ...diff_path_args,
     ]);
   }
 
@@ -452,6 +477,29 @@ async function resolve_commit_plan(change_context, changed_paths, options) {
   }
 }
 
+async function resolve_single_commit_plan(
+  change_context,
+  changed_paths,
+  options,
+) {
+  const resolved_options = options || {};
+  const logger = resolved_options.logger || create_logger({});
+
+  const result = await generate_ai_commit_message(change_context, {
+    logger,
+    invoke_adapter: resolved_options.invoke_adapter,
+    attempts: resolved_options.attempts,
+  });
+
+  return {
+    groups: [{ message: result.message, files: [...changed_paths] }],
+    platform: result.platform,
+    model: result.model,
+    label: result.label,
+    single: true,
+  };
+}
+
 function expand_group_paths(files, expansion) {
   const seen = new Set();
   const expanded = [];
@@ -470,7 +518,11 @@ function expand_group_paths(files, expansion) {
 function log_plan_preview(plan, logger) {
   const total = plan.groups.length;
   if (total === 1) {
-    logger.info("Splitting not recommended; planning a single commit.");
+    if (plan.single) {
+      logger.info("Planning a single commit with an AI-generated message.");
+    } else {
+      logger.info("Splitting not recommended; planning a single commit.");
+    }
   } else {
     logger.info(`Planning ${total} commits.`);
   }
@@ -487,17 +539,161 @@ function log_plan_preview(plan, logger) {
   });
 }
 
-function prompt_yes_no(question) {
-  return new Promise((resolve) => {
-    const rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stderr,
-    });
-    rl.question(question, (answer) => {
-      rl.close();
-      resolve(/^y(es)?$/iu.test((answer || "").trim()));
-    });
+function create_line_reader() {
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stderr,
+    terminal: false,
   });
+
+  const queued_lines = [];
+  const pending_waiters = [];
+  let stream_closed = false;
+
+  rl.on("line", (line) => {
+    const waiter = pending_waiters.shift();
+    if (waiter) {
+      waiter(line);
+    } else {
+      queued_lines.push(line);
+    }
+  });
+  rl.on("close", () => {
+    stream_closed = true;
+    while (pending_waiters.length > 0) {
+      pending_waiters.shift()(null);
+    }
+  });
+
+  return {
+    ask(prompt_text) {
+      if (prompt_text) {
+        process.stderr.write(prompt_text);
+      }
+      if (queued_lines.length > 0) {
+        return Promise.resolve(queued_lines.shift());
+      }
+      if (stream_closed) {
+        return Promise.resolve(null);
+      }
+      return new Promise((resolve) => {
+        pending_waiters.push(resolve);
+      });
+    },
+    close() {
+      rl.close();
+    },
+  };
+}
+
+function build_selection_prompt() {
+  return "\nSelection [Y/n/help]: ";
+}
+
+function build_selection_help(total) {
+  return [
+    "",
+    `Respond for the ${total} planned commit(s):`,
+    "  y (or Enter) accept all",
+    "  y 1 3        accept only commits 1 and 3, regenerate the rest",
+    "  y 2-4 6 8    accept commits 2-4, 6 and 8, regenerate the rest",
+    "  n            reject all and regenerate",
+    "  n 2-4 6 8    reject commits 2-4, 6 and 8, keep the rest, regenerate the rejected",
+    "  help         show this help",
+    "",
+  ].join("\n");
+}
+
+function parse_confirm_selection(input, total) {
+  const raw = (input || "").trim();
+
+  const all_indices = [];
+  for (let index = 1; index <= total; index += 1) {
+    all_indices.push(index);
+  }
+
+  if (!raw) {
+    return { ok: true, verb: "y", accepted: all_indices, rejected: [] };
+  }
+
+  const parts = raw.split(/\s+/u);
+  const head = parts[0].toLowerCase();
+
+  if (head === "help" || head === "h" || head === "?") {
+    return { ok: true, help: true };
+  }
+
+  let verb;
+  if (head === "y" || head === "yes") {
+    verb = "y";
+  } else if (head === "n" || head === "no") {
+    verb = "n";
+  } else {
+    return {
+      ok: false,
+      error: `Unknown response: "${parts[0]}". Start with 'y' to accept or 'n' to reject.`,
+    };
+  }
+
+  const spec_tokens = parts.slice(1);
+  let selected;
+  if (spec_tokens.length === 0) {
+    selected = new Set(all_indices);
+  } else {
+    selected = new Set();
+    for (const token of spec_tokens) {
+      const match = token.match(/^(\d+)(?:-(\d+))?$/u);
+      if (!match) {
+        return {
+          ok: false,
+          error: `Invalid selection token: "${token}". Use numbers like 1 or ranges like 2-4.`,
+        };
+      }
+      const start = Number(match[1]);
+      const end = match[2] !== undefined ? Number(match[2]) : start;
+      const low = Math.min(start, end);
+      const high = Math.max(start, end);
+      if (low < 1 || high > total) {
+        return {
+          ok: false,
+          error: `Selection out of range: "${token}". Valid range is 1-${total}.`,
+        };
+      }
+      for (let index = low; index <= high; index += 1) {
+        selected.add(index);
+      }
+    }
+  }
+
+  let accepted;
+  let rejected;
+  if (verb === "y") {
+    accepted = all_indices.filter((index) => selected.has(index));
+    rejected = all_indices.filter((index) => !selected.has(index));
+  } else {
+    rejected = all_indices.filter((index) => selected.has(index));
+    accepted = all_indices.filter((index) => !selected.has(index));
+  }
+
+  return { ok: true, verb, accepted, rejected };
+}
+
+async function prompt_selection(reader, total, logger) {
+  for (;;) {
+    const answer = await reader.ask(build_selection_prompt());
+    if (answer === null) {
+      return null;
+    }
+    const parsed = parse_confirm_selection(answer, total);
+    if (parsed.help) {
+      process.stderr.write(build_selection_help(total));
+      continue;
+    }
+    if (parsed.ok) {
+      return parsed;
+    }
+    logger.warn(parsed.error);
+  }
 }
 
 function commit_group(group, expansion, total) {
@@ -505,8 +701,106 @@ function commit_group(group, expansion, total) {
     run_git(["commit", "-m", group.message]);
     return;
   }
+  commit_group_paths(group, expansion);
+}
+
+function commit_group_paths(group, expansion) {
   const paths = expand_group_paths(group.files, expansion);
   run_git(["commit", "-m", group.message, "--", ...paths]);
+}
+
+async function resolve_plan_for_paths(change_context, changed_paths, options) {
+  const resolved_options = options || {};
+  if (resolved_options.single) {
+    return resolve_single_commit_plan(
+      change_context,
+      changed_paths,
+      resolved_options,
+    );
+  }
+  return resolve_commit_plan(change_context, changed_paths, resolved_options);
+}
+
+async function run_confirm_loop(context) {
+  const { display_paths, expansion, options, logger } = context;
+  const invoke_adapter = options.invoke_adapter || execute_with_adapter;
+
+  const reader = create_line_reader();
+
+  let remaining = [...display_paths];
+  let committed = 0;
+  let round = 0;
+
+  try {
+    while (remaining.length > 0) {
+      round += 1;
+      if (round > 1) {
+        logger.info(
+          `Regenerating a plan for the ${remaining.length} remaining file(s)...`,
+        );
+      }
+
+      const pathspec = expand_group_paths(remaining, expansion);
+      const change_context = collect_change_context({
+        cached: true,
+        logger,
+        paths: pathspec,
+      });
+
+      const plan = await resolve_plan_for_paths(change_context, remaining, {
+        logger,
+        invoke_adapter,
+        single: options.single,
+      });
+
+      log_plan_preview(plan, logger);
+
+      const total = plan.groups.length;
+      const selection = await prompt_selection(reader, total, logger);
+
+      if (selection === null) {
+        logger.warn(
+          `Input closed; leaving ${remaining.length} file(s) uncommitted.`,
+        );
+        break;
+      }
+
+      for (const index of selection.accepted) {
+        const group = plan.groups[index - 1];
+        commit_group_paths(group, expansion);
+        committed += 1;
+        const subject = group.message.split("\n", 1)[0];
+        logger.info(`Created commit ${committed}: ${subject}`);
+      }
+
+      if (selection.rejected.length === 0) {
+        remaining = [];
+        continue;
+      }
+
+      const next_paths = new Set();
+      for (const index of selection.rejected) {
+        for (const file of plan.groups[index - 1].files) {
+          next_paths.add(file);
+        }
+      }
+      remaining = [...next_paths];
+
+      if (selection.accepted.length === 0) {
+        logger.info(
+          `Rejected all commit(s); regenerating ${remaining.length} file(s).`,
+        );
+      } else {
+        logger.info(
+          `Accepted ${selection.accepted.length} commit(s); regenerating the rejected ${remaining.length} file(s).`,
+        );
+      }
+    }
+  } finally {
+    reader.close();
+  }
+
+  return committed;
 }
 
 async function main(argv) {
@@ -538,14 +832,26 @@ async function main(argv) {
     return;
   }
 
+  if (options.confirm && !options.dry_run) {
+    const committed = await run_confirm_loop({
+      display_paths,
+      expansion,
+      options,
+      logger,
+    });
+    process.stdout.write(`${committed}\n`);
+    return;
+  }
+
   const change_context = collect_change_context({
     cached: !options.dry_run,
     logger,
   });
 
-  const plan = await resolve_commit_plan(change_context, display_paths, {
+  const plan = await resolve_plan_for_paths(change_context, display_paths, {
     logger,
     invoke_adapter: execute_with_adapter,
+    single: options.single,
   });
 
   log_plan_preview(plan, logger);
@@ -569,16 +875,6 @@ async function main(argv) {
     });
     process.stdout.write(`${total}\n`);
     return;
-  }
-
-  if (options.confirm) {
-    const subject = total === 1 ? "this commit" : `these ${total} commits`;
-    const approved = await prompt_yes_no(`Proceed with ${subject}? [y/N] `);
-    if (!approved) {
-      logger.warn("Aborted by user; no commits created.");
-      process.stdout.write("0\n");
-      return;
-    }
   }
 
   let count = 0;
@@ -606,7 +902,9 @@ module.exports = {
   extract_json_object,
   generate_smart_commit_plan,
   parse_argv,
+  parse_confirm_selection,
   parse_porcelain_status,
   parse_smart_commit_plan,
   resolve_commit_plan,
+  resolve_single_commit_plan,
 };
