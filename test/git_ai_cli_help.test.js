@@ -15,8 +15,12 @@ describe("git AI CLI help", () => {
 
     expect(g_result.stdout).toContain("--ai");
     expect(g_result.stdout).toContain("--ai-only");
+    expect(g_result.stdout).toContain("--split");
+    expect(g_result.stdout).toContain("$0 --ai --split");
     expect(ggg_result.stdout).toContain("--ai");
     expect(ggg_result.stdout).toContain("--ai-only");
+    expect(ggg_result.stdout).toContain("--split");
+    expect(ggg_result.stdout).toContain("$0 --ai --split");
   });
 
   it("prints an AI-only preview without creating a commit", async () => {

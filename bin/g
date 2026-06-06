@@ -21,7 +21,7 @@ log_threshold=$LEVEL_INFO
 dry_run=false
 ai_commit_message=false
 ai_only=false
-smart_commit=false
+split_commit=false
 confirm_commit=false
 single_smart=false
 has_staged_changes=false
@@ -53,9 +53,11 @@ Options:
   -d, --dry-run     Print the planned actions without executing them.
   --ai              Generate the commit message from staged changes using AI.
   --ai-only         Generate and print the AI commit message, then exit.
-  --smart           Ask AI whether changes should be split into multiple
-                    commits; commit each group separately, then push once.
-  --confirm         With --smart or --ai, preview the plan and review it
+  --split           With --ai, ask AI whether changes should be split into
+                    multiple commits; commit each group separately, then push
+                    once.
+  --smart           Compatibility alias for --ai --split.
+  --confirm         With --ai or --ai --split, preview the plan and review it
                     interactively before committing. Supports partial
                     accept/reject with regeneration of the rejected commits.
 
@@ -72,14 +74,14 @@ Examples:
   # Preview the AI-generated commit message without committing or pushing
   \$0 --ai-only
 
-  # Split changes into logical commits, then push once
-  \$0 --smart
+  # Use AI to split changes into logical commits, then push once
+  \$0 --ai --split
 
-  # Preview the smart split plan without committing
-  \$0 --smart --dry-run
+  # Preview the AI split plan without committing
+  \$0 --ai --split --dry-run
 
-  # Review the smart split plan; accept, reject, or regenerate commits
-  \$0 --smart --confirm
+  # Review the AI split plan; accept, reject, or regenerate commits
+  \$0 --ai --split --confirm
 
   # Preview actions without committing or pushing
   \$0 --dry-run
@@ -462,8 +464,13 @@ run() {
         ai_only=true
         shift
         ;;
+      --split)
+        split_commit=true
+        shift
+        ;;
       --smart)
-        smart_commit=true
+        ai_commit_message=true
+        split_commit=true
         shift
         ;;
       --confirm)
@@ -502,15 +509,14 @@ run() {
     exit 1
   fi
 
-  if [ "$smart_commit" = true ]; then
-    if [ "$ai_commit_message" = true ] || [ "$ai_only" = true ]; then
-      log_error "--smart cannot be combined with --ai/--ai-only."
-      exit 1
-    fi
-    if [ -n "$commit_message_input" ]; then
-      log_error "--smart cannot be combined with an explicit commit message."
-      exit 1
-    fi
+  if [ "$split_commit" = true ] && [ "$ai_only" = true ]; then
+    log_error "--split cannot be combined with --ai-only."
+    exit 1
+  fi
+
+  if [ "$split_commit" = true ] && [ "$ai_commit_message" = false ]; then
+    log_error "--split requires --ai."
+    exit 1
   fi
 
   if [ "$confirm_commit" = true ] && [ "$ai_only" = true ]; then
@@ -518,18 +524,18 @@ run() {
     exit 1
   fi
 
-  if [ "$confirm_commit" = true ] && [ "$smart_commit" = false ] && [ "$ai_commit_message" = false ]; then
-    log_error "--confirm requires --smart or --ai."
+  if [ "$confirm_commit" = true ] && [ "$ai_commit_message" = false ]; then
+    log_error "--confirm requires --ai."
     exit 1
   fi
 
-  if [ "$confirm_commit" = true ] && [ "$ai_commit_message" = true ] && [ "$smart_commit" = false ]; then
+  if [ "$confirm_commit" = true ] && [ "$ai_commit_message" = true ] && [ "$split_commit" = false ]; then
     single_smart=true
   fi
 
   ensure_dependency git
   ensure_dependency date
-  if [ "$ai_commit_message" = true ] || [ "$ai_only" = true ] || [ "$smart_commit" = true ]; then
+  if [ "$ai_commit_message" = true ] || [ "$ai_only" = true ] || [ "$split_commit" = true ]; then
     ensure_dependency node
   fi
   verify_git_repository
@@ -538,12 +544,12 @@ run() {
     log_error "--ai/--ai-only cannot be used while a merge commit is in progress."
     exit 1
   fi
-  if [ "$smart_commit" = true ] && [ "$merge_in_progress" = true ]; then
-    log_error "--smart cannot be used while a merge commit is in progress."
+  if [ "$split_commit" = true ] && [ "$merge_in_progress" = true ]; then
+    log_error "--ai --split cannot be used while a merge commit is in progress."
     exit 1
   fi
 
-  if [ "$smart_commit" = true ] || [ "$single_smart" = true ]; then
+  if [ "$split_commit" = true ] || [ "$single_smart" = true ]; then
     run_smart_commit
     return 0
   fi
