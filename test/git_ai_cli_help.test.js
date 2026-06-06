@@ -9,18 +9,22 @@ const exec_file = promisify(execFile);
 const repo_root = path.resolve(import.meta.dirname, "..");
 
 describe("git AI CLI help", () => {
-  it("documents --ai on g and ggg", async () => {
+  it("documents --smart on g and ggg", async () => {
     const g_result = await exec_file("bash", ["bin/g", "--help"]);
     const ggg_result = await exec_file("bash", ["bin/ggg", "--help"]);
 
-    expect(g_result.stdout).toContain("--ai");
+    expect(g_result.stdout).toContain("--smart");
     expect(g_result.stdout).toContain("--ai-only");
     expect(g_result.stdout).toContain("--split");
-    expect(g_result.stdout).toContain("$0 --ai --split");
-    expect(ggg_result.stdout).toContain("--ai");
+    expect(g_result.stdout).toContain("$0 --smart");
+    expect(g_result.stdout).toContain("$0 --smart --split");
+    expect(g_result.stdout).not.toMatch(/\n  --ai\s{2,}/);
+    expect(ggg_result.stdout).toContain("--smart");
     expect(ggg_result.stdout).toContain("--ai-only");
     expect(ggg_result.stdout).toContain("--split");
-    expect(ggg_result.stdout).toContain("$0 --ai --split");
+    expect(ggg_result.stdout).toContain("$0 --smart");
+    expect(ggg_result.stdout).toContain("$0 --smart --split");
+    expect(ggg_result.stdout).not.toMatch(/\n  --ai\s{2,}/);
   });
 
   it("prints an AI-only preview without creating a commit", async () => {

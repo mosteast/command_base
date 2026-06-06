@@ -45,12 +45,11 @@ Options:
   --debug           Print verbose debug logs.
   --quiet           Print only warnings and errors.
   -d, --dry-run     Print the planned actions without executing them.
-  --ai              Ask AI to generate the commit message after formatting.
+  --smart           Ask AI to generate the commit message after formatting.
   --ai-only         Format, generate and print the AI commit message, then exit.
-  --split           With --ai, ask AI whether changes should be split into
+  --split           With --smart, ask AI whether changes should be split into
                     multiple commits; commit each group, then push once.
-  --smart           Compatibility alias for --ai --split.
-  --confirm         With --ai or --ai --split, preview the plan and review it
+  --confirm         With --smart or --smart --split, preview the plan and review it
                     interactively before committing. Supports partial
                     accept/reject with regeneration of the rejected commits.
 
@@ -59,19 +58,19 @@ Examples:
   \$0 "Run format before commit"
 
   # Format code, generate the commit message with AI, and push
-  \$0 --ai
+  \$0 --smart
 
   # Format code, review the AI commit message interactively, then push
-  \$0 --ai --confirm
+  \$0 --smart --confirm
 
   # Format code and preview the AI-generated commit message only
   \$0 --ai-only
 
   # Format code, use AI to split changes into logical commits, then push once
-  \$0 --ai --split
+  \$0 --smart --split
 
   # Format code and review the AI split plan; accept, reject, or regenerate
-  \$0 --ai --split --confirm
+  \$0 --smart --split --confirm
 
   # Preview the commands without executing them
   \$0 --dry-run
@@ -195,9 +194,9 @@ run() {
         g_flags+=("--dry-run")
         shift
         ;;
-      --ai)
+      --ai|--smart)
         ai_commit_message=true
-        g_flags+=("--ai")
+        g_flags+=("--smart")
         shift
         ;;
       --ai-only)
@@ -208,12 +207,6 @@ run() {
       --split)
         split_commit=true
         g_flags+=("--split")
-        shift
-        ;;
-      --smart)
-        ai_commit_message=true
-        split_commit=true
-        g_flags+=("--ai" "--split")
         shift
         ;;
       --confirm)
@@ -245,12 +238,12 @@ run() {
   fi
 
   if [ "$ai_commit_message" = true ] && [ "$ai_only" = true ]; then
-    log_error "--ai and --ai-only cannot be combined."
+    log_error "--smart and --ai-only cannot be combined."
     exit 1
   fi
 
   if { [ "$ai_commit_message" = true ] || [ "$ai_only" = true ]; } && [ -n "$commit_message" ]; then
-    log_error "--ai/--ai-only cannot be combined with an explicit commit message."
+    log_error "--smart/--ai-only cannot be combined with an explicit commit message."
     exit 1
   fi
 
@@ -260,7 +253,7 @@ run() {
   fi
 
   if [ "$split_commit" = true ] && [ "$ai_commit_message" = false ]; then
-    log_error "--split requires --ai."
+    log_error "--split requires --smart."
     exit 1
   fi
 
@@ -270,7 +263,7 @@ run() {
   fi
 
   if [ "$confirm_commit" = true ] && [ "$ai_commit_message" = false ]; then
-    log_error "--confirm requires --ai."
+    log_error "--confirm requires --smart."
     exit 1
   fi
 
