@@ -246,6 +246,20 @@ describe("prompt and json helpers", () => {
     expect(prompt).toContain("## changed files");
   });
 
+  it("requires the AI to compare the diff before grouping or writing messages", () => {
+    const prompt = build_smart_commit_prompt(change_context, [
+      "bin/g",
+      "README.md",
+    ]);
+
+    expect(prompt).toContain(
+      "First compare the actual git diff, then decide groups and write messages.",
+    );
+    expect(prompt.indexOf("First compare the actual git diff")).toBeLessThan(
+      prompt.indexOf("## git diff"),
+    );
+  });
+
   it("extracts a JSON object from fenced output", () => {
     const fenced = "```json\n" + valid_plan_json + "\n```";
     expect(JSON.parse(extract_json_object(fenced))).toHaveProperty("groups");

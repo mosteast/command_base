@@ -169,6 +169,11 @@ function build_commit_message_prompt(change_context) {
   return [
     "Write a Git commit message for the staged changes below.",
     "",
+    "Analysis order:",
+    "- First compare the actual staged diff, then infer intent and write the message.",
+    "- Base the message on changed lines and hunks, not only file names or status.",
+    "- Do not include your analysis process in the output.",
+    "",
     "Rules:",
     "- Return plain text only.",
     "- Start with a concise English imperative subject line.",

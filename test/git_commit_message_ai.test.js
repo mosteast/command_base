@@ -85,6 +85,21 @@ Refine AI commit message formatting
     ).toContain("If the changes serve multiple purposes");
   });
 
+  it("requires the AI to compare the staged diff before analyzing intent", () => {
+    const prompt = build_commit_message_prompt({
+      status: "M utility/git_commit_message_ai.js",
+      stat: "utility/git_commit_message_ai.js | 12 +++++++++---",
+      diff: "diff --git a/utility/git_commit_message_ai.js b/utility/git_commit_message_ai.js",
+    });
+
+    expect(prompt).toContain(
+      "First compare the actual staged diff, then infer intent and write the message.",
+    );
+    expect(prompt.indexOf("First compare the actual staged diff")).toBeLessThan(
+      prompt.indexOf("## git diff --cached"),
+    );
+  });
+
   it("keeps the requested default fallback order explicit", () => {
     expect(default_ai_commit_attempts).toEqual([
       {

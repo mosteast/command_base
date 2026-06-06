@@ -265,6 +265,11 @@ function build_smart_commit_prompt(change_context, changed_paths) {
   return [
     "Group the changed files below into one or more Git commits.",
     "",
+    "Analysis order:",
+    "- First compare the actual git diff, then decide groups and write messages.",
+    "- Base grouping and messages on changed lines and hunks, not only file names or status.",
+    "- Do not include your analysis process in the JSON output.",
+    "",
     "Decide whether the changes need to be split:",
     "- Only split when the files address clearly independent concerns",
     "  (for example an unrelated bug fix mixed with a new feature).",
