@@ -20,7 +20,7 @@ log_threshold=$LEVEL_INFO
 dry_run=false
 ai_commit_message=false
 ai_only=false
-split_commit=false
+single_commit=false
 confirm_commit=false
 
 handle_error() {
@@ -45,32 +45,33 @@ Options:
   --debug           Print verbose debug logs.
   --quiet           Print only warnings and errors.
   -d, --dry-run     Print the planned actions without executing them.
-  --smart           Ask AI to generate the commit message after formatting.
+  --smart           Ask AI to generate the commit plan after formatting.
+                    By default, AI may split changes into multiple commits.
   --ai-only         Format, generate and print the AI commit message, then exit.
-  --split           With --smart, ask AI whether changes should be split into
-                    multiple commits; commit each group, then push once.
-  --confirm         With --smart or --smart --split, preview the plan and review it
-                    interactively before committing. Supports partial
-                    accept/reject with regeneration of the rejected commits.
+  --single          With --smart, force a single AI-generated commit instead of
+                    the default split plan.
+  --confirm         With --smart, preview the AI plan and review it
+                    interactively before committing. Supports partial accept/
+                    reject with regeneration of the rejected commits.
 
 Examples:
   # Format code, commit with a custom message, and push
   \$0 "Run format before commit"
 
-  # Format code, generate the commit message with AI, and push
+  # Format code, let AI split changes into logical commits by default, then push
   \$0 --smart
 
-  # Format code, review the AI commit message interactively, then push
+  # Format code, review the default AI plan interactively, then push
   \$0 --smart --confirm
 
   # Format code and preview the AI-generated commit message only
   \$0 --ai-only
 
-  # Format code, use AI to split changes into logical commits, then push once
-  \$0 --smart --split
+  # Format code, force a single AI-generated commit, then push
+  \$0 --smart --single
 
-  # Format code and review the AI split plan; accept, reject, or regenerate
-  \$0 --smart --split --confirm
+  # Format code and review a single AI commit plan before pushing
+  \$0 --smart --single --confirm
 
   # Preview the commands without executing them
   \$0 --dry-run
@@ -204,9 +205,8 @@ run() {
         g_flags+=("--ai-only")
         shift
         ;;
-      --split)
-        split_commit=true
-        g_flags+=("--split")
+      --single)
+        single_commit=true
         shift
         ;;
       --confirm)
@@ -247,13 +247,13 @@ run() {
     exit 1
   fi
 
-  if [ "$split_commit" = true ] && [ "$ai_only" = true ]; then
-    log_error "--split cannot be combined with --ai-only."
+  if [ "$single_commit" = true ] && [ "$ai_only" = true ]; then
+    log_error "--single cannot be combined with --ai-only."
     exit 1
   fi
 
-  if [ "$split_commit" = true ] && [ "$ai_commit_message" = false ]; then
-    log_error "--split requires --smart."
+  if [ "$single_commit" = true ] && [ "$ai_commit_message" = false ]; then
+    log_error "--single requires --smart."
     exit 1
   fi
 
@@ -265,6 +265,10 @@ run() {
   if [ "$confirm_commit" = true ] && [ "$ai_commit_message" = false ]; then
     log_error "--confirm requires --smart."
     exit 1
+  fi
+
+  if [ "$ai_commit_message" = true ] && [ "$single_commit" = false ]; then
+    g_flags+=("--split")
   fi
 
   ensure_dependency npm

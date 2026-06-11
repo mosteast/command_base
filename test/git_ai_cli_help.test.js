@@ -21,9 +21,10 @@ describe("git AI CLI help", () => {
     expect(g_result.stdout).not.toMatch(/\n  --ai\s{2,}/);
     expect(ggg_result.stdout).toContain("--smart");
     expect(ggg_result.stdout).toContain("--ai-only");
-    expect(ggg_result.stdout).toContain("--split");
+    expect(ggg_result.stdout).toContain("--single");
     expect(ggg_result.stdout).toContain("$0 --smart");
-    expect(ggg_result.stdout).toContain("$0 --smart --split");
+    expect(ggg_result.stdout).toContain("$0 --smart --single");
+    expect(ggg_result.stdout).not.toContain("$0 --smart --split");
     expect(ggg_result.stdout).not.toMatch(/\n  --ai\s{2,}/);
   });
 

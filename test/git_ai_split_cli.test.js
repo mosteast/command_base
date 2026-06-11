@@ -132,7 +132,7 @@ describe("git AI split CLI", () => {
     }
   });
 
-  it("forwards ggg --smart to g after formatting", async () => {
+  it("forwards ggg --smart to g with split enabled by default", async () => {
     const tmp_dir = await create_git_repo();
     const fake_bin_dir = await mkdtemp(
       path.join(os.tmpdir(), "command-base-fake-g-"),
@@ -165,14 +165,14 @@ describe("git AI split CLI", () => {
       });
 
       const captured_args = await readFile(captured_args_path, "utf8");
-      expect(captured_args.trim().split("\n")).toEqual(["--smart"]);
+      expect(captured_args.trim().split("\n")).toEqual(["--smart", "--split"]);
     } finally {
       await rm(tmp_dir, { recursive: true, force: true });
       await rm(fake_bin_dir, { recursive: true, force: true });
     }
   });
 
-  it("forwards ggg --smart --split to g after formatting", async () => {
+  it("forwards ggg --smart --single to g without split mode", async () => {
     const tmp_dir = await create_git_repo();
     const fake_bin_dir = await mkdtemp(
       path.join(os.tmpdir(), "command-base-fake-g-"),
@@ -197,7 +197,7 @@ describe("git AI split CLI", () => {
 
       await exec_file(
         "bash",
-        [path.join(repo_root, "bin/ggg"), "--smart", "--split"],
+        [path.join(repo_root, "bin/ggg"), "--smart", "--single"],
         {
           cwd: tmp_dir,
           env: {
@@ -209,11 +209,21 @@ describe("git AI split CLI", () => {
       );
 
       const captured_args = await readFile(captured_args_path, "utf8");
-      expect(captured_args.trim().split("\n")).toEqual(["--smart", "--split"]);
+      expect(captured_args.trim().split("\n")).toEqual(["--smart"]);
     } finally {
       await rm(tmp_dir, { recursive: true, force: true });
       await rm(fake_bin_dir, { recursive: true, force: true });
     }
+  });
+
+  it("requires --smart when --single is used with ggg", async () => {
+    const result = await exec_file_status("bash", [
+      path.join(repo_root, "bin/ggg"),
+      "--single",
+    ]);
+
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain("--single requires --smart");
   });
 
   it("requires --smart when --split is used", async () => {
