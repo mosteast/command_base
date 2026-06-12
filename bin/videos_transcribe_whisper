@@ -75,7 +75,7 @@ function spawn_command(command_path, command_args, spawn_options = {}) {
       reject(error);
     });
 
-    child.on("exit", (code, signal) => {
+    child.on("close", (code, signal) => {
       if (code === 0) {
         resolve();
         return;
@@ -498,5 +498,6 @@ module.exports = {
   parse_number,
   parse_repeatable,
   run_with_concurrency,
+  spawn_command,
   should_generate_txt_sidecars,
 };
