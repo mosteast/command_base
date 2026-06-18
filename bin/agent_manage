@@ -8,16 +8,16 @@ const yargs = require("yargs");
 
 const SCRIPT_NAME = "agent_manage";
 const VERSION = "1.0.1";
-const PROFILE_BASE = path.join(
-  __dirname,
-  "..",
-  "secret",
-  "agent_manage",
-  "profile",
+const DEFAULT_PROFILE_FILES = ["auth.json", "config.toml"];
+const PROFILE_BASE = path.resolve(
+  process.env.AGENT_MANAGE_PROFILE_BASE ||
+    path.join(__dirname, "..", "secret", "agent_manage", "profile"),
 );
 
 const AGENT_TARGETS = {
-  codex: path.join(os.homedir(), ".codex"),
+  codex: path.resolve(
+    process.env.AGENT_MANAGE_CODEX_TARGET || path.join(os.homedir(), ".codex"),
+  ),
 };
 
 // Global flags set by yargs middleware
@@ -35,6 +35,24 @@ function log(msg) {
 
 function get_profile_dir(agent) {
   return path.join(PROFILE_BASE, agent);
+}
+
+function get_agent_target(agent) {
+  return AGENT_TARGETS[agent];
+}
+
+function get_known_agents() {
+  return Object.keys(AGENT_TARGETS);
+}
+
+function exit_unknown_agent(agent) {
+  console.error(chalk.red(`${SCRIPT_NAME}: unknown agent "${agent}"`));
+  console.error(
+    chalk.dim(
+      `  available agents: ${get_known_agents().join(", ") || "(none)"}`,
+    ),
+  );
+  process.exit(1);
 }
 
 function get_current_profile_file(agent) {
@@ -103,6 +121,51 @@ function get_profile_files(profile_dir) {
   return fs.readdirSync(profile_dir).filter((f) => !f.startsWith("."));
 }
 
+function get_agent_profile_files(agent, profiles, current_profile) {
+  debug_log(`info: resolving profile files for agent=${agent}`);
+
+  const current_profile_dir = current_profile
+    ? path.join(get_profile_dir(agent), current_profile)
+    : null;
+  if (current_profile_dir) {
+    debug_log(`info: checking current profile files in ${current_profile_dir}`);
+    const current_files = get_profile_files(current_profile_dir);
+    if (current_files.length) {
+      return current_files.sort();
+    }
+  }
+
+  const file_set = new Set();
+  for (const profile_name of profiles) {
+    const profile_dir = path.join(get_profile_dir(agent), profile_name);
+    debug_log(`info: checking profile files in ${profile_dir}`);
+    for (const file_name of get_profile_files(profile_dir)) {
+      file_set.add(file_name);
+    }
+  }
+
+  if (file_set.size) {
+    return Array.from(file_set).sort();
+  }
+
+  return [...DEFAULT_PROFILE_FILES];
+}
+
+function sort_profiles_with_current_first(profiles, current_profile) {
+  if (!current_profile) {
+    return profiles;
+  }
+
+  const other_profiles = profiles.filter(
+    (profile) => profile !== current_profile,
+  );
+  if (other_profiles.length === profiles.length) {
+    return profiles;
+  }
+
+  return [current_profile, ...other_profiles];
+}
+
 function switch_profile(agent, profile_name) {
   debug_log(`switch: agent=${agent}, profile=${profile_name}`);
 
@@ -120,11 +183,8 @@ function switch_profile(agent, profile_name) {
     process.exit(1);
   }
 
-  const target = AGENT_TARGETS[agent];
-  if (!target) {
-    console.error(chalk.red(`${SCRIPT_NAME}: unknown agent "${agent}"`));
-    process.exit(1);
-  }
+  const target = get_agent_target(agent);
+  if (!target) exit_unknown_agent(agent);
 
   debug_log(`switch: target dir ${target}`);
 
@@ -154,11 +214,8 @@ function switch_profile(agent, profile_name) {
 function cmd_save(agent, profile_name) {
   debug_log(`save: agent=${agent}, profile=${profile_name}`);
 
-  const target = AGENT_TARGETS[agent];
-  if (!target) {
-    console.error(chalk.red(`${SCRIPT_NAME}: unknown agent "${agent}"`));
-    process.exit(1);
-  }
+  const target = get_agent_target(agent);
+  if (!target) exit_unknown_agent(agent);
 
   debug_log(`save: target dir ${target}`);
 
@@ -178,7 +235,7 @@ function cmd_save(agent, profile_name) {
       path.join(get_profile_dir(agent), existing[0]),
     );
   } else {
-    files_to_save = ["auth.json", "config.toml"];
+    files_to_save = [...DEFAULT_PROFILE_FILES];
   }
 
   debug_log(`save: files to save: ${files_to_save.join(", ")}`);
@@ -229,11 +286,8 @@ function cmd_save(agent, profile_name) {
 function cmd_diff(agent, profile_name) {
   debug_log(`diff: agent=${agent}, profile=${profile_name}`);
 
-  const target = AGENT_TARGETS[agent];
-  if (!target) {
-    console.error(chalk.red(`${SCRIPT_NAME}: unknown agent "${agent}"`));
-    process.exit(1);
-  }
+  const target = get_agent_target(agent);
+  if (!target) exit_unknown_agent(agent);
 
   const profile_dir = path.join(get_profile_dir(agent), profile_name);
   debug_log(`diff: checking profile dir ${profile_dir}`);
@@ -293,26 +347,54 @@ function cmd_diff(agent, profile_name) {
   log("");
 }
 
-function show_info(agent) {
+function show_single_agent_info(agent) {
   debug_log(`info: agent=${agent}`);
 
-  const current = read_current_profile(agent);
-  const profiles = list_profiles(agent);
-  const target = AGENT_TARGETS[agent];
+  const target = get_agent_target(agent);
+  if (!target) exit_unknown_agent(agent);
 
-  log(chalk.bold(`\n${agent} profile info:`));
+  const current = read_current_profile(agent);
+  const profiles = sort_profiles_with_current_first(
+    list_profiles(agent),
+    current,
+  );
+  const files = get_agent_profile_files(agent, profiles, current);
+  const target_exists = fs.existsSync(target);
+
+  log(chalk.bold(`\n${agent}:`));
   log(`  target dir: ${target}`);
+  log(
+    `  target status: ${target_exists ? chalk.green("present") : chalk.yellow("missing")}`,
+  );
   log(
     `  current profile: ${current ? chalk.green(current) : chalk.yellow("(none set)")}`,
   );
   log(
     `  available profiles: ${profiles.length ? profiles.join(", ") : chalk.yellow("(none)")}`,
   );
-
-  if (!fs.existsSync(target)) {
-    log(`  ${chalk.yellow("target directory does not exist")}`);
+  log("  live file status:");
+  for (const file_name of files) {
+    const target_file = path.join(target, file_name);
+    debug_log(`info: checking live file ${target_file}`);
+    const file_status = fs.existsSync(target_file)
+      ? chalk.green("present")
+      : chalk.yellow("missing");
+    log(`    ${file_name}: ${file_status}`);
   }
   log("");
+}
+
+function show_info(agent) {
+  if (agent) {
+    show_single_agent_info(agent);
+    return;
+  }
+
+  const known_agents = get_known_agents();
+  debug_log(`info: showing all agents: ${known_agents.join(", ") || "(none)"}`);
+  for (const agent_name of known_agents) {
+    show_single_agent_info(agent_name);
+  }
 }
 
 function cmd_list(agent) {
@@ -425,15 +507,14 @@ yargs
   )
   .command(
     "info [agent]",
-    "show current profile info for an agent",
+    "show current agent status for one agent or all agents",
     (y) => {
       y.positional("agent", {
         describe: "agent name (e.g. codex)",
         type: "string",
-        default: "codex",
       });
-      y.example("$0 info", "# show profile info for the default agent (codex)");
-      y.example("$0 info codex", "# show profile info for codex");
+      y.example("$0 info", "# show current status for all supported agents");
+      y.example("$0 info codex", "# show current status for codex");
     },
     (argv) => show_info(argv.agent),
   )
