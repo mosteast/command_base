@@ -106,7 +106,12 @@ describe("agent_manage info", () => {
 
       expect(result.exit_code).toBe(0);
       expect(result.stdout).toContain("codex:");
-      expect(result.stdout).toContain(`current profile: ${fixture.current_profile_name}`);
+      expect(result.stdout).toContain(
+        `current profile: ${fixture.current_profile_name}`,
+      );
+      expect(result.stdout.indexOf("current profile:")).toBeLessThan(
+        result.stdout.indexOf("target dir:"),
+      );
       expect(result.stdout).toContain("available profiles: work, backup");
       expect(result.stdout).toContain("target status: present");
       expect(result.stdout).toContain("auth.json: present");
@@ -114,6 +119,26 @@ describe("agent_manage info", () => {
       expect(result.stdout).not.toContain(fixture.secret_auth_token);
       expect(result.stdout).not.toContain(fixture.secret_config_key);
       expect(result.stdout).not.toContain("live-secret-auth-token");
+    } finally {
+      await fs.remove(fixture.temp_root);
+    }
+  });
+
+  it("lists current profile first in list output", async () => {
+    const fixture = await create_agent_fixture();
+
+    try {
+      const result = await run_cli(["list", "codex"], {
+        env: {
+          AGENT_MANAGE_CODEX_TARGET: fixture.codex_target_dir,
+          AGENT_MANAGE_PROFILE_BASE: fixture.profile_base,
+        },
+      });
+
+      expect(result.exit_code).toBe(0);
+      expect(result.stdout.indexOf("work")).toBeLessThan(
+        result.stdout.indexOf("backup"),
+      );
     } finally {
       await fs.remove(fixture.temp_root);
     }
@@ -133,7 +158,9 @@ describe("agent_manage info", () => {
       expect(result.exit_code).toBe(0);
       expect(result.stdout).toContain("codex:");
       expect(result.stdout).not.toContain("codex agent info:");
-      expect(result.stdout).toContain(`target dir: ${fixture.codex_target_dir}`);
+      expect(result.stdout).toContain(
+        `target dir: ${fixture.codex_target_dir}`,
+      );
       expect(result.stdout).toContain("available profiles: work, backup");
       expect(result.stdout).toContain("auth.json: present");
       expect(result.stdout).toContain("config.toml: missing");

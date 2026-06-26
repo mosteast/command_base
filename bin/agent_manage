@@ -178,7 +178,9 @@ function switch_profile(agent, profile_name) {
       ),
     );
     console.error(
-      chalk.dim(`  available: ${list_profiles(agent).join(", ") || "(none)"}`),
+      chalk.dim(
+        `  available: ${sort_profiles_with_current_first(list_profiles(agent), read_current_profile(agent)).join(", ") || "(none)"}`,
+      ),
     );
     process.exit(1);
   }
@@ -362,12 +364,12 @@ function show_single_agent_info(agent) {
   const target_exists = fs.existsSync(target);
 
   log(chalk.bold(`\n${agent}:`));
+  log(
+    `  current profile: ${current ? chalk.green(current) : chalk.yellow("(none set)")}`,
+  );
   log(`  target dir: ${target}`);
   log(
     `  target status: ${target_exists ? chalk.green("present") : chalk.yellow("missing")}`,
-  );
-  log(
-    `  current profile: ${current ? chalk.green(current) : chalk.yellow("(none set)")}`,
   );
   log(
     `  available profiles: ${profiles.length ? profiles.join(", ") : chalk.yellow("(none)")}`,
@@ -400,8 +402,11 @@ function show_info(agent) {
 function cmd_list(agent) {
   debug_log(`list: agent=${agent}`);
 
-  const profiles = list_profiles(agent);
   const current = read_current_profile(agent);
+  const profiles = sort_profiles_with_current_first(
+    list_profiles(agent),
+    current,
+  );
   log(chalk.bold(`\n${agent} profiles:`));
   for (const p of profiles) {
     const marker = p === current ? chalk.green(" *") : "  ";
