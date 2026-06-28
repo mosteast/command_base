@@ -162,6 +162,50 @@ exit ${exit_code}
   return { bin_dir };
 }
 
+async function create_youtube_format_fallback_fake_yt_dlp_bin(temp_root) {
+  const bin_dir = path.join(temp_root, "fake_bin_youtube_format_fallback");
+  const script_path = path.join(bin_dir, "yt-dlp");
+
+  await fs.mkdir(bin_dir, { recursive: true });
+  await fs.writeFile(
+    script_path,
+    `#!/usr/bin/env bash
+set -u
+
+log_file="\${FAKE_YT_DLP_LOG:?}"
+printf '%s\\n' "$*" >> "$log_file"
+
+if [[ "$*" == *"--cookies-from-browser"* ]] || [[ "$*" == *"--cookies "* ]]; then
+  printf '%s\\n' "Extracting cookies from chrome"
+  printf '%s\\n' "Extracted 3402 cookies from chrome"
+fi
+
+if [[ "$*" == *"youtube:player_client=android"* ]] && [[ "$*" != *"--cookies-from-browser"* ]] && [[ "$*" != *"--cookies "* ]]; then
+  if [[ "$*" == *"--skip-download"* ]]; then
+    printf '%s\\n' "[info] Writing playlist metadata as JSON to: /tmp/example.info.json"
+  else
+    printf '%s\\n' "[download] Finished downloading playlist: Example Playlist"
+  fi
+  exit 0
+fi
+
+printf '%s\\n' "[youtube:tab] Extracting URL: https://www.youtube.com/playlist?list=PLexample"
+printf '%s\\n' "[youtube:tab] Playlist Example Playlist: Downloading 1 items of 1"
+printf '%s\\n' "[download] Downloading item 1 of 1"
+printf '%s\\n' "[youtube] [jsc:deno] Solving JS challenges using deno"
+printf '%s\\n' "WARNING: [youtube] [jsc] Remote components challenge solver script (deno) and NPM package (deno) were skipped. These may be required to solve JS challenges."
+printf '%s\\n' "WARNING: [youtube] abc123: n challenge solving failed: Some formats may be missing."
+printf '%s\\n' "WARNING: Only images are available for download. use --list-formats to see them"
+printf '%s\\n' "ERROR: [youtube] abc123: Requested format is not available. Use --list-formats for a list of available formats"
+exit 1
+`,
+    "utf8",
+  );
+  await fs.chmod(script_path, 0o755);
+
+  return { bin_dir };
+}
+
 async function create_channel_library_layout_fake_yt_dlp_bin(temp_root) {
   const bin_dir = path.join(temp_root, "fake_bin_channel_library");
   const script_path = path.join(bin_dir, "yt-dlp");
@@ -861,6 +905,129 @@ describe("xsave_yt_dlp youtube auth fallback", () => {
       expect(
         invocation_lines.some((line) => line.includes("--skip-download")),
       ).toBe(false);
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("xsave_yt_dlp youtube format fallback", () => {
+  it("retries playlist metadata export without cookies when youtube only exposes image formats", async () => {
+    const temp_root = await create_temp_dir();
+    const output_dir = path.join(temp_root, "output");
+    const fake_yt_dlp_log = path.join(temp_root, "fake_yt_dlp.log");
+
+    await fs.mkdir(output_dir, { recursive: true });
+    await fs.writeFile(fake_yt_dlp_log, "", "utf8");
+
+    try {
+      const fake_yt_dlp =
+        await create_youtube_format_fallback_fake_yt_dlp_bin(temp_root);
+
+      const result = await run_cli(
+        [
+          "--debug",
+          "--retry-count",
+          "3",
+          "--no-danmaku",
+          "--list",
+          "https://www.youtube.com/playlist?list=PLexample",
+          "--output",
+          output_dir,
+        ],
+        {
+          env: build_fake_yt_dlp_env(temp_root, fake_yt_dlp, fake_yt_dlp_log),
+        },
+      );
+
+      const stdout_text = strip_ansi(result.stdout);
+      const invocation_lines = (await fs.readFile(fake_yt_dlp_log, "utf8"))
+        .split(/\r?\n/)
+        .filter(Boolean);
+
+      const primary_download_calls = invocation_lines.filter(
+        (line) =>
+          !line.includes("--skip-download") &&
+          line.includes("--cookies-from-browser chrome") &&
+          line.includes("youtube:player_client=web,web_safari,web_embedded"),
+      );
+      const fallback_download_calls = invocation_lines.filter(
+        (line) =>
+          !line.includes("--skip-download") &&
+          !line.includes("--cookies-from-browser") &&
+          !line.includes("--cookies ") &&
+          line.includes("youtube:player_client=android"),
+      );
+      const primary_metadata_calls = invocation_lines.filter(
+        (line) =>
+          line.includes("--skip-download") &&
+          line.includes("--cookies-from-browser chrome") &&
+          line.includes("youtube:player_client=web,web_safari,web_embedded"),
+      );
+      const fallback_metadata_calls = invocation_lines.filter(
+        (line) =>
+          line.includes("--skip-download") &&
+          !line.includes("--cookies-from-browser") &&
+          !line.includes("--cookies ") &&
+          line.includes("youtube:player_client=android"),
+      );
+
+      expect(result.exit_code).toBe(0);
+      expect(stdout_text).toContain(
+        "Primary download had format errors; retrying without cookies using 'android'.",
+      );
+      expect(stdout_text).toContain(
+        "Primary metadata export had format errors; retrying without cookies using 'android'.",
+      );
+      expect(primary_download_calls).toHaveLength(1);
+      expect(fallback_download_calls).toHaveLength(1);
+      expect(primary_metadata_calls).toHaveLength(1);
+      expect(fallback_metadata_calls).toHaveLength(1);
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("xsave_yt_dlp yt-dlp exec template", () => {
+  it("uses a shell-safe filepath placeholder for ytdl cleanup", async () => {
+    const temp_root = await create_temp_dir();
+    const output_dir = path.join(temp_root, "output");
+    const fake_yt_dlp_log = path.join(temp_root, "fake_yt_dlp.log");
+
+    await fs.mkdir(output_dir, { recursive: true });
+    await fs.writeFile(fake_yt_dlp_log, "", "utf8");
+
+    try {
+      const fake_yt_dlp =
+        await create_channel_library_layout_fake_yt_dlp_bin(temp_root);
+
+      const result = await run_cli(
+        [
+          "--debug",
+          "--retry-count",
+          "1",
+          "--no-danmaku",
+          "--list",
+          "https://www.youtube.com/playlist?list=PLexample",
+          "--output",
+          output_dir,
+        ],
+        {
+          env: build_fake_yt_dlp_env(temp_root, fake_yt_dlp, fake_yt_dlp_log),
+        },
+      );
+
+      const invocation_lines = (await fs.readFile(fake_yt_dlp_log, "utf8"))
+        .split(/\r?\n/)
+        .filter(Boolean);
+      const download_call = invocation_lines.find(
+        (line) => !line.includes("--skip-download"),
+      );
+
+      expect(result.exit_code).toBe(0);
+      expect(download_call).toContain("%(filepath)q.ytdl");
+      expect(download_call).not.toContain("%(filepath)s.ytdl");
     } finally {
       await fs.rm(temp_root, { recursive: true, force: true });
     }

@@ -39,6 +39,7 @@ youtube_cookie_file_provided=false
 script_version="1.0.9"
 yt_dlp_color_policy="always"
 yt_dlp_color_opts=(--color "$yt_dlp_color_policy")
+yt_dlp_after_move_cleanup_exec='after_move:rm -f -- %(filepath)q.ytdl'
 default_video_subtitle_langs="en,en-US,zh-Hans,zh-Hant,zh-CN,zh"
 default_playlist_subtitle_langs="en,en-US,en-GB,zh-Hans,zh-Hant,zh-CN,zh"
 danmaku_subtitle_lang="danmaku"
@@ -1280,7 +1281,7 @@ run_video_yt_dlp() {
         --extractor-retries 5
         --file-access-retries 5
         --fragment-retries 5
-        --exec after_move:"rm -f -- \"%(filepath)s.ytdl\""
+        --exec "$yt_dlp_after_move_cleanup_exec"
     )
 
     if [ "$insecure_ssl" = true ]; then
@@ -1438,7 +1439,7 @@ run_video_danmaku_yt_dlp() {
         --extractor-retries 5
         --file-access-retries 5
         --fragment-retries 5
-        --exec after_move:"rm -f -- \"%(filepath)s.ytdl\""
+        --exec "$yt_dlp_after_move_cleanup_exec"
     )
 
     case "$cookie_mode" in
@@ -1510,7 +1511,7 @@ run_channel_danmaku_yt_dlp() {
         --extractor-retries 5
         --file-access-retries 5
         --fragment-retries 5
-        --exec after_move:"rm -f -- \"%(filepath)s.ytdl\""
+        --exec "$yt_dlp_after_move_cleanup_exec"
     )
 
     case "$cookie_mode" in
@@ -1578,7 +1579,7 @@ run_playlist_danmaku_yt_dlp() {
         --extractor-retries 5
         --file-access-retries 5
         --fragment-retries 5
-        --exec after_move:"rm -f -- \"%(filepath)s.ytdl\""
+        --exec "$yt_dlp_after_move_cleanup_exec"
     )
 
     case "$cookie_mode" in
@@ -1941,6 +1942,13 @@ download_video_metadata_with_fallback() {
         else
             log_warn "Fallback client '${cookie_fallback_label}' failed with cookies; retrying metadata export without cookies."
         fi
+        log_step "Fallback metadata export without cookies using ${fallback_player_client}"
+        run_video_metadata_yt_dlp "$url" "$archive_file" "$output_dir" none "$fallback_player_client"
+        return $?
+    fi
+
+    if [ "$platform" = "youtube" ] && [ -n "$fallback_player_client" ] && [ "$yt_dlp_last_format_error" = true ]; then
+        log_warn "Primary metadata export had format errors; retrying without cookies using '${fallback_player_client}'."
         log_step "Fallback metadata export without cookies using ${fallback_player_client}"
         run_video_metadata_yt_dlp "$url" "$archive_file" "$output_dir" none "$fallback_player_client"
         return $?
@@ -2597,7 +2605,7 @@ if [ -n "$CHANNEL_URL" ]; then
         --extractor-retries 5
         --file-access-retries 5
         --fragment-retries 5
-        --exec after_move:"rm -f -- \"%(filepath)s.ytdl\""
+        --exec "$yt_dlp_after_move_cleanup_exec"
         "${match_filter_opts[@]}"
         --add-header "Accept:text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
         --add-header "Accept-Language:en-us,en;q=0.5"
@@ -2735,6 +2743,7 @@ if [ -n "$CHANNEL_URL" ]; then
             "$CHANNEL_URL"
         channel_metadata_status=$?
         channel_metadata_player_error=$yt_dlp_last_player_error
+        channel_metadata_format_error=$yt_dlp_last_format_error
         channel_metadata_ssl_error=$yt_dlp_last_ssl_error
         channel_metadata_auth_error=$yt_dlp_last_auth_error
 
@@ -2784,6 +2793,17 @@ if [ -n "$CHANNEL_URL" ]; then
                 fallback_status=$?
                 channel_metadata_status=$fallback_status
             fi
+        elif [ "$channel_platform" = "youtube" ] && [ -n "$fallback_player_client" ] && [ "$channel_metadata_format_error" = true ]; then
+            log_warn "Primary metadata export had format errors; retrying without cookies using '${fallback_player_client}'."
+            log_step "Channel metadata fallback without cookies using ${fallback_player_client}"
+            retry_command "Channel metadata fallback without cookies: ${CHANNEL_URL}" run_yt_dlp_with_log_capture yt-dlp \
+                "${channel_metadata_base_args[@]}" \
+                "${channel_nocookie_fallback_extractor_opts[@]}" \
+                "${channel_referer_opts[@]}" \
+                "${channel_tail_args[@]}" \
+                "$CHANNEL_URL"
+            fallback_status=$?
+            channel_metadata_status=$fallback_status
         fi
 
         finalize_yt_dlp_capture_status "Channel metadata export: ${CHANNEL_URL}" "$channel_metadata_status"
@@ -2949,7 +2969,7 @@ elif [ -n "$PLAYLIST_URL" ]; then
         --extractor-retries 5
         --file-access-retries 5
         --fragment-retries 5
-        --exec after_move:"rm -f -- \"%(filepath)s.ytdl\""
+        --exec "$yt_dlp_after_move_cleanup_exec"
         "${match_filter_opts[@]}"
         --add-header "Accept:text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
         --add-header "Accept-Language:en-us,en;q=0.5"
@@ -3083,6 +3103,7 @@ elif [ -n "$PLAYLIST_URL" ]; then
             "$PLAYLIST_URL"
         playlist_metadata_status=$?
         playlist_metadata_player_error=$yt_dlp_last_player_error
+        playlist_metadata_format_error=$yt_dlp_last_format_error
         playlist_metadata_ssl_error=$yt_dlp_last_ssl_error
         playlist_metadata_auth_error=$yt_dlp_last_auth_error
 
@@ -3140,6 +3161,20 @@ elif [ -n "$PLAYLIST_URL" ]; then
                 fi
                 playlist_metadata_status=$fallback_status
             fi
+        elif [ "$playlist_platform" = "youtube" ] && [ -n "$fallback_player_client" ] && [ "$playlist_metadata_format_error" = true ]; then
+            log_warn "Primary metadata export had format errors; retrying without cookies using '${fallback_player_client}'."
+            log_step "Playlist metadata fallback without cookies using ${fallback_player_client}"
+            retry_command "Playlist metadata fallback without cookies: ${PLAYLIST_URL}" run_yt_dlp_with_log_capture yt-dlp \
+                "${playlist_metadata_base_args[@]}" \
+                "${playlist_nocookie_fallback_extractor_opts[@]}" \
+                "${playlist_tail_args[@]}" \
+                "$PLAYLIST_URL"
+            fallback_status=$?
+            if [ "$fallback_status" -eq 0 ]; then
+                playlist_manifest_cookie_mode="none"
+                playlist_manifest_extractor_opts=("${playlist_nocookie_fallback_extractor_opts[@]}")
+            fi
+            playlist_metadata_status=$fallback_status
         fi
 
         finalize_yt_dlp_capture_status "Playlist metadata export: ${PLAYLIST_URL}" "$playlist_metadata_status"
