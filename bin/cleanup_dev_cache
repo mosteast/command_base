@@ -1,0 +1,918 @@
+#!/bin/bash
+set -euo pipefail
+
+command_name=$(basename "$0")
+script_version="1.0.0"
+
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+repo_root=$(cd "${script_dir}/.." && pwd)
+fallback_node_project_root=$(cd "${repo_root}/.." && pwd)
+trash_helper="${repo_root}/lib/file/trash.js"
+node_bin="${NODE_BIN:-node}"
+
+if [ "${FORCE_COLOR:-}" = "0" ]; then
+  color_green=""
+  color_yellow=""
+  color_blue=""
+  color_red=""
+  color_reset=""
+else
+  color_green=$'\033[32m'
+  color_yellow=$'\033[33m'
+  color_blue=$'\033[34m'
+  color_red=$'\033[31m'
+  color_reset=$'\033[0m'
+fi
+
+level_error=0
+level_warn=1
+level_info=2
+level_debug=3
+
+log_threshold=$level_info
+
+subcommand="report"
+debug_mode=false
+quiet_mode=false
+dry_run=false
+yes=false
+action="trash"
+default_profiles_used=false
+
+builtin_profiles=(
+  "xcode"
+  "simulator"
+  "chrome_clone"
+  "temp_cache"
+)
+
+selected_profiles=()
+custom_paths=()
+custom_globs=()
+
+resolved_paths=()
+resolved_primary_sources=()
+resolved_source_details=()
+resolved_sizes=()
+total_size_bytes=0
+
+handle_error() {
+  local exit_code=$?
+  if [ "$exit_code" -ne 0 ]; then
+    log_error "Execution failed with exit code ${exit_code}."
+  fi
+  exit "$exit_code"
+}
+trap handle_error ERR
+
+print_version() {
+  echo "${script_version}"
+}
+
+usage() {
+  cat <<EOF
+${command_name} - report and clean common macOS developer cache directories
+
+Usage:
+  \$0 [report] [options]
+  \$0 clean [options]
+
+Description:
+  Report or clean common macOS developer cache directories from built-in profiles,
+  explicit paths, or glob patterns. When no subcommand is provided, \`report\` is
+  used by default. The \`clean\` subcommand defaults to moving directories to Trash.
+
+Options:
+  -h, --help                     Show this help message and exit.
+  -v, --version                  Show the version number and exit.
+  --debug                        Print verbose debug logs (default: false).
+  --quiet                        Print only warnings and errors (default: false).
+  -d, --dry-run                  Print planned actions without executing them (default: false).
+  --no-dry-run                   Explicitly disable dry-run mode (default: false).
+  --yes                          Skip confirmation prompts (default: false).
+  --action trash|delete          Cleanup mode for \`clean\` (default: trash).
+  --profile NAME                 Add a built-in profile. Repeatable.
+                                 Available: xcode, simulator, chrome_clone, temp_cache
+  --path DIRECTORY               Add one explicit directory. Repeatable.
+  --glob PATTERN                 Add one glob pattern. Repeatable.
+
+Examples:
+  # Report all built-in developer cache targets
+  \$0
+
+  # Report Xcode and simulator cache sizes
+  \$0 report --profile xcode --profile simulator
+
+  # Preview moving Chrome clone directories to Trash
+  \$0 clean --profile chrome_clone --dry-run --yes
+
+  # Clean temp caches plus one explicit directory
+  \$0 clean --profile temp_cache --path ~/Library/Developer/Xcode/DerivedData --yes
+
+  # Report custom matches from a glob
+  \$0 report --glob '/private/var/folders/*/*/*/X/com.google.Chrome.code_sign_clone'
+EOF
+}
+
+log_emit() {
+  local level=$1
+  local color=$2
+  local label=$3
+  shift 3
+  local message="$*"
+
+  if [ "$log_threshold" -lt "$level" ]; then
+    return 0
+  fi
+
+  if [ "$level" -le "$level_warn" ]; then
+    >&2 printf "%b[%s]%b %s\n" "$color" "$label" "$color_reset" "$message"
+  elif [ "$level" -eq "$level_info" ]; then
+    printf "%s\n" "$message"
+  else
+    printf "%b[%s]%b %s\n" "$color" "$label" "$color_reset" "$message"
+  fi
+}
+
+log_error() {
+  log_emit "$level_error" "$color_red" "ERROR" "$*"
+}
+
+log_warn() {
+  log_emit "$level_warn" "$color_yellow" "WARN" "$*"
+}
+
+log_info() {
+  log_emit "$level_info" "$color_green" "INFO" "$*"
+}
+
+log_debug() {
+  log_emit "$level_debug" "$color_blue" "DEBUG" "$*"
+}
+
+die() {
+  log_error "$*"
+  exit 1
+}
+
+apply_log_threshold() {
+  if [ "$quiet_mode" = true ]; then
+    log_threshold=$level_warn
+  elif [ "$debug_mode" = true ]; then
+    log_threshold=$level_debug
+  else
+    log_threshold=$level_info
+  fi
+}
+
+format_command() {
+  local formatted=""
+  local arg
+  for arg in "$@"; do
+    formatted+=$(printf '%q ' "$arg")
+  done
+  printf "%s" "${formatted% }"
+}
+
+expand_user_path() {
+  local raw_path=$1
+  case "$raw_path" in
+    "~")
+      printf "%s" "$HOME"
+      ;;
+    "~/"*)
+      printf "%s/%s" "$HOME" "${raw_path#~/}"
+      ;;
+    *)
+      printf "%s" "$raw_path"
+      ;;
+  esac
+}
+
+parse_global_option() {
+  case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    -v|--version)
+      print_version
+      exit 0
+      ;;
+    --debug)
+      debug_mode=true
+      return 0
+      ;;
+    --quiet)
+      quiet_mode=true
+      return 0
+      ;;
+    -d|--dry-run)
+      dry_run=true
+      return 0
+      ;;
+    --no-dry-run)
+      dry_run=false
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+is_known_profile() {
+  case "$1" in
+    xcode|simulator|chrome_clone|temp_cache)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+profile_targets() {
+  case "$1" in
+    xcode)
+      cat <<EOF
+${HOME}/Library/Developer/Xcode/DerivedData
+${HOME}/Library/Developer/Xcode/Archives
+${HOME}/Library/Developer/Xcode/iOS DeviceSupport
+${HOME}/Library/Developer/Xcode/SourcePackages
+${HOME}/Library/Caches/org.swift.swiftpm
+EOF
+      ;;
+    simulator)
+      cat <<EOF
+${HOME}/Library/Developer/CoreSimulator/Devices
+EOF
+      ;;
+    chrome_clone)
+      cat <<'EOF'
+/private/var/folders/*/*/*/X/com.google.Chrome.code_sign_clone
+EOF
+      ;;
+    temp_cache)
+      cat <<'EOF'
+/private/var/folders/*/*/*/T/metro-cache
+/private/var/folders/*/*/*/T/node-compile-cache
+/private/var/folders/*/*/*/T/jest_dx
+/private/var/folders/*/*/*/T/maestro_xctestrunner_xcodebuild_output*
+EOF
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+has_glob_metachar() {
+  case "$1" in
+    *'*'*|*'?'*|*'['*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+expand_glob_matches() {
+  local pattern=$1
+  local expanded_pattern
+  expanded_pattern=$(expand_user_path "$pattern")
+  log_debug "IO: expand glob ${expanded_pattern}"
+
+  "$node_bin" - "$repo_root" "$fallback_node_project_root" "$expanded_pattern" <<'EOF'
+const path = require("path");
+const repo_root = process.argv[2];
+const fallback_node_project_root = process.argv[3];
+const pattern = process.argv[4];
+const glob_module_path = require.resolve("glob", {
+  paths: [repo_root, fallback_node_project_root],
+});
+const { globSync } = require(glob_module_path);
+
+const matches = globSync(pattern, {
+  absolute: true,
+  dot: true,
+  follow: false,
+  nodir: false,
+});
+
+for (const match of matches) {
+  process.stdout.write(String(match));
+  process.stdout.write("\0");
+}
+EOF
+}
+
+resolve_directory_path() {
+  local candidate_path=$1
+  log_debug "IO: resolve path ${candidate_path}"
+
+  "$node_bin" - "$candidate_path" <<'EOF'
+const fs = require("fs");
+const path = require("path");
+const target = process.argv[2];
+
+try {
+  const absolute_path = path.resolve(String(target));
+  const resolved_path = fs.realpathSync.native
+    ? fs.realpathSync.native(absolute_path)
+    : fs.realpathSync(absolute_path);
+  const stat = fs.statSync(resolved_path);
+
+  if (!stat.isDirectory()) {
+    process.exit(4);
+  }
+
+  process.stdout.write(resolved_path);
+} catch (error) {
+  if (error && error.code === "ENOENT") {
+    process.exit(3);
+  }
+
+  console.error(error && error.message ? error.message : String(error));
+  process.exit(1);
+}
+EOF
+}
+
+dir_size_bytes() {
+  local target_path=$1
+  local raw_kib=""
+  log_debug "IO: du -sk ${target_path}"
+
+  if ! raw_kib=$(du -sk "$target_path" 2>/dev/null | awk '{print $1}'); then
+    return 1
+  fi
+
+  if [ -z "$raw_kib" ]; then
+    return 1
+  fi
+
+  printf "%s" "$((raw_kib * 1024))"
+}
+
+format_size() {
+  local bytes=$1
+
+  if [ "$bytes" -lt 1024 ]; then
+    printf "%s B" "$bytes"
+    return 0
+  fi
+
+  if [ "$bytes" -lt 1048576 ]; then
+    awk "BEGIN { printf \"%.1f KiB\", ${bytes}/1024 }"
+    return 0
+  fi
+
+  if [ "$bytes" -lt 1073741824 ]; then
+    awk "BEGIN { printf \"%.1f MiB\", ${bytes}/1048576 }"
+    return 0
+  fi
+
+  awk "BEGIN { printf \"%.1f GiB\", ${bytes}/1073741824 }"
+}
+
+find_resolved_index() {
+  local target_path=$1
+  local i=0
+
+  while [ "$i" -lt "${#resolved_paths[@]}" ]; do
+    if [ "${resolved_paths[$i]}" = "$target_path" ]; then
+      printf "%s" "$i"
+      return 0
+    fi
+    i=$((i + 1))
+  done
+
+  return 1
+}
+
+append_source_detail() {
+  local current_details=$1
+  local new_detail=$2
+
+  if [ -z "$current_details" ]; then
+    printf "%s" "$new_detail"
+    return 0
+  fi
+
+  case "|${current_details}|" in
+    *"|${new_detail}|"*)
+      printf "%s" "$current_details"
+      ;;
+    *)
+      printf "%s | %s" "$current_details" "$new_detail"
+      ;;
+  esac
+}
+
+add_resolved_target() {
+  local source_kind=$1
+  local source_label=$2
+  local resolved_path=$3
+  local size_bytes=$4
+  local source_detail="${source_kind}:${source_label}"
+  local existing_index=""
+
+  if existing_index=$(find_resolved_index "$resolved_path"); then
+    resolved_source_details[$existing_index]=$(
+      append_source_detail "${resolved_source_details[$existing_index]}" "$source_detail"
+    )
+    return 0
+  fi
+
+  resolved_paths+=("$resolved_path")
+  resolved_primary_sources+=("$source_kind")
+  resolved_source_details+=("$source_detail")
+  resolved_sizes+=("$size_bytes")
+}
+
+normalize_candidate() {
+  local source_kind=$1
+  local source_label=$2
+  local candidate_path=$3
+  local normalized_input=""
+  local resolved_path=""
+  local resolve_exit_code=0
+  local size_bytes=0
+
+  normalized_input=$(expand_user_path "$candidate_path")
+
+  resolved_path=$(resolve_directory_path "$normalized_input" 2>/dev/null) || resolve_exit_code=$?
+  if [ "$resolve_exit_code" -ne 0 ]; then
+    case "$resolve_exit_code" in
+      3)
+        log_warn "Missing target skipped: ${normalized_input}"
+        return 0
+        ;;
+      4)
+        log_warn "Non-directory target skipped: ${normalized_input}"
+        return 0
+        ;;
+      *)
+        die "Failed to resolve target: ${normalized_input}"
+        ;;
+    esac
+  fi
+
+  if [ "$subcommand" = "clean" ] && is_dangerous_target "$resolved_path"; then
+    die "Refusing to mutate dangerous target: ${resolved_path}"
+  fi
+
+  if ! size_bytes=$(dir_size_bytes "$resolved_path" 2>/dev/null); then
+    size_bytes=0
+  fi
+
+  add_resolved_target "$source_kind" "$source_label" "$resolved_path" "$size_bytes"
+}
+
+collect_profile_candidates() {
+  local profile_name=$1
+  local target_line=""
+  local matched_count=0
+
+  log_debug "Step: expand profile ${profile_name}"
+
+  while IFS= read -r target_line; do
+    [ -n "$target_line" ] || continue
+
+    if has_glob_metachar "$target_line"; then
+      matched_count=0
+      while IFS= read -r -d '' matched_path; do
+        matched_count=$((matched_count + 1))
+        normalize_candidate "profile" "$profile_name" "$matched_path"
+      done < <(expand_glob_matches "$target_line")
+
+      if [ "$matched_count" -eq 0 ]; then
+        log_warn "Profile ${profile_name} matched no directories for glob: ${target_line}"
+      fi
+    else
+      normalize_candidate "profile" "$profile_name" "$target_line"
+    fi
+  done < <(profile_targets "$profile_name")
+}
+
+collect_custom_glob_candidates() {
+  local raw_glob=$1
+  local matched_count=0
+
+  log_debug "Step: expand custom glob ${raw_glob}"
+
+  while IFS= read -r -d '' matched_path; do
+    matched_count=$((matched_count + 1))
+    normalize_candidate "glob" "$raw_glob" "$matched_path"
+  done < <(expand_glob_matches "$raw_glob")
+
+  if [ "$matched_count" -eq 0 ]; then
+    log_warn "Glob matched no directories: ${raw_glob}"
+  fi
+}
+
+sum_total_size_bytes() {
+  local i=0
+  total_size_bytes=0
+
+  while [ "$i" -lt "${#resolved_sizes[@]}" ]; do
+    total_size_bytes=$((total_size_bytes + resolved_sizes[$i]))
+    i=$((i + 1))
+  done
+}
+
+use_default_profiles_for_report() {
+  if [ "${#selected_profiles[@]}" -ne 0 ]; then
+    return 1
+  fi
+
+  if [ "${#custom_paths[@]}" -ne 0 ]; then
+    return 1
+  fi
+
+  if [ "${#custom_globs[@]}" -ne 0 ]; then
+    return 1
+  fi
+
+  if [ "$subcommand" != "report" ]; then
+    return 1
+  fi
+
+  return 0
+}
+
+resolve_targets() {
+  local i=0
+  local profile_name=""
+  local custom_path=""
+  local custom_glob=""
+
+  log_debug "Step: resolve targets"
+
+  resolved_paths=()
+  resolved_primary_sources=()
+  resolved_source_details=()
+  resolved_sizes=()
+  total_size_bytes=0
+  default_profiles_used=false
+
+  if use_default_profiles_for_report; then
+    default_profiles_used=true
+    selected_profiles=("${builtin_profiles[@]}")
+  fi
+
+  if [ "$subcommand" = "clean" ] \
+    && [ "${#selected_profiles[@]}" -eq 0 ] \
+    && [ "${#custom_paths[@]}" -eq 0 ] \
+    && [ "${#custom_globs[@]}" -eq 0 ]; then
+    die "clean requires at least one --profile, --path, or --glob selector."
+  fi
+
+  i=0
+  while [ "$i" -lt "${#selected_profiles[@]}" ]; do
+    profile_name=${selected_profiles[$i]}
+    if ! is_known_profile "$profile_name"; then
+      die "Unknown profile: ${profile_name}"
+    fi
+    collect_profile_candidates "$profile_name"
+    i=$((i + 1))
+  done
+
+  i=0
+  while [ "$i" -lt "${#custom_paths[@]}" ]; do
+    custom_path=${custom_paths[$i]}
+    normalize_candidate "path" "$custom_path" "$custom_path"
+    i=$((i + 1))
+  done
+
+  i=0
+  while [ "$i" -lt "${#custom_globs[@]}" ]; do
+    custom_glob=${custom_globs[$i]}
+    collect_custom_glob_candidates "$custom_glob"
+    i=$((i + 1))
+  done
+
+  sum_total_size_bytes
+}
+
+print_selection_summary() {
+  local i=0
+  local joined_profiles=""
+  local joined_paths=""
+  local joined_globs=""
+
+  if [ "${#selected_profiles[@]}" -gt 0 ]; then
+    while [ "$i" -lt "${#selected_profiles[@]}" ]; do
+      if [ -n "$joined_profiles" ]; then
+        joined_profiles="${joined_profiles}, "
+      fi
+      joined_profiles="${joined_profiles}${selected_profiles[$i]}"
+      i=$((i + 1))
+    done
+    if [ "$default_profiles_used" = true ]; then
+      log_info "Profiles: ${joined_profiles} (default)"
+    else
+      log_info "Profiles: ${joined_profiles}"
+    fi
+  else
+    log_info "Profiles: (none)"
+  fi
+
+  if [ "${#custom_paths[@]}" -gt 0 ]; then
+    i=0
+    while [ "$i" -lt "${#custom_paths[@]}" ]; do
+      if [ -n "$joined_paths" ]; then
+        joined_paths="${joined_paths}, "
+      fi
+      joined_paths="${joined_paths}${custom_paths[$i]}"
+      i=$((i + 1))
+    done
+    log_info "Paths: ${joined_paths}"
+  fi
+
+  if [ "${#custom_globs[@]}" -gt 0 ]; then
+    i=0
+    while [ "$i" -lt "${#custom_globs[@]}" ]; do
+      if [ -n "$joined_globs" ]; then
+        joined_globs="${joined_globs}, "
+      fi
+      joined_globs="${joined_globs}${custom_globs[$i]}"
+      i=$((i + 1))
+    done
+    log_info "Globs: ${joined_globs}"
+  fi
+}
+
+print_resolved_targets() {
+  local i=0
+  local size_text=""
+
+  log_info "Resolved targets:"
+
+  if [ "${#resolved_paths[@]}" -eq 0 ]; then
+    log_info "  (none)"
+    return 0
+  fi
+
+  while [ "$i" -lt "${#resolved_paths[@]}" ]; do
+    size_text=$(format_size "${resolved_sizes[$i]}")
+    log_info "  - ${resolved_paths[$i]}"
+    log_info "    source=${resolved_primary_sources[$i]}"
+    log_info "    sources=${resolved_source_details[$i]}"
+    log_info "    status=ok"
+    log_info "    size=${size_text}"
+    i=$((i + 1))
+  done
+
+  log_info "Total matched size: $(format_size "${total_size_bytes}")"
+}
+
+is_dangerous_target() {
+  local resolved_path=$1
+  local private_folders_prefix="/private/var/folders/"
+  local private_relative=""
+  local private_depth=0
+
+  case "$resolved_path" in
+    ""|"/"|"/Users"|"/private"|"/private/var"|"/private/var/folders"|"$HOME"|"$HOME/Library"|"$HOME/Library/Developer"|"$HOME/Library/Developer/Xcode"|"$HOME/Library/Developer/CoreSimulator")
+      return 0
+      ;;
+  esac
+
+  case "$resolved_path" in
+    "${private_folders_prefix}"*)
+      private_relative=${resolved_path#${private_folders_prefix}}
+      private_depth=$(printf "%s" "$private_relative" | awk -F/ 'NF { print NF } !NF { print 0 }')
+      if [ "$private_depth" -lt 5 ]; then
+        return 0
+      fi
+      ;;
+  esac
+
+  return 1
+}
+
+ensure_safe_targets() {
+  local i=0
+  local target_path=""
+
+  log_debug "Step: validate target safety"
+
+  while [ "$i" -lt "${#resolved_paths[@]}" ]; do
+    target_path=${resolved_paths[$i]}
+    if is_dangerous_target "$target_path"; then
+      die "Refusing to mutate dangerous target: ${target_path}"
+    fi
+    i=$((i + 1))
+  done
+}
+
+confirm_cleanup() {
+  local answer=""
+
+  if [ "$yes" = true ] || [ "$dry_run" = true ]; then
+    return 0
+  fi
+
+  printf "Proceed to %s %s target(s)? [y/N] " "$action" "${#resolved_paths[@]}"
+  read -r answer
+
+  case "$answer" in
+    y|Y|yes|YES)
+      return 0
+      ;;
+    *)
+      die "Cleanup aborted."
+      ;;
+  esac
+}
+
+move_target_to_trash() {
+  local target_path=$1
+  log_debug "IO: move to trash ${target_path}"
+
+  "$node_bin" - "$trash_helper" "$target_path" <<'EOF'
+const helper_path = process.argv[2];
+const target_path = process.argv[3];
+
+(async () => {
+  const { move_to_trash } = require(helper_path);
+  const trash_path = await move_to_trash(target_path);
+  process.stdout.write(String(trash_path));
+})().catch((error) => {
+  console.error(error && error.message ? error.message : String(error));
+  process.exit(1);
+});
+EOF
+}
+
+delete_target_directory() {
+  local target_path=$1
+  log_debug "IO: rm -rf ${target_path}"
+  rm -rf -- "$target_path"
+}
+
+run_cleanup() {
+  local i=0
+  local target_path=""
+  local cleanup_output=""
+  local succeeded=0
+  local skipped=0
+  local failed=0
+
+  log_debug "Step: clean targets"
+
+  if [ "${#resolved_paths[@]}" -eq 0 ]; then
+    die "clean found no resolved targets."
+  fi
+
+  ensure_safe_targets
+  confirm_cleanup
+
+  while [ "$i" -lt "${#resolved_paths[@]}" ]; do
+    target_path=${resolved_paths[$i]}
+
+    if [ "$dry_run" = true ]; then
+      if [ "$action" = "trash" ]; then
+        log_info "Dry run: trash ${target_path}"
+      else
+        log_info "Dry run: $(format_command rm -rf -- "$target_path")"
+      fi
+      skipped=$((skipped + 1))
+      i=$((i + 1))
+      continue
+    fi
+
+    if [ "$action" = "trash" ]; then
+      if cleanup_output=$(move_target_to_trash "$target_path" 2>&1); then
+        log_info "trashed: ${target_path} -> ${cleanup_output}"
+        succeeded=$((succeeded + 1))
+      else
+        log_error "failed: ${target_path} (${cleanup_output})"
+        failed=$((failed + 1))
+      fi
+    else
+      if cleanup_output=$(delete_target_directory "$target_path" 2>&1); then
+        log_info "deleted: ${target_path}"
+        succeeded=$((succeeded + 1))
+      else
+        log_error "failed: ${target_path} (${cleanup_output})"
+        failed=$((failed + 1))
+      fi
+    fi
+
+    i=$((i + 1))
+  done
+
+  log_info "Summary: succeeded=${succeeded} skipped=${skipped} failed=${failed}"
+
+  if [ "$failed" -ne 0 ]; then
+    return 1
+  fi
+
+  return 0
+}
+
+parse_cli_args() {
+  local arg=""
+  local command_selected=false
+
+  if [ "$#" -gt 0 ]; then
+    case "$1" in
+      report|clean)
+        subcommand=$1
+        command_selected=true
+        shift
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      -v|--version)
+        print_version
+        exit 0
+        ;;
+      --*|-*)
+        ;;
+      *)
+        die "Unknown subcommand: $1"
+        ;;
+    esac
+  fi
+
+  while [ "$#" -gt 0 ]; do
+    arg=$1
+
+    if parse_global_option "$arg"; then
+      shift
+      continue
+    fi
+
+    case "$arg" in
+      --yes)
+        yes=true
+        ;;
+      --action)
+        [ "$#" -ge 2 ] || die "--action requires trash or delete."
+        action=$2
+        shift
+        ;;
+      --profile)
+        [ "$#" -ge 2 ] || die "--profile requires a profile name."
+        selected_profiles+=("$2")
+        shift
+        ;;
+      --path)
+        [ "$#" -ge 2 ] || die "--path requires a directory path."
+        custom_paths+=("$(expand_user_path "$2")")
+        shift
+        ;;
+      --glob)
+        [ "$#" -ge 2 ] || die "--glob requires a glob pattern."
+        custom_globs+=("$(expand_user_path "$2")")
+        shift
+        ;;
+      *)
+        die "Unknown option: ${arg}"
+        ;;
+    esac
+
+    shift
+  done
+
+  case "$action" in
+    trash|delete)
+      ;;
+    *)
+      die "Invalid --action value: ${action}"
+      ;;
+  esac
+
+  apply_log_threshold
+
+  log_debug "Step: parsed options"
+  log_debug "command=${subcommand} explicit=${command_selected}"
+  log_debug "debug=${debug_mode} quiet=${quiet_mode} dry_run=${dry_run} yes=${yes} action=${action}"
+}
+
+main() {
+  parse_cli_args "$@"
+
+  log_info "${command_name} ${script_version}"
+  log_info "Command: ${subcommand}"
+  if [ "$subcommand" = "clean" ]; then
+    log_info "Action: ${action}"
+  fi
+
+  resolve_targets
+  print_selection_summary
+  print_resolved_targets
+
+  if [ "$subcommand" = "clean" ]; then
+    run_cleanup
+  fi
+}
+
+main "$@"

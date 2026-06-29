@@ -110,10 +110,43 @@ describe("cleanup_dev_cache CLI", () => {
     }
   });
 
+  it("reports explicit glob targets with resolved metadata", async () => {
+    const temp_root = await fs.mkdtemp(
+      path.join(os.tmpdir(), "cleanup-dev-cache-"),
+    );
+    const glob_target = path.join(temp_root, "metro-cache");
+    await fs.mkdir(glob_target, { recursive: true });
+    await fs.writeFile(path.join(glob_target, "cache.txt"), "cache", "utf8");
+
+    try {
+      const result = await run_cli(["report", "--glob", path.join(temp_root, "*")]);
+
+      expect(result.stdout).toContain("Resolved targets:");
+      expect(result.stdout).toContain(glob_target);
+      expect(result.stdout).toContain("source=glob");
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
+  });
+
   it("rejects dangerous paths before mutation", async () => {
     await expect(
       run_cli(["clean", "--path", os.homedir(), "--yes"]),
     ).rejects.toMatchObject({ exit_code: 1 });
+  });
+
+  it("skips missing report paths without failing", async () => {
+    const missing_path = path.join(
+      os.tmpdir(),
+      `cleanup-dev-cache-missing-${Date.now()}`,
+    );
+
+    const result = await run_cli(["report", "--path", missing_path]);
+
+    expect(result.exit_code).toBe(0);
+    expect(result.stdout).toContain("Resolved targets:");
+    expect(result.stdout).toContain("(none)");
+    expect(result.stderr).toContain("Missing target skipped:");
   });
 
   it("fails on unknown profile names", async () => {
