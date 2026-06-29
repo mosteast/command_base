@@ -12,7 +12,7 @@ ONLY_SUBTITLE=false
 only_danmaku=false
 OVERWRITE=false
 REFRESH=false
-channel_library_layout=false
+channel_library_layout=true
 download_danmaku=true
 convert_danmaku_ass=true
 youtube_player_client="web,web_safari,web_embedded"
@@ -482,7 +482,9 @@ ${color_blue}Options:${color_reset}
       --only-danmaku      Download only danmaku XML sidecars from supported platforms (default: false)
       --channel-library-layout
                           Store media in a channel-level video directory and, for playlist URLs,
-                          create playlist directories populated with symlinks (default: false)
+                          create playlist directories populated with symlinks (default: true)
+      --no-channel-library-layout
+                          Use legacy per-playlist folders instead of the channel library layout
       --danmaku           Download danmaku sidecars when available (default: true)
       --no-danmaku        Disable danmaku sidecar download (default: false)
       --danmaku-ass       Convert danmaku XML sidecars to ASS after download (default: true)
@@ -526,8 +528,8 @@ ${color_blue}Examples:${color_reset}
   # Limit YouTube comment extraction to 100 comments
   \$0 -c https://www.youtube.com/@user1 --max-comment 100
 
-  # Keep real files in the channel library and create a symlinked playlist directory
-  \$0 --channel-library-layout -l https://www.youtube.com/playlist?list=xxx
+  # Disable the channel library layout and keep legacy per-playlist folders
+  \$0 --no-channel-library-layout -l https://www.youtube.com/playlist?list=xxx
 
   # Use browser cookies for Bilibili regular subtitles
   \$0 -c https://space.bilibili.com/39449692 --cookies-from-browser chrome
@@ -2089,6 +2091,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --channel-library-layout)
             channel_library_layout=true
+            shift
+            ;;
+        --no-channel-library-layout)
+            channel_library_layout=false
             shift
             ;;
         --danmaku)

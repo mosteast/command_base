@@ -770,10 +770,10 @@ describe("xsave_yt_dlp bilibili channel naming", () => {
 
       const expected_media = path.join(
         output_dir,
-        "Example Bili Creator",
-        "Sample Video.mp4",
+        "Example Bili Creator - Videos",
+        "Sample Video [BV1example].mp4",
       );
-      const numeric_dir = path.join(output_dir, "489990823");
+      const numeric_dir = path.join(output_dir, "489990823 - Videos");
 
       expect(result.exit_code).toBe(0);
       await expect(fs.readFile(expected_media, "utf8")).resolves.toBe(
@@ -930,6 +930,7 @@ describe("xsave_yt_dlp youtube format fallback", () => {
           "--retry-count",
           "3",
           "--no-danmaku",
+          "--no-channel-library-layout",
           "--list",
           "https://www.youtube.com/playlist?list=PLexample",
           "--output",
@@ -1085,7 +1086,7 @@ describe("xsave_yt_dlp retry handling", () => {
 });
 
 describe("xsave_yt_dlp channel library layout", () => {
-  it("stores playlist media in the channel library and creates playlist symlinks", async () => {
+  it("stores playlist media in the channel library by default and creates playlist symlinks", async () => {
     const temp_root = await create_temp_dir();
     const output_dir = path.join(temp_root, "output");
     const fake_yt_dlp_log = path.join(temp_root, "fake_yt_dlp.log");
@@ -1103,7 +1104,6 @@ describe("xsave_yt_dlp channel library layout", () => {
           "--retry-count",
           "2",
           "--no-danmaku",
-          "--channel-library-layout",
           "--list",
           "https://www.youtube.com/playlist?list=PLexample",
           "--output",
@@ -1154,6 +1154,55 @@ describe("xsave_yt_dlp channel library layout", () => {
       expect(await fs.realpath(playlist_subtitle_link)).toBe(
         await fs.realpath(actual_subtitle),
       );
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
+  });
+
+  it("allows disabling the channel library layout explicitly", async () => {
+    const temp_root = await create_temp_dir();
+    const output_dir = path.join(temp_root, "output");
+    const fake_yt_dlp_log = path.join(temp_root, "fake_yt_dlp.log");
+
+    await fs.mkdir(output_dir, { recursive: true });
+    await fs.writeFile(fake_yt_dlp_log, "", "utf8");
+
+    try {
+      const fake_yt_dlp =
+        await create_channel_library_layout_fake_yt_dlp_bin(temp_root);
+
+      const result = await run_cli(
+        [
+          "--debug",
+          "--retry-count",
+          "2",
+          "--no-danmaku",
+          "--no-channel-library-layout",
+          "--list",
+          "https://www.youtube.com/playlist?list=PLexample",
+          "--output",
+          output_dir,
+        ],
+        {
+          env: build_fake_yt_dlp_env(temp_root, fake_yt_dlp, fake_yt_dlp_log),
+        },
+      );
+
+      const playlist_media = path.join(
+        output_dir,
+        "Example Playlist",
+        "1.Example Video.mp4",
+      );
+      const playlist_media_stat = await fs.lstat(playlist_media);
+
+      expect(result.exit_code).toBe(0);
+      await expect(fs.readFile(playlist_media, "utf8")).resolves.toBe(
+        "fake media",
+      );
+      await expect(
+        fs.lstat(path.join(output_dir, "Example Channel - Videos")),
+      ).rejects.toThrow();
+      expect(playlist_media_stat.isSymbolicLink()).toBe(false);
     } finally {
       await fs.rm(temp_root, { recursive: true, force: true });
     }
