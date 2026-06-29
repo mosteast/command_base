@@ -430,6 +430,65 @@ filter_cookie_incompatible_clients() {
     printf "%s" "$(IFS=','; printf "%s" "${filtered[*]}")"
 }
 
+extra_opts_include_option() {
+    local option_name="$1"
+    local extra_opt
+    for extra_opt in "${EXTRA_OPTS[@]}"; do
+        if [ "$extra_opt" = "$option_name" ]; then
+            return 0
+        fi
+        case "$extra_opt" in
+            "${option_name}"=*)
+                return 0
+                ;;
+        esac
+    done
+    return 1
+}
+
+youtube_player_client_uses_web_clients() {
+    local raw_clients="$1"
+    local -a clients=()
+    local client
+
+    if [ -z "$raw_clients" ]; then
+        return 1
+    fi
+
+    IFS=',' read -r -a clients <<< "$raw_clients"
+    for client in "${clients[@]}"; do
+        client="${client//[[:space:]]/}"
+        case "$client" in
+            web|web_safari|web_embedded)
+                return 0
+                ;;
+        esac
+    done
+    return 1
+}
+
+youtube_remote_component_opts=()
+
+prepare_youtube_ejs_remote_component_opts() {
+    local platform="$1"
+    local player_client="$2"
+    youtube_remote_component_opts=()
+
+    if [ "$platform" != "youtube" ]; then
+        return 0
+    fi
+
+    if ! youtube_player_client_uses_web_clients "$player_client"; then
+        return 0
+    fi
+
+    if extra_opts_include_option "--remote-components"; then
+        return 0
+    fi
+
+    youtube_remote_component_opts=(--remote-components "ejs:github")
+}
+
 resolve_youtube_player_client_for_cookies() {
     local raw_clients="$1"
     local context_label="$2"
@@ -1320,6 +1379,8 @@ run_video_yt_dlp() {
     if should_append_legacy_ytdlp_user_agent "$video_platform_for_ua"; then
         yt_dlp_args+=(--add-header "User-Agent:Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36")
     fi
+    prepare_youtube_ejs_remote_component_opts "$video_platform_for_ua" "$player_client"
+    yt_dlp_args+=("${youtube_remote_component_opts[@]}")
     build_default_impersonate_opts "$video_platform_for_ua" "${EXTRA_OPTS[@]}"
     yt_dlp_args+=("${default_impersonate_opts[@]}" "${EXTRA_OPTS[@]}" "$url")
 
@@ -1398,6 +1459,8 @@ run_video_metadata_yt_dlp() {
     if should_append_legacy_ytdlp_user_agent "$video_platform_for_ua"; then
         yt_dlp_args+=(--add-header "User-Agent:Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36")
     fi
+    prepare_youtube_ejs_remote_component_opts "$video_platform_for_ua" "$player_client"
+    yt_dlp_args+=("${youtube_remote_component_opts[@]}")
     build_default_impersonate_opts "$video_platform_for_ua" "${EXTRA_OPTS[@]}"
     yt_dlp_args+=("${default_impersonate_opts[@]}" "${EXTRA_OPTS[@]}" "$url")
 
@@ -1667,6 +1730,18 @@ export_playlist_layout_manifest_json() {
         yt_dlp_args+=(--no-check-certificate)
     fi
 
+    local player_client=""
+    local extractor_opt
+    for extractor_opt in "${extractor_opts[@]}"; do
+        case "$extractor_opt" in
+            youtube:player_client=*)
+                player_client="${extractor_opt#youtube:player_client=}"
+                ;;
+        esac
+    done
+
+    prepare_youtube_ejs_remote_component_opts "$manifest_platform_for_ua" "$player_client"
+    yt_dlp_args+=("${youtube_remote_component_opts[@]}")
     yt_dlp_args+=("${extractor_opts[@]}" "$playlist_url")
     run_yt_dlp_stdout_to_file_with_log_capture "$manifest_file" yt-dlp "${yt_dlp_args[@]}"
 }
@@ -2509,6 +2584,12 @@ if [ -n "$CHANNEL_URL" ]; then
             channel_nocookie_fallback_extractor_opts=(--extractor-args youtubetab:skip=authcheck --extractor-args "youtube:player_client=${fallback_player_client}")
         fi
     fi
+    prepare_youtube_ejs_remote_component_opts "$channel_platform" "$youtube_cookie_player_client"
+    channel_remote_component_opts=("${youtube_remote_component_opts[@]}")
+    prepare_youtube_ejs_remote_component_opts "$channel_platform" "$youtube_cookie_fallback_client"
+    channel_cookie_fallback_remote_component_opts=("${youtube_remote_component_opts[@]}")
+    prepare_youtube_ejs_remote_component_opts "$channel_platform" "$fallback_player_client"
+    channel_nocookie_fallback_remote_component_opts=("${youtube_remote_component_opts[@]}")
 
     # Generate a unique archive file name based on the channel URL
     ARCHIVE_FILE="${ARCHIVE_DIR}/$(echo "$CHANNEL_URL" | md5sum | cut -d' ' -f1).txt"
@@ -2647,6 +2728,7 @@ if [ -n "$CHANNEL_URL" ]; then
         "${channel_cookie_opts[@]}" \
         "${channel_extractor_opts[@]}" \
         "${channel_referer_opts[@]}" \
+        "${channel_remote_component_opts[@]}" \
         "${channel_tail_args[@]}" \
         "$CHANNEL_URL"
 
@@ -2683,6 +2765,7 @@ if [ -n "$CHANNEL_URL" ]; then
                 "${channel_cookie_opts[@]}" \
                 "${channel_cookie_fallback_extractor_opts[@]}" \
                 "${channel_referer_opts[@]}" \
+                "${channel_cookie_fallback_remote_component_opts[@]}" \
                 "${channel_tail_args[@]}" \
                 "$CHANNEL_URL"
             fallback_status=$?
@@ -2698,6 +2781,7 @@ if [ -n "$CHANNEL_URL" ]; then
                     "${channel_base_args[@]}" \
                     "${channel_nocookie_fallback_extractor_opts[@]}" \
                     "${channel_referer_opts[@]}" \
+                    "${channel_nocookie_fallback_remote_component_opts[@]}" \
                     "${channel_tail_args[@]}" \
                     "$CHANNEL_URL"
                 fallback_status=$?
@@ -2710,6 +2794,7 @@ if [ -n "$CHANNEL_URL" ]; then
                 "${channel_base_args[@]}" \
                 "${channel_nocookie_fallback_extractor_opts[@]}" \
                 "${channel_referer_opts[@]}" \
+                "${channel_nocookie_fallback_remote_component_opts[@]}" \
                 "${channel_tail_args[@]}" \
                 "$CHANNEL_URL"
             fallback_status=$?
@@ -2745,6 +2830,7 @@ if [ -n "$CHANNEL_URL" ]; then
             "${channel_cookie_opts[@]}" \
             "${channel_extractor_opts[@]}" \
             "${channel_referer_opts[@]}" \
+            "${channel_remote_component_opts[@]}" \
             "${channel_tail_args[@]}" \
             "$CHANNEL_URL"
         channel_metadata_status=$?
@@ -2779,6 +2865,7 @@ if [ -n "$CHANNEL_URL" ]; then
                 "${channel_cookie_opts[@]}" \
                 "${channel_cookie_fallback_extractor_opts[@]}" \
                 "${channel_referer_opts[@]}" \
+                "${channel_cookie_fallback_remote_component_opts[@]}" \
                 "${channel_tail_args[@]}" \
                 "$CHANNEL_URL"
             fallback_status=$?
@@ -2794,6 +2881,7 @@ if [ -n "$CHANNEL_URL" ]; then
                     "${channel_metadata_base_args[@]}" \
                     "${channel_nocookie_fallback_extractor_opts[@]}" \
                     "${channel_referer_opts[@]}" \
+                    "${channel_nocookie_fallback_remote_component_opts[@]}" \
                     "${channel_tail_args[@]}" \
                     "$CHANNEL_URL"
                 fallback_status=$?
@@ -2806,6 +2894,7 @@ if [ -n "$CHANNEL_URL" ]; then
                 "${channel_metadata_base_args[@]}" \
                 "${channel_nocookie_fallback_extractor_opts[@]}" \
                 "${channel_referer_opts[@]}" \
+                "${channel_nocookie_fallback_remote_component_opts[@]}" \
                 "${channel_tail_args[@]}" \
                 "$CHANNEL_URL"
             fallback_status=$?
@@ -2870,6 +2959,12 @@ elif [ -n "$PLAYLIST_URL" ]; then
             playlist_nocookie_fallback_extractor_opts=(--extractor-args "youtube:player_client=${fallback_player_client}")
         fi
     fi
+    prepare_youtube_ejs_remote_component_opts "$playlist_platform" "$youtube_cookie_player_client"
+    playlist_remote_component_opts=("${youtube_remote_component_opts[@]}")
+    prepare_youtube_ejs_remote_component_opts "$playlist_platform" "$youtube_cookie_fallback_client"
+    playlist_cookie_fallback_remote_component_opts=("${youtube_remote_component_opts[@]}")
+    prepare_youtube_ejs_remote_component_opts "$playlist_platform" "$fallback_player_client"
+    playlist_nocookie_fallback_remote_component_opts=("${youtube_remote_component_opts[@]}")
     if [ "$channel_library_layout" = true ]; then
         playlist_symlink_output_template=$(build_playlist_symlink_output_template "$OUTPUT_DIR")
     fi
@@ -3010,6 +3105,7 @@ elif [ -n "$PLAYLIST_URL" ]; then
         "${playlist_base_args[@]}" \
         "${playlist_cookie_opts[@]}" \
         "${playlist_extractor_opts[@]}" \
+        "${playlist_remote_component_opts[@]}" \
         "${playlist_tail_args[@]}" \
         "$PLAYLIST_URL"
 
@@ -3044,6 +3140,7 @@ elif [ -n "$PLAYLIST_URL" ]; then
                 "${playlist_base_args[@]}" \
                 "${playlist_cookie_opts[@]}" \
                 "${playlist_cookie_fallback_extractor_opts[@]}" \
+                "${playlist_cookie_fallback_remote_component_opts[@]}" \
                 "${playlist_tail_args[@]}" \
                 "$PLAYLIST_URL"
             fallback_status=$?
@@ -3058,6 +3155,7 @@ elif [ -n "$PLAYLIST_URL" ]; then
                 retry_command "Playlist fallback download without cookies: ${PLAYLIST_URL}" run_yt_dlp_with_log_capture yt-dlp \
                     "${playlist_base_args[@]}" \
                     "${playlist_nocookie_fallback_extractor_opts[@]}" \
+                    "${playlist_nocookie_fallback_remote_component_opts[@]}" \
                     "${playlist_tail_args[@]}" \
                     "$PLAYLIST_URL"
                 fallback_status=$?
@@ -3069,6 +3167,7 @@ elif [ -n "$PLAYLIST_URL" ]; then
             retry_command "Playlist fallback download without cookies: ${PLAYLIST_URL}" run_yt_dlp_with_log_capture yt-dlp \
                 "${playlist_base_args[@]}" \
                 "${playlist_nocookie_fallback_extractor_opts[@]}" \
+                "${playlist_nocookie_fallback_remote_component_opts[@]}" \
                 "${playlist_tail_args[@]}" \
                 "$PLAYLIST_URL"
             fallback_status=$?
@@ -3105,6 +3204,7 @@ elif [ -n "$PLAYLIST_URL" ]; then
             "${playlist_metadata_base_args[@]}" \
             "${playlist_cookie_opts[@]}" \
             "${playlist_extractor_opts[@]}" \
+            "${playlist_remote_component_opts[@]}" \
             "${playlist_tail_args[@]}" \
             "$PLAYLIST_URL"
         playlist_metadata_status=$?
@@ -3140,6 +3240,7 @@ elif [ -n "$PLAYLIST_URL" ]; then
                 "${playlist_metadata_base_args[@]}" \
                 "${playlist_cookie_opts[@]}" \
                 "${playlist_cookie_fallback_extractor_opts[@]}" \
+                "${playlist_cookie_fallback_remote_component_opts[@]}" \
                 "${playlist_tail_args[@]}" \
                 "$PLAYLIST_URL"
             fallback_status=$?
@@ -3158,6 +3259,7 @@ elif [ -n "$PLAYLIST_URL" ]; then
                 retry_command "Playlist metadata fallback without cookies: ${PLAYLIST_URL}" run_yt_dlp_with_log_capture yt-dlp \
                     "${playlist_metadata_base_args[@]}" \
                     "${playlist_nocookie_fallback_extractor_opts[@]}" \
+                    "${playlist_nocookie_fallback_remote_component_opts[@]}" \
                     "${playlist_tail_args[@]}" \
                     "$PLAYLIST_URL"
                 fallback_status=$?

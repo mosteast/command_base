@@ -562,6 +562,40 @@ describe("xsave_yt_dlp impersonation defaults", () => {
   });
 });
 
+describe("xsave_yt_dlp youtube remote components", () => {
+  it("adds github ejs remote components for default youtube web clients", async () => {
+    const result = await run_cli([
+      "--dry-run",
+      "--debug",
+      "--channel",
+      "https://www.youtube.com/@user1",
+    ]);
+
+    const stdout_text = strip_ansi(result.stdout);
+
+    expect(result.exit_code).toBe(0);
+    expect(stdout_text).toContain("--remote-components ejs:github");
+  });
+
+  it("keeps an explicit remote components override for youtube downloads", async () => {
+    const result = await run_cli([
+      "--dry-run",
+      "--debug",
+      "--channel",
+      "https://www.youtube.com/@user1",
+      "--",
+      "--remote-components",
+      "ejs:npm",
+    ]);
+
+    const stdout_text = strip_ansi(result.stdout);
+
+    expect(result.exit_code).toBe(0);
+    expect(stdout_text).toContain("--remote-components ejs:npm");
+    expect(stdout_text).not.toContain("--remote-components ejs:github");
+  });
+});
+
 describe("xsave_yt_dlp comment extraction", () => {
   it("adds a YouTube max comments extractor arg during metadata export", async () => {
     const result = await run_cli([
