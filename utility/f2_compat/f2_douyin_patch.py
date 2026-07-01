@@ -254,6 +254,32 @@ def _detail_property(entry_path, extractor):
     return property(getter)
 
 
+def _remove_zero_byte_target(instance, base_path, file_name, file_suffix, logger, _):
+    file_path = f"{file_name}{file_suffix}"
+    full_path = instance._ensure_path(base_path) / file_path
+
+    if not full_path.exists():
+        return
+
+    try:
+        file_size = full_path.stat().st_size
+    except OSError as error:
+        logger.warning(
+            _("读取文件大小失败，保留现有文件 {0}: {1}").format(full_path.name, error)
+        )
+        return
+
+    if file_size > 0:
+        return
+
+    logger.warning(_("检测到空文件 {0}，删除后重新下载").format(full_path.name))
+
+    try:
+        full_path.unlink()
+    except OSError as error:
+        logger.warning(_("删除空文件失败 {0}: {1}").format(full_path.name, error))
+
+
 def apply_patch():
     global PATCH_APPLIED
     if PATCH_APPLIED:
@@ -262,6 +288,7 @@ def apply_patch():
     from f2.apps.douyin.dl import DouyinDownloader
     from f2.apps.douyin.filter import FriendFeedFilter, PostDetailFilter, UserPostFilter
     from f2.apps.douyin.utils import format_file_name
+    from f2.dl.base_downloader import BaseDownloader
     from f2.i18n.translator import _
     from f2.log.logger import logger
 
@@ -364,6 +391,35 @@ def apply_patch():
 
         await self.save_last_aweme_id(self.sec_user_id, self.aweme_id)
 
+    original_initiate_download = BaseDownloader.initiate_download
+    original_initiate_m3u8_download = BaseDownloader.initiate_m3u8_download
+
+    async def patched_initiate_download(
+        self,
+        file_type,
+        file_url,
+        base_path,
+        file_name,
+        file_suffix,
+    ):
+        _remove_zero_byte_target(self, base_path, file_name, file_suffix, logger, _)
+        await original_initiate_download(
+            self, file_type, file_url, base_path, file_name, file_suffix
+        )
+
+    async def patched_initiate_m3u8_download(
+        self,
+        file_type,
+        m3u8_url,
+        base_path,
+        file_name,
+        file_suffix,
+    ):
+        _remove_zero_byte_target(self, base_path, file_name, file_suffix, logger, _)
+        await original_initiate_m3u8_download(
+            self, file_type, m3u8_url, base_path, file_name, file_suffix
+        )
+
     UserPostFilter.video_play_addr = _list_property(
         "$.aweme_list", extract_entry_video_url_list
     )
@@ -418,6 +474,8 @@ def apply_patch():
         "$.data[*].aweme", extract_article_images
     )
 
+    BaseDownloader.initiate_download = patched_initiate_download
+    BaseDownloader.initiate_m3u8_download = patched_initiate_m3u8_download
     DouyinDownloader.download_article_markdown = download_article_markdown
     DouyinDownloader.download_article_cover = download_article_cover
     DouyinDownloader.download_article_images = download_article_images

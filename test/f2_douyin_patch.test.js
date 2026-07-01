@@ -80,7 +80,12 @@ print(json.dumps(payload))
 `;
 
     const result = await run_python(code);
-    const payload = JSON.parse(result.stdout);
+    const json_line = result.stdout
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .at(-1);
+    const payload = JSON.parse(json_line);
 
     expect(payload.user_post_video_play_addr).toEqual([
       ["https://example.com/video.mp4"],
@@ -157,11 +162,88 @@ print(json.dumps(fake.saved))
 `;
 
     const result = await run_python(code);
-    const payload = JSON.parse(result.stdout);
+    const json_line = result.stdout
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .at(-1);
+    const payload = JSON.parse(json_line);
 
     expect(payload).toContain("article_markdown");
     expect(payload).toContain("article_cover");
     expect(payload).toContain("article_images");
     expect(payload).not.toContain("video");
+  });
+
+  it("redownloads zero-byte files instead of treating them as completed", async () => {
+    const code = `
+import asyncio
+import json
+import tempfile
+from pathlib import Path
+from f2.dl.base_downloader import BaseDownloader
+
+class FakeProgress:
+    def __init__(self):
+        self.events = []
+
+    async def add_task(self, **kwargs):
+        self.events.append({"op": "add", **kwargs})
+        return len(self.events)
+
+    async def update(self, task_id, **kwargs):
+        self.events.append({"op": "update", "task_id": task_id, **kwargs})
+
+class FakeDownloader:
+    def __init__(self):
+        self.progress = FakeProgress()
+        self.download_tasks = []
+
+    def _ensure_path(self, target_path):
+        return Path(target_path)
+
+    async def download_file(self, task_id, file_url, full_path):
+        full_path.parent.mkdir(parents=True, exist_ok=True)
+        full_path.write_bytes(b"downloaded")
+
+async def main():
+    temp_root = Path(tempfile.mkdtemp())
+    target_path = temp_root / "sample.mp4"
+    target_path.write_bytes(b"")
+
+    fake = FakeDownloader()
+    await BaseDownloader.initiate_download(
+        fake,
+        "视频",
+        "https://example.com/video.mp4",
+        temp_root,
+        "sample",
+        ".mp4",
+    )
+
+    if fake.download_tasks:
+        await asyncio.gather(*fake.download_tasks)
+
+    payload = {
+        "download_task_count": len(fake.download_tasks),
+        "file_size": target_path.stat().st_size,
+        "progress_events": fake.progress.events,
+    }
+    print(json.dumps(payload))
+
+asyncio.run(main())
+`;
+
+    const result = await run_python(code);
+    const json_line = result.stdout
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .at(-1);
+    const payload = JSON.parse(json_line);
+
+    expect(payload.download_task_count).toBe(1);
+    expect(payload.file_size).toBeGreaterThan(0);
+    expect(payload.progress_events[0].description).not.toContain("跳过");
   });
 });
