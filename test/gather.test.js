@@ -78,6 +78,19 @@ async function write_douyin_config_file(temp_root) {
   return config_path;
 }
 
+async function write_x_f2_config_file(temp_root) {
+  const config_path = path.join(temp_root, "gather.x_f2.config.yaml");
+  const config_text = [
+    "source:",
+    "  x_f2:",
+    "    - name: Example X user",
+    "      handle: https://x.com/example",
+    "",
+  ].join("\n");
+  await fs.writeFile(config_path, config_text, "utf8");
+  return config_path;
+}
+
 async function write_command_range_config_file(temp_root, marker_file_path) {
   const config_path = path.join(temp_root, "gather.command_range.config.yaml");
   const first_command = `printf "first\\n" >> "${marker_file_path}"`;
@@ -127,6 +140,20 @@ async function write_platform_filtered_command_config_file(temp_root) {
     "command:",
     "  - name: Douyin Likes",
     '    command: "f2_compat dy -M like -u https://v.douyin.com/EXAMPLE/"',
+    "  - name: YouTube Playlist",
+    '    command: "videos_download -l \\"https://www.youtube.com/playlist?list=PLexample\\""',
+    "",
+  ].join("\n");
+  await fs.writeFile(config_path, config_text, "utf8");
+  return config_path;
+}
+
+async function write_x_f2_command_config_file(temp_root) {
+  const config_path = path.join(temp_root, "gather.x_f2_command.yaml");
+  const config_text = [
+    "command:",
+    "  - name: X Likes",
+    '    command: "f2_compat x -M like -u https://x.com/example"',
     "  - name: YouTube Playlist",
     '    command: "videos_download -l \\"https://www.youtube.com/playlist?list=PLexample\\""',
     "",
@@ -611,6 +638,32 @@ describe("gather CLI platform selection", () => {
     }
   });
 
+  it("uses f2_compat for x_f2 source exports", async () => {
+    const temp_root = await create_temp_dir();
+    const state_file = path.join(temp_root, "gather.state.json");
+
+    try {
+      const config_path = await write_x_f2_config_file(temp_root);
+      const result = await run_cli([
+        "--dry-run",
+        "--state-file",
+        state_file,
+        "--platform",
+        "x_f2",
+        config_path,
+      ]);
+
+      expect(result.exit_code).toBe(0);
+      expect(extract_total_jobs(result.stdout)).toBe(1);
+      expect(result.stdout).toContain(
+        "f2_compat x -M post -u https://x.com/example",
+      );
+      expect(result.stdout).not.toContain("f2 x -M post -u");
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
+  });
+
   it("uses the saved f2 export directory by default", async () => {
     const temp_root = await create_temp_dir();
     const state_file = path.join(temp_root, "gather.state.json");
@@ -734,6 +787,34 @@ describe("gather CLI platform selection", () => {
       expect(extract_total_commands(result.stdout)).toBe(1);
       expect(result.stdout).toContain(
         "f2_compat dy -M like -u https://v.douyin.com/EXAMPLE/",
+      );
+      expect(result.stdout).not.toContain(
+        "https://www.youtube.com/playlist?list=PLexample",
+      );
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
+  });
+
+  it("infers x_f2 platform from f2_compat custom commands", async () => {
+    const temp_root = await create_temp_dir();
+    const state_file = path.join(temp_root, "gather.state.json");
+
+    try {
+      const config_path = await write_x_f2_command_config_file(temp_root);
+      const result = await run_cli([
+        "--dry-run",
+        "--state-file",
+        state_file,
+        "--platform",
+        "x_f2",
+        config_path,
+      ]);
+
+      expect(result.exit_code).toBe(0);
+      expect(extract_total_commands(result.stdout)).toBe(1);
+      expect(result.stdout).toContain(
+        "f2_compat x -M like -u https://x.com/example",
       );
       expect(result.stdout).not.toContain(
         "https://www.youtube.com/playlist?list=PLexample",

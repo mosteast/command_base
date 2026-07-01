@@ -48,7 +48,7 @@ const DEFAULT_CONFIG_LINES = [
   "    - name: Example Bitchute channel",
   "      handle: https://www.bitchute.com/channel/EXAMPLE_ID",
   "  x_f2:",
-  "    - name: Example X user (f2)",
+  "    - name: Example X user",
   "      handle: https://x.com/user1",
   "  x_gallery_dl:",
   "    - name: Example X user (gallery-dl)",
@@ -102,7 +102,7 @@ const PLATFORM_COMMANDS = {
     label: "douyin",
   },
   x_f2: {
-    command: "f2",
+    command: F2_COMPAT_COMMAND,
     build_args: (url) => ["x", "-M", "post", "-u", url],
     label: "x_f2",
   },
@@ -295,7 +295,7 @@ function build_help_text(script_name) {
     "  Batch export channels/users across platforms by reading YAML configs and",
     "  running platform-specific export commands.",
     "  Resumes from the last successful job using the state file pointer.",
-    `  Douyin uses ${F2_COMPAT_COMMAND}. x_f2 uses f2, x_gallery_dl uses xsave_gallery_dl.`,
+    `  Douyin and x_f2 use ${F2_COMPAT_COMMAND}. x_gallery_dl uses xsave_gallery_dl.`,
     "  Platform aliases: yt -> youtube, bili -> bilibili, dy/tiktok/douyin_f2 -> douyin, x/tw/twitter -> x_f2.",
     "  Platform filters apply to source jobs and custom commands with declared or inferred platforms.",
     "",
@@ -364,7 +364,7 @@ function build_help_text(script_name) {
     "  # handle supports full URLs or platform handles/ids (e.g. youtube handle: user1, bilibili handle: 39449692, rumble handle: m16, bitchute handle: wnuZEpMvRZs6)",
     "  source:",
     "    x_f2:",
-    "      - name: Example X user (f2)",
+    "      - name: Example X user",
     "        handle: https://x.com/user1",
     "    x_gallery_dl:",
     "      - name: Example X user (gallery-dl)",
@@ -1277,7 +1277,7 @@ function infer_command_platform_keys(command_text) {
   }
 
   if (
-    /\bf2\s+x\b/.test(normalized_command) ||
+    /\b(?:f2|f2_compat)\s+x\b/.test(normalized_command) ||
     normalized_command.includes(" x.com/") ||
     normalized_command.includes("https://x.com/") ||
     normalized_command.includes("http://x.com/") ||
