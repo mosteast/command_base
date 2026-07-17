@@ -648,6 +648,129 @@ describe("fragment patch compiler", () => {
       }),
     ).toThrowError(expect.objectContaining({ code: "REQUEST_ERROR" }));
   });
+
+  it("validates operation request objects before resolving locators", () => {
+    const index = create_index("service:\n  timeout: 30\n");
+    const service = select_unique_node(index, {
+      path: [{ mapping_key: "service" }],
+    });
+    const valid_target = {
+      locator: service.locator,
+      expected_digest: service.raw_digest,
+    };
+    const valid_operation = {
+      type: "set_mapping_value",
+      key: "timeout",
+      value: 45,
+    };
+    let proxy_trap_call_count = 0;
+    const invalid_proxy = new Proxy(
+      {},
+      {
+        get() {
+          proxy_trap_call_count += 1;
+          throw new Error("proxy get trap must not run");
+        },
+        getPrototypeOf() {
+          proxy_trap_call_count += 1;
+          throw new Error("proxy prototype trap must not run");
+        },
+        ownKeys() {
+          proxy_trap_call_count += 1;
+          throw new Error("proxy ownKeys trap must not run");
+        },
+      },
+    );
+    const invalid_entries = [
+      { target: {} },
+      { target: { locator: "" } },
+      { target: { locator: 1 } },
+      {
+        target: {
+          locator: service.locator,
+          expected_digest: "A".repeat(64),
+        },
+      },
+      { target: invalid_proxy },
+      { operation: null },
+      { operation: {} },
+      { operation: { type: 1 } },
+      { operation: invalid_proxy },
+      { limits: null },
+      { limits: { expect_matches: 2 } },
+      { limits: { max_deleted_bytes: -1 } },
+      { limits: { max_inserted_bytes: 1.5 } },
+      { limits: { max_touched_bytes: Number.POSITIVE_INFINITY } },
+      { limits: invalid_proxy },
+    ];
+
+    for (const invalid_entry of invalid_entries) {
+      expect(() =>
+        compile_operation_patch(index, {
+          version: 1,
+          operations: [
+            {
+              target: valid_target,
+              operation: valid_operation,
+              limits: {},
+              ...invalid_entry,
+            },
+          ],
+        }),
+      ).toThrowError(expect.objectContaining({ code: "REQUEST_ERROR" }));
+    }
+    expect(proxy_trap_call_count).toBe(0);
+
+    expect(() =>
+      compile_operation_patch(index, {
+        version: 1,
+        operations: [
+          {
+            target: valid_target,
+            operation: { type: "future_operation" },
+            limits: {},
+          },
+        ],
+      }),
+    ).toThrowError(expect.objectContaining({ code: "UNSUPPORTED_EDIT_UNIT" }));
+    expect(() =>
+      compile_operation_patch(index, {
+        version: 1,
+        operations: [
+          {
+            target: { locator: "missing-locator" },
+            operation: valid_operation,
+            limits: {},
+          },
+        ],
+      }),
+    ).toThrowError(expect.objectContaining({ code: "NO_MATCH" }));
+  });
+
+  it("applies valid operation limits before compiling a candidate", () => {
+    const index = create_index("value: old\n");
+    const value = select_unique_node(index, {
+      path: [{ mapping_key: "value" }],
+    });
+
+    expect(() =>
+      compile_operation_patch(index, {
+        version: 1,
+        operations: [
+          {
+            target: { locator: value.locator },
+            operation: { type: "replace_scalar_token", value: "long" },
+            limits: {
+              expect_matches: 1,
+              max_deleted_bytes: 3,
+              max_inserted_bytes: 3,
+              max_touched_bytes: 6,
+            },
+          },
+        ],
+      }),
+    ).toThrowError(expect.objectContaining({ code: "CHANGE_LIMIT_EXCEEDED" }));
+  });
 });
 
 describe("byte proof", () => {

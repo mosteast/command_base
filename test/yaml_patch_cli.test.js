@@ -736,6 +736,141 @@ describe("yaml_patch patch and validate", () => {
     expect(await fs.readFile(source_path, "utf8")).toContain("timeout: 45");
   });
 
+  it("classifies operation target, type, and limit validation", async () => {
+    const directory = await create_workspace({
+      "source.yaml": "service:\n  timeout: 30\n",
+    });
+    const source_path = path.join(directory, "source.yaml");
+    const query_path = path.join(directory, "query.json");
+    await write_json(query_path, {
+      version: 1,
+      path: [{ mapping_key: "service" }],
+    });
+    const found = await run_cli(["find", source_path, "--query", query_path]);
+    const service = JSON.parse(found.stdout).result.matches[0];
+    const valid_target = {
+      locator: service.locator,
+      expected_digest: service.raw_digest,
+    };
+    const valid_operation = {
+      type: "set_mapping_value",
+      key: "timeout",
+      value: 45,
+    };
+    const cases = [
+      {
+        name: "missing locator",
+        entry: { target: {}, operation: valid_operation },
+        exit_code: 2,
+        code: "REQUEST_ERROR",
+      },
+      {
+        name: "locator type",
+        entry: { target: { locator: 1 }, operation: valid_operation },
+        exit_code: 2,
+        code: "REQUEST_ERROR",
+      },
+      {
+        name: "digest format",
+        entry: {
+          target: { locator: service.locator, expected_digest: "bad" },
+          operation: valid_operation,
+        },
+        exit_code: 2,
+        code: "REQUEST_ERROR",
+      },
+      {
+        name: "missing type",
+        entry: { target: valid_target, operation: {} },
+        exit_code: 2,
+        code: "REQUEST_ERROR",
+      },
+      {
+        name: "type format",
+        entry: { target: valid_target, operation: { type: 1 } },
+        exit_code: 2,
+        code: "REQUEST_ERROR",
+      },
+      {
+        name: "unknown type",
+        entry: {
+          target: valid_target,
+          operation: { type: "future_operation" },
+        },
+        exit_code: 6,
+        code: "UNSUPPORTED_EDIT_UNIT",
+      },
+      {
+        name: "expect matches",
+        entry: {
+          target: valid_target,
+          operation: valid_operation,
+          limits: { expect_matches: 2 },
+        },
+        exit_code: 2,
+        code: "REQUEST_ERROR",
+      },
+      {
+        name: "negative limit",
+        entry: {
+          target: valid_target,
+          operation: valid_operation,
+          limits: { max_inserted_bytes: -1 },
+        },
+        exit_code: 2,
+        code: "REQUEST_ERROR",
+      },
+      {
+        name: "missing target",
+        entry: {
+          target: { locator: "missing-locator" },
+          operation: valid_operation,
+        },
+        exit_code: 3,
+        code: "NO_MATCH",
+      },
+      {
+        name: "limit exceeded",
+        entry: {
+          target: valid_target,
+          operation: valid_operation,
+          limits: {
+            expect_matches: 1,
+            max_deleted_bytes: 2,
+            max_inserted_bytes: 0,
+            max_touched_bytes: 2,
+          },
+        },
+        exit_code: 6,
+        code: "CHANGE_LIMIT_EXCEEDED",
+      },
+    ];
+
+    for (const test_case of cases) {
+      const operation_path = path.join(
+        directory,
+        `${test_case.name.replaceAll(" ", "_")}.json`,
+      );
+      await write_json(operation_path, {
+        version: 1,
+        operations: [test_case.entry],
+      });
+
+      const result = await run_cli([
+        "patch",
+        source_path,
+        "--operations",
+        operation_path,
+      ]);
+
+      expect(result.exit_code, test_case.name).toBe(test_case.exit_code);
+      expect(JSON.parse(result.stdout), test_case.name).toMatchObject({
+        ok: false,
+        code: test_case.code,
+      });
+    }
+  });
+
   it("returns a stable validation failure for invalid YAML", async () => {
     const directory = await create_workspace({
       "invalid.yaml": "items: [one,\n",
