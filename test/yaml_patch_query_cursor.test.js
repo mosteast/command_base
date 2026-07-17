@@ -37,7 +37,13 @@ function paged_query(overrides = {}) {
     where: {
       all: [
         { predicate: "addressable_type", equals: "scalar" },
-        { predicate: "raw_regex", pattern: "^value-", flags: "" },
+        {
+          predicate: "relation",
+          relation: "parent",
+          min_distance: 1,
+          max_distance: 1,
+          where: { predicate: "addressable_type", equals: "mapping_value" },
+        },
       ],
     },
     projection: {
@@ -260,6 +266,23 @@ describe("YAML query v2 cursor", () => {
       },
     });
     expect(mismatch.details.candidates).toHaveLength(10);
+    expect(mismatch.details.candidates[0]).toEqual({
+      source_path: "/tmp/candidates.yaml",
+      document: 0,
+      line: expect.any(Number),
+      column: expect.any(Number),
+      byte_range: {
+        start_byte: expect.any(Number),
+        end_byte: expect.any(Number),
+      },
+      path: expect.any(Array),
+      ancestor_paths: expect.any(Array),
+      projection: {
+        source_path: "/tmp/candidates.yaml",
+        raw: "value-00",
+        locator: expect.any(String),
+      },
+    });
     expect(decode_query_cursor(mismatch.details.cursor)).toMatchObject({
       purpose: "candidate",
       offset: 10,
@@ -274,20 +297,45 @@ describe("YAML query v2 cursor", () => {
       ),
     ).toThrowError(expect.objectContaining({ code: "REQUEST_ERROR" }));
 
+    expect(() =>
+      run_query_v2(
+        [input],
+        paged_query({
+          expect_matches: { exact: 999 },
+          page: { limit: 5, cursor: mismatch.details.cursor },
+        }),
+      ),
+    ).toThrowError(expect.objectContaining({ code: "PRECONDITION_FAILED" }));
+
     const second = run_query_v2(
       [input],
       paged_query({
-        expect_matches: { exact: 999 },
+        expect_matches: 1,
         page: { limit: 5, cursor: mismatch.details.cursor },
       }),
     );
-    expect(second.matches.map((match) => match.raw)).toEqual([
+    expect(second.matches.map((match) => match.projection.raw)).toEqual([
       "value-10",
       "value-11",
       "value-12",
       "value-13",
       "value-14",
     ]);
+    expect(second.matches[0]).toEqual(
+      expect.objectContaining({
+        source_path: "/tmp/candidates.yaml",
+        document: 0,
+        line: expect.any(Number),
+        column: expect.any(Number),
+        byte_range: {
+          start_byte: expect.any(Number),
+          end_byte: expect.any(Number),
+        },
+        path: expect.any(Array),
+        ancestor_paths: expect.any(Array),
+        projection: expect.objectContaining({ raw: "value-10" }),
+      }),
+    );
     expect(decode_query_cursor(second.next_cursor)).toMatchObject({
       purpose: "candidate",
       offset: 15,
@@ -296,11 +344,11 @@ describe("YAML query v2 cursor", () => {
     const third = run_query_v2(
       [input],
       paged_query({
-        expect_matches: 0,
+        expect_matches: 1,
         page: { limit: 5, cursor: second.next_cursor },
       }),
     );
-    expect(third.matches.map((match) => match.raw)).toEqual([
+    expect(third.matches.map((match) => match.projection.raw)).toEqual([
       "value-15",
       "value-16",
       "value-17",
@@ -309,16 +357,62 @@ describe("YAML query v2 cursor", () => {
     ]);
   });
 
-  it("uses digest as a stable tie-breaker for equal normalized paths", () => {
+  it("bounds mismatch candidates and candidate pages by query limits", () => {
+    const text = Array.from(
+      { length: 25 },
+      (_, index) => `key_${index}: value-${String(index).padStart(2, "0")}`,
+    ).join("\n");
+    const input = create_input(`${text}\n`, "/tmp/bounded-candidates.yaml");
+    const bounded_query = paged_query({
+      expect_matches: 1,
+      page: { limit: 10 },
+      projection: { fields: ["raw"], missing: "error" },
+      limits: { max_result: 2, max_output_bytes: 2048 },
+    });
+
+    let mismatch;
+    try {
+      run_query_v2([input], bounded_query);
+    } catch (error) {
+      mismatch = error;
+    }
+    expect(mismatch).toMatchObject({
+      code: "AMBIGUOUS_MATCH",
+      details: {
+        candidates: expect.any(Array),
+        truncated: true,
+        cursor: expect.any(String),
+      },
+    });
+    expect(mismatch.details.candidates.length).toBeLessThanOrEqual(2);
+    expect(
+      Buffer.byteLength(JSON.stringify(mismatch.details.candidates), "utf8"),
+    ).toBeLessThanOrEqual(2048);
+
+    const continuation = run_query_v2([input], {
+      ...bounded_query,
+      page: { limit: 10, cursor: mismatch.details.cursor },
+    });
+    expect(continuation.match_count).toBeLessThanOrEqual(2);
+    expect(continuation.next_cursor).toEqual(expect.any(String));
+    expect(
+      Buffer.byteLength(JSON.stringify(continuation), "utf8"),
+    ).toBeLessThanOrEqual(2048);
+  });
+
+  it("rejects duplicate normalized participant source paths", () => {
     const first = create_input("a: value-first\n", "/tmp/same.yaml");
-    const second = create_input("a: value-second\n", "/tmp/same.yaml");
-    const forward = run_query_v2([first, second], paged_query()).matches.map(
-      (match) => match.raw,
+    const second = create_input(
+      "a: value-second\n",
+      "/tmp/duplicate/../same.yaml",
     );
-    const reverse = run_query_v2([second, first], paged_query()).matches.map(
-      (match) => match.raw,
+
+    expect(() => run_query_v2([first, second], paged_query())).toThrowError(
+      expect.objectContaining({
+        code: "REQUEST_ERROR",
+        details: expect.objectContaining({ source_path: "/tmp/same.yaml" }),
+      }),
     );
-    expect(reverse).toEqual(forward);
   });
 
   it("binds cursors to source and semantic query state", () => {

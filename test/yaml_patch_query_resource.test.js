@@ -62,6 +62,21 @@ describe("YAML query v2 worker resources", () => {
     );
   });
 
+  it("keeps isolated raw regex execution under the worker wall timeout", async () => {
+    const [file_path] = await create_sources(["key: value-one\n"]);
+
+    await expect(
+      run_isolated_yaml_action(
+        "query_v2",
+        { file_path, query: resource_query() },
+        { timeout_ms: 1 },
+      ),
+    ).rejects.toMatchObject({
+      code: "VALIDATION_FAILED",
+      details: { action: "query_v2", timeout_ms: 1 },
+    });
+  });
+
   it("enforces file count and aggregate source byte limits", async () => {
     const file_paths = await create_sources([
       "key: value-one\n",
@@ -121,4 +136,22 @@ describe("YAML query v2 worker resources", () => {
       }),
     ).rejects.toMatchObject({ code: "REQUEST_ERROR" });
   });
+
+  it.each(["ignored_top_level_field", "raw_regex_worker_capability"])(
+    "rejects unknown query_v2 payload field: %s",
+    async (field) => {
+      const [file_path] = await create_sources(["key: value-one\n"]);
+
+      await expect(
+        run_isolated_yaml_action("query_v2", {
+          file_path,
+          query: resource_query(),
+          [field]: true,
+        }),
+      ).rejects.toMatchObject({
+        code: "REQUEST_ERROR",
+        details: { field },
+      });
+    },
+  );
 });

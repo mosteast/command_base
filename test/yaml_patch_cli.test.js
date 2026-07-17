@@ -20,9 +20,9 @@ afterEach(async () => {
   );
 });
 
-function run_cli(args) {
+function run_cli(args, stdin = null) {
   return new Promise((resolve) => {
-    execFile(
+    const child = execFile(
       process.execPath,
       [cli_path, ...args],
       {
@@ -37,6 +37,10 @@ function run_cli(args) {
         });
       },
     );
+    child.stdin.on("error", (error) => {
+      if (error.code !== "EPIPE") throw error;
+    });
+    child.stdin.end(stdin);
   });
 }
 
@@ -106,6 +110,9 @@ describe("yaml_patch general CLI", () => {
     expect(result.stdout).toContain("--max-result");
     expect(result.stdout).toContain("--max-output-byte");
     expect(result.stdout).toContain("--offset");
+    expect(result.stdout).toContain(
+      "Use - to read one bounded JSON document from stdin",
+    );
     expect(result.stdout).toContain("Examples");
     expect(result.stdout).toContain("# Inspect all YAML files");
     expect(result.stderr).toBe("");
@@ -386,6 +393,72 @@ describe("yaml_patch general CLI", () => {
 });
 
 describe("yaml_patch inspect and find", () => {
+  it("reads one bounded fatal-UTF-8 query JSON document from stdin", async () => {
+    const directory = await create_workspace({
+      "source.yaml": "service:\n  timeout: 30\n",
+    });
+    const source_path = path.join(directory, "source.yaml");
+    const query = JSON.stringify({
+      version: 1,
+      path: [{ mapping_key: "service" }, { mapping_key: "timeout" }],
+      node_type: "scalar",
+    });
+
+    const result = await run_cli(
+      ["find", source_path, "--query", "-", "--debug"],
+      query,
+    );
+
+    expect(result.exit_code).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      ok: true,
+      result: { match_count: 1 },
+    });
+    expect(result.stderr).toContain("[DEBUG] io: read query stdin");
+  });
+
+  it.each([
+    ["invalid UTF-8", Buffer.from([0xff])],
+    ["oversized input", Buffer.alloc(1024 * 1024 + 1, 0x20)],
+  ])("rejects %s query JSON from stdin", async (_name, stdin) => {
+    const directory = await create_workspace();
+    const result = await run_cli(
+      ["find", path.join(directory, "source.yaml"), "--query", "-"],
+      stdin,
+    );
+
+    expect(result.exit_code).toBe(2);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      ok: false,
+      code: "REQUEST_ERROR",
+      message: expect.stringContaining("stdin"),
+    });
+  });
+
+  it("rejects more than one JSON stdin consumer", async () => {
+    const directory = await create_workspace();
+    const result = await run_cli(
+      [
+        "find",
+        path.join(directory, "source.yaml"),
+        "--query",
+        "-",
+        "--operations",
+        "-",
+      ],
+      JSON.stringify({ version: 1 }),
+    );
+
+    expect(result.exit_code).toBe(2);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      ok: false,
+      code: "REQUEST_ERROR",
+      message: expect.stringContaining(
+        "Only one JSON input may read from stdin",
+      ),
+    });
+  });
+
   it("expands glob patterns and inspects YAML streams in stable path order", async () => {
     const directory = await create_workspace({
       "b.yaml": "enabled: false\n",

@@ -269,7 +269,7 @@ describe("YAML query v2 AST", () => {
     expect(result.matches).toEqual([expect.objectContaining({ raw: "two" })]);
   });
 
-  it("supports exact raw, digest, regex, string policy, and number ranges", () => {
+  it("supports exact raw, digest, string policy, and number ranges", () => {
     const input = create_input("word: 'Café'\nfold: 'Straße'\nnumber: 2.5\n");
     const word = input.addressable_index.entries.find(
       (entry) => entry.addressable_type === "scalar" && entry.raw === "'Café'",
@@ -277,7 +277,6 @@ describe("YAML query v2 AST", () => {
     const predicates = [
       { predicate: "raw_equals", equals: "'Café'" },
       { predicate: "raw_digest", equals: word.raw_digest },
-      { predicate: "raw_regex", pattern: "^'caf", flags: "i" },
       {
         predicate: "string_equals",
         value: "CAFÉ",
@@ -316,6 +315,25 @@ describe("YAML query v2 AST", () => {
         }),
       ).matches,
     ).toEqual([expect.objectContaining({ raw: "2.5" })]);
+  });
+
+  it("rejects raw regex execution outside an isolated worker", () => {
+    const input = create_input("word: value\n");
+
+    expect(() =>
+      run_query_v2(
+        [input],
+        query({ predicate: "raw_regex", pattern: "^value$", flags: "" }),
+      ),
+    ).toThrowError(
+      expect.objectContaining({
+        code: "CHANGE_LIMIT_EXCEEDED",
+        details: {
+          limit_name: "raw_regex_execution",
+          required_execution: "isolated_worker",
+        },
+      }),
+    );
   });
 
   it.each([
@@ -448,6 +466,37 @@ describe("YAML query v2 AST", () => {
         projection: { fields: ["scalar_type"], missing: "error" },
       }),
     ).toThrowError(expect.objectContaining({ code: "REQUEST_ERROR" }));
+  });
+
+  it("projects an explicit JSON-safe byte range", () => {
+    const input = create_input("name: café\n");
+    const result = run_query_v2(
+      [input],
+      query(
+        {
+          all: [
+            { predicate: "addressable_type", equals: "scalar" },
+            { predicate: "raw_equals", equals: "café" },
+          ],
+        },
+        ["byte_range", "start_byte", "end_byte"],
+      ),
+    );
+
+    expect(result.matches).toEqual([
+      {
+        byte_range: {
+          start_byte: expect.any(Number),
+          end_byte: expect.any(Number),
+        },
+        start_byte: expect.any(Number),
+        end_byte: expect.any(Number),
+      },
+    ]);
+    expect(result.matches[0].byte_range).toEqual({
+      start_byte: result.matches[0].start_byte,
+      end_byte: result.matches[0].end_byte,
+    });
   });
 
   it("rejects unknown schemas, malicious data, AST excess, and regex excess", () => {
