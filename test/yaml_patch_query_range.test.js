@@ -128,25 +128,25 @@ describe("YAML node index and first-version query", () => {
         version: 1,
         path: [{ mapping_key: "services", required_future_field: true }],
       }),
-    ).toThrowError(expect.objectContaining({ code: "VALIDATION_FAILED" }));
+    ).toThrowError(expect.objectContaining({ code: "REQUEST_ERROR" }));
     expect(() =>
       find_nodes(index, {
         version: 1,
         path: [{ mapping_key: "services", sequence_index: 0 }],
       }),
-    ).toThrowError(expect.objectContaining({ code: "VALIDATION_FAILED" }));
+    ).toThrowError(expect.objectContaining({ code: "REQUEST_ERROR" }));
     expect(() =>
       find_nodes(index, {
         version: 1,
         source: { line: 1, required_future_field: true },
       }),
-    ).toThrowError(expect.objectContaining({ code: "VALIDATION_FAILED" }));
+    ).toThrowError(expect.objectContaining({ code: "REQUEST_ERROR" }));
     expect(() =>
       find_nodes(index, {
         version: 1,
         path: [{ mapping_pair_index: 0 }],
       }),
-    ).toThrowError(expect.objectContaining({ code: "VALIDATION_FAILED" }));
+    ).toThrowError(expect.objectContaining({ code: "REQUEST_ERROR" }));
   });
 
   it("selects documents and exact source positions", () => {

@@ -5,6 +5,9 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import package_json from "../package.json";
+import yaml_patch_cli from "../lib/yaml_patch/cli";
+
+const { run_cli: run_cli_library } = yaml_patch_cli;
 
 const cli_path = path.resolve(__dirname, "../bin/yaml_patch");
 const temp_directories = [];
@@ -52,6 +55,20 @@ async function create_workspace(files = { "source.yaml": "value: old\n" }) {
 
 async function write_json(file_path, value) {
   await fs.writeFile(file_path, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+function create_memory_io() {
+  let stdout = "";
+  let stderr = "";
+  return {
+    io: {
+      stdout: { write: (value) => (stdout += value) },
+      stderr: { write: (value) => (stderr += value) },
+    },
+    read() {
+      return { stdout, stderr };
+    },
+  };
 }
 
 describe("yaml_patch general CLI", () => {
@@ -262,6 +279,94 @@ describe("yaml_patch general CLI", () => {
     }
   });
 
+  it("classifies valid JSON request schema errors without masking YAML validation", async () => {
+    const directory = await create_workspace();
+    const source_path = path.join(directory, "source.yaml");
+    const requests = [
+      {
+        name: "query version",
+        option: "--query",
+        command: "find",
+        document: { version: 99 },
+        code: "PROTOCOL_VERSION_UNSUPPORTED",
+      },
+      {
+        name: "query field",
+        option: "--query",
+        command: "find",
+        document: { version: 1, unexpected: true },
+        code: "REQUEST_ERROR",
+      },
+      {
+        name: "query structure",
+        option: "--query",
+        command: "find",
+        document: {
+          version: 1,
+          path: [{ mapping_key: "value", sequence_index: 0 }],
+        },
+        code: "REQUEST_ERROR",
+      },
+      {
+        name: "operation version",
+        option: "--operations",
+        command: "patch",
+        document: { version: 99, operations: [] },
+        code: "PROTOCOL_VERSION_UNSUPPORTED",
+      },
+      {
+        name: "operation field",
+        option: "--operations",
+        command: "patch",
+        document: { version: 1, operations: [], unexpected: true },
+        code: "REQUEST_ERROR",
+      },
+    ];
+
+    for (const request of requests) {
+      const request_path = path.join(directory, `${request.name}.json`);
+      await write_json(request_path, request.document);
+      const result = await run_cli([
+        request.command,
+        source_path,
+        request.option,
+        request_path,
+      ]);
+
+      expect(result.exit_code, request.name).toBe(2);
+      expect(JSON.parse(result.stdout), request.name).toMatchObject({
+        ok: false,
+        code: request.code,
+      });
+    }
+  });
+
+  it("normalizes thrown values once for both the envelope and exit code", async () => {
+    const thrown_values = [
+      Object.assign(new Error("plain failure"), { code: "NO_MATCH" }),
+      { ok: true, code: "NO_MATCH", message: "not an Error" },
+    ];
+
+    for (const thrown_value of thrown_values) {
+      const args = new Proxy([], {
+        get() {
+          throw thrown_value;
+        },
+      });
+      const memory = create_memory_io();
+
+      const exit_code = await run_cli_library(args, memory.io);
+      const output = memory.read();
+
+      expect(exit_code).toBe(70);
+      expect(JSON.parse(output.stdout)).toMatchObject({
+        ok: false,
+        code: "INTERNAL_ERROR",
+      });
+      expect(output.stderr).toBe("");
+    }
+  });
+
   it("reports deterministic platform capabilities as JSON", async () => {
     const result = await run_cli(["capabilities", "--json", "--quiet"]);
     const response = JSON.parse(result.stdout);
@@ -447,7 +552,7 @@ describe("yaml_patch inspect and find", () => {
       String(aggregate_limit),
     ]);
 
-    expect(limited.exit_code).not.toBe(0);
+    expect(limited.exit_code).toBe(6);
     expect(JSON.parse(limited.stdout)).toMatchObject({
       ok: false,
       code: "CHANGE_LIMIT_EXCEEDED",

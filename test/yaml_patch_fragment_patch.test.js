@@ -625,7 +625,7 @@ describe("fragment patch compiler", () => {
           },
         ],
       }),
-    ).toThrowError(expect.objectContaining({ code: "VALIDATION_FAILED" }));
+    ).toThrowError(expect.objectContaining({ code: "REQUEST_ERROR" }));
 
     const timeout = select_unique_node(index, {
       path: [{ mapping_key: "service" }, { mapping_key: "timeout" }],
@@ -646,7 +646,7 @@ describe("fragment patch compiler", () => {
           },
         ],
       }),
-    ).toThrowError(expect.objectContaining({ code: "VALIDATION_FAILED" }));
+    ).toThrowError(expect.objectContaining({ code: "REQUEST_ERROR" }));
   });
 });
 

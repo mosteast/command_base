@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   ARTIFACT_VERSION,
+  DIAGNOSTIC_SEVERITIES,
   ERROR_CODE_CATEGORY,
   Yaml_patch_error,
   assert_known_fields,
@@ -195,6 +196,64 @@ describe("yaml_patch canonical JSON", () => {
     }
     expect(getter_call_count).toBe(0);
   });
+
+  it("rejects proxies before invoking any reflection trap", () => {
+    let trap_call_count = 0;
+    const handler = {
+      get() {
+        trap_call_count += 1;
+        throw new Error("get trap must not run");
+      },
+      getOwnPropertyDescriptor() {
+        trap_call_count += 1;
+        throw new Error("descriptor trap must not run");
+      },
+      getPrototypeOf() {
+        trap_call_count += 1;
+        throw new Error("prototype trap must not run");
+      },
+      ownKeys() {
+        trap_call_count += 1;
+        throw new Error("ownKeys trap must not run");
+      },
+    };
+
+    for (const operation of [
+      () => canonical_json(new Proxy({}, handler)),
+      () => assert_known_fields(new Proxy({}, handler), [], "request"),
+    ]) {
+      expect(operation).toThrowError(
+        expect.objectContaining({
+          name: "Yaml_patch_error",
+          code: "VALIDATION_FAILED",
+        }),
+      );
+    }
+    expect(trap_call_count).toBe(0);
+  });
+
+  it("rejects huge sparse arrays before allocating from their length", () => {
+    const sparse = [];
+    sparse.length = 0xffffffff;
+    const original_array_from = Array.from;
+    let array_from_call_count = 0;
+    Array.from = () => {
+      array_from_call_count += 1;
+      throw new Error("Array.from must not run for sparse input");
+    };
+
+    try {
+      expect(() => canonical_json(sparse)).toThrowError(
+        expect.objectContaining({
+          name: "Yaml_patch_error",
+          code: "VALIDATION_FAILED",
+        }),
+      );
+      expect(array_from_call_count).toBe(0);
+    } finally {
+      Array.from = original_array_from;
+    }
+  });
 });
 
 describe("yaml_patch shared schema validation", () => {
@@ -276,13 +335,19 @@ describe("yaml_patch diagnostics", () => {
       document: 0,
       line: 4,
       column: 7,
-      path: [{ mapping_key: "service" }],
+      path: [{ mapping_key: "service", metadata: { ordinal: 1 } }],
       violation: "required field is missing",
       suggested_action: "add the required mapping field",
-      projection: { name: "api" },
+      projection: { node: { name: "api" } },
     };
 
-    expect(create_diagnostic(input)).toEqual(input);
+    const diagnostic = create_diagnostic(input);
+
+    expect(diagnostic).toEqual(input);
+    expect(diagnostic.path).not.toBe(input.path);
+    expect(diagnostic.path[0]).not.toBe(input.path[0]);
+    expect(diagnostic.projection).not.toBe(input.projection);
+    expect(diagnostic.projection.node).not.toBe(input.projection.node);
   });
 
   it("rejects incomplete diagnostics and unknown fields", () => {
@@ -309,6 +374,80 @@ describe("yaml_patch diagnostics", () => {
         details: { label: "diagnostic", field: "unexpected" },
       }),
     );
+  });
+
+  it("strictly validates and clones nested path and projection data", () => {
+    const create_input = (overrides) => ({
+      code: "PROFILE_VIOLATION",
+      severity: "error",
+      rule_id: "rule",
+      file: "config.yaml",
+      document: 0,
+      line: 1,
+      column: 1,
+      path: [],
+      violation: "invalid",
+      suggested_action: "fix it",
+      ...overrides,
+    });
+    let getter_call_count = 0;
+    let proxy_trap_call_count = 0;
+    const accessor = {};
+    Object.defineProperty(accessor, "value", {
+      enumerable: true,
+      get() {
+        getter_call_count += 1;
+        return "hidden";
+      },
+    });
+    const cyclic = {};
+    cyclic.self = cyclic;
+    const sparse = new Array(1);
+    const nested_proxy = new Proxy(
+      {},
+      {
+        get() {
+          proxy_trap_call_count += 1;
+          throw new Error("proxy get trap must not run");
+        },
+        getPrototypeOf() {
+          proxy_trap_call_count += 1;
+          throw new Error("proxy prototype trap must not run");
+        },
+        ownKeys() {
+          proxy_trap_call_count += 1;
+          throw new Error("proxy ownKeys trap must not run");
+        },
+      },
+    );
+    const invalid_inputs = [
+      create_input({ path: [{ value: undefined }] }),
+      create_input({ path: [{ value: () => true }] }),
+      create_input({ path: [accessor] }),
+      create_input({ path: [nested_proxy] }),
+      create_input({ path: sparse }),
+      create_input({ projection: { nested: cyclic } }),
+      create_input({ projection: { nested: undefined } }),
+      create_input({ projection: { nested: () => true } }),
+      create_input({ projection: { nested: nested_proxy } }),
+    ];
+
+    for (const input of invalid_inputs) {
+      expect(() => create_diagnostic(input)).toThrowError(
+        expect.objectContaining({
+          name: "Yaml_patch_error",
+          code: "VALIDATION_FAILED",
+        }),
+      );
+    }
+    expect(getter_call_count).toBe(0);
+    expect(proxy_trap_call_count).toBe(0);
+  });
+
+  it("exports immutable diagnostic severities", () => {
+    expect(DIAGNOSTIC_SEVERITIES).toEqual(["error", "warning", "info"]);
+    expect(Object.isFrozen(DIAGNOSTIC_SEVERITIES)).toBe(true);
+    expect(() => DIAGNOSTIC_SEVERITIES.push("fatal")).toThrow(TypeError);
   });
 });
 
