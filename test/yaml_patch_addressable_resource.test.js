@@ -11,7 +11,12 @@ const require = createRequire(import.meta.url);
 const { canonical_json } = artifact_version_module;
 const { create_source_record, sha256_digest } = source_module;
 const { parse_yaml_source } = parser_module;
-const { build_node_index, encode_locator, get_index_node } = node_index_module;
+const {
+  build_node_index,
+  encode_locator,
+  get_index_node,
+  validate_node_index_integrity,
+} = node_index_module;
 const {
   DEFAULT_MAX_ADDRESSABLE_COUNT,
   DEFAULT_MAX_ALIAS_RESOLUTION_COUNT,
@@ -157,6 +162,50 @@ describe("YAML addressable resource and integrity boundaries", () => {
     first_value.size_characters = second_value.size_characters;
     first_value.locator = encode_locator(first_value);
 
+    expect(() => build_addressable_index(index)).toThrowError(
+      expect.objectContaining({ code: "PRECONDITION_FAILED" }),
+    );
+  });
+
+  it.each([
+    ["null", () => null],
+    ["string", () => "invalid"],
+    ["array", () => []],
+    [
+      "accessor",
+      () => {
+        const step = {};
+        Object.defineProperty(step, "mapping_pair_index", {
+          enumerable: true,
+          get() {
+            throw new Error("path getter must not execute");
+          },
+        });
+        return step;
+      },
+    ],
+    [
+      "Proxy",
+      () =>
+        new Proxy(
+          {},
+          {
+            ownKeys() {
+              throw new Error("path Proxy trap must not execute");
+            },
+          },
+        ),
+    ],
+  ])("normalizes an invalid %s v1 path step", (_label, create_step) => {
+    const index = create_index("value: old\n");
+    const value_entry = index.entries.find(
+      (entry) => entry.relationship === "mapping_value",
+    );
+    value_entry.path = [create_step()];
+
+    expect(() => validate_node_index_integrity(index)).toThrowError(
+      expect.objectContaining({ code: "PRECONDITION_FAILED" }),
+    );
     expect(() => build_addressable_index(index)).toThrowError(
       expect.objectContaining({ code: "PRECONDITION_FAILED" }),
     );
