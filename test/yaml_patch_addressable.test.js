@@ -5,7 +5,7 @@ import parser_module from "../lib/yaml_patch/parser";
 import node_index_module from "../lib/yaml_patch/node_index";
 import addressable_module from "../lib/yaml_patch/addressable";
 
-const { create_source_record } = source_module;
+const { create_source_record, sha256_digest } = source_module;
 const { parse_yaml_source } = parser_module;
 const { build_node_index, get_index_node } = node_index_module;
 const { build_addressable_index, resolve_alias_target, typed_scalar_metadata } =
@@ -245,6 +245,56 @@ custom: !opaque 1
     });
   });
 
+  it("omits typed metadata when a standard tag fails to resolve", () => {
+    const index = create_index(`failed_float: !!float nope
+failed_integer: !!int nope
+failed_boolean: !!bool nope
+failed_null: !!null nope
+valid_float: !!float 1.0
+valid_integer: !!int 1
+valid_boolean: !!bool true
+valid_null: !!null null
+`);
+    const addressable_index = build_addressable_index(index);
+
+    function mapping_value(mapping_key) {
+      const v1_entry = index.entries.find(
+        (entry) =>
+          entry.relationship === "mapping_value" &&
+          entry.mapping_key === mapping_key,
+      );
+      return addressable_index.node_entry_by_id.get(v1_entry.id);
+    }
+
+    for (const mapping_key of [
+      "failed_float",
+      "failed_integer",
+      "failed_boolean",
+      "failed_null",
+    ]) {
+      const entry = mapping_value(mapping_key);
+      expect(entry.raw).toBe("nope");
+      expect(entry.scalar_type).toBeUndefined();
+      expect(entry.scalar_value).toBeUndefined();
+    }
+    expect(mapping_value("valid_float")).toMatchObject({
+      scalar_type: "float",
+      scalar_value: 1,
+    });
+    expect(mapping_value("valid_integer")).toMatchObject({
+      scalar_type: "integer",
+      scalar_value: 1,
+    });
+    expect(mapping_value("valid_boolean")).toMatchObject({
+      scalar_type: "boolean",
+      scalar_value: true,
+    });
+    expect(mapping_value("valid_null")).toMatchObject({
+      scalar_type: "null",
+      scalar_value: null,
+    });
+  });
+
   it("derives BOM, document, complex pair, and sequence item ranges from CST", () => {
     const text = `%YAML 1.2
 ---
@@ -330,6 +380,116 @@ items:
       "scalar",
     ).find((entry) => entry.relationship === "mapping_value");
     expect(block_scalar.raw).toBe("|+\n  first\n  second\n");
+  });
+
+  it.each([
+    ["{? key}\n", "? key"],
+    ["{ : value }\n", " : value "],
+    ["{key: value}\n", "key: value"],
+  ])(
+    "indexes every key, value, and indicator in flow mapping %s",
+    (text, expected_pair_raw) => {
+      const index = create_index(text);
+      const addressable_index = build_addressable_index(index);
+      const pair = entries_of_type(addressable_index, "mapping_pair")[0];
+      const relationships = pair.child_ids.map((id) =>
+        addressable_index.by_id.get(id),
+      );
+
+      expect(pair.raw).toBe(expected_pair_raw);
+      expect(relationships.map((entry) => entry.addressable_type)).toEqual([
+        "mapping_key",
+        "mapping_value",
+      ]);
+      for (const relationship of relationships) {
+        expect(relationship.source.start_byte).toBeGreaterThanOrEqual(
+          pair.source.start_byte,
+        );
+        expect(relationship.source.end_byte).toBeLessThanOrEqual(
+          pair.source.end_byte,
+        );
+        expect(relationship.direct_child_count).toBe(1);
+        if (relationship.raw === "") {
+          const scalar = addressable_index.by_id.get(relationship.child_ids[0]);
+          expect(relationship.raw_digest).toBe(sha256_digest(Buffer.alloc(0)));
+          expect(scalar).toMatchObject({
+            addressable_type: "scalar",
+            scalar_type: "null",
+            scalar_value: null,
+            raw: "",
+            size_bytes: 0,
+          });
+        }
+      }
+    },
+  );
+
+  it("indexes a compact mapping as the contained node of a flow sequence item", () => {
+    const index = create_index("[a: b]\n");
+    const addressable_index = build_addressable_index(index);
+    const sequence = entries_of_type(addressable_index, "sequence")[0];
+    const sequence_item = addressable_index.by_id.get(sequence.child_ids[0]);
+    const mapping = addressable_index.by_id.get(sequence_item.child_ids[0]);
+
+    expect(sequence_item).toMatchObject({
+      addressable_type: "sequence_item",
+      raw: "a: b",
+    });
+    expect(mapping).toMatchObject({
+      addressable_type: "mapping",
+      raw: "a: b",
+      parent_id: sequence_item.id,
+    });
+    expect(addressable_index.by_id.get(mapping.child_ids[0])).toMatchObject({
+      addressable_type: "mapping_pair",
+      raw: "a: b",
+    });
+  });
+
+  it.each(["{key}\n", "key:\n"])(
+    "creates a zero-width typed null mapping value for %s",
+    (text) => {
+      const index = create_index(text);
+      const addressable_index = build_addressable_index(index);
+      const pair = entries_of_type(addressable_index, "mapping_pair")[0];
+      const mapping_value = pair.child_ids
+        .map((id) => addressable_index.by_id.get(id))
+        .find((entry) => entry.addressable_type === "mapping_value");
+      const scalar = addressable_index.by_id.get(mapping_value.child_ids[0]);
+
+      expect(mapping_value).toMatchObject({ raw: "", size_bytes: 0 });
+      expect(mapping_value.mapping_key).toBe("key");
+      expect(scalar).toMatchObject({
+        addressable_type: "scalar",
+        node_type: "scalar",
+        scalar_type: "null",
+        scalar_value: null,
+        raw: "",
+        size_bytes: 0,
+        mapping_key: "key",
+      });
+      expect(scalar.raw_digest).toBe(mapping_value.raw_digest);
+      expect(scalar.raw_digest).toBe(sha256_digest(Buffer.alloc(0)));
+    },
+  );
+
+  it("keeps a legal implicit null sequence item zero-width", () => {
+    const index = create_index("- # empty\n- value\n");
+    const addressable_index = build_addressable_index(index);
+    const sequence_item = entries_of_type(
+      addressable_index,
+      "sequence_item",
+    )[0];
+    const scalar = addressable_index.by_id.get(sequence_item.child_ids[0]);
+
+    expect(sequence_item.raw).toBe("- # empty\n");
+    expect(scalar).toMatchObject({
+      addressable_type: "scalar",
+      scalar_type: "null",
+      scalar_value: null,
+      raw: "",
+      size_bytes: 0,
+    });
   });
 
   it("keeps aliases opaque by default and resolves targets only on request", () => {
