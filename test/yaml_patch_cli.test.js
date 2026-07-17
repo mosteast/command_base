@@ -202,11 +202,11 @@ describe("yaml_patch general CLI", () => {
     const result = await run_cli(["capabilities", "--unknown"]);
     const response = JSON.parse(result.stdout);
 
-    expect(result.exit_code).not.toBe(0);
+    expect(result.exit_code).toBe(2);
     expect(response).toMatchObject({
       ok: false,
       protocol_version: 1,
-      code: "VALIDATION_FAILED",
+      code: "REQUEST_ERROR",
       recoverable: false,
     });
     expect(response.message).toContain("unknown");
@@ -574,7 +574,7 @@ describe("yaml_patch patch and validate", () => {
     ]);
     const response = JSON.parse(result.stdout);
 
-    expect(result.exit_code).not.toBe(0);
+    expect(result.exit_code).toBe(4);
     expect(response).toMatchObject({
       ok: false,
       code: "VALIDATION_FAILED",
