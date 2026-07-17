@@ -23,7 +23,11 @@ const {
   load_edit_package,
   write_edit_package,
 } = fragment_module;
-const { compile_fragment_patch, compile_operation_patch } = patch_module;
+const {
+  compile_fragment_patch,
+  compile_operation_patch,
+  serialize_operation_value,
+} = patch_module;
 const { create_byte_proof } = proof_module;
 
 const temp_directories = [];
@@ -649,6 +653,150 @@ describe("fragment patch compiler", () => {
     ).toThrowError(expect.objectContaining({ code: "REQUEST_ERROR" }));
   });
 
+  it("preserves serialization for legal object, array, and scalar values", () => {
+    const cases = [
+      [
+        { second: [1, true, null], first: { nested: "value" } },
+        "second:\n  - 1\n  - true\n  - null\nfirst:\n  nested: value",
+      ],
+      [[1, true, null, "value"], "- 1\n- true\n- null\n- value"],
+      ["value", "value"],
+      [45, "45"],
+      [true, "true"],
+      [null, "null"],
+    ];
+
+    for (const [value, expected] of cases) {
+      expect(serialize_operation_value(value).toString("utf8")).toBe(expected);
+    }
+  });
+
+  it("rejects nested proxy and accessor operation values without evaluating them", () => {
+    const index = create_index("service:\n  timeout: 30\n");
+    const service = select_unique_node(index, {
+      path: [{ mapping_key: "service" }],
+    });
+    let trap_call_count = 0;
+    const nested_proxy = new Proxy(
+      {},
+      {
+        get() {
+          trap_call_count += 1;
+          throw new Error("proxy get trap must not run");
+        },
+        getOwnPropertyDescriptor() {
+          trap_call_count += 1;
+          throw new Error("proxy descriptor trap must not run");
+        },
+        getPrototypeOf() {
+          trap_call_count += 1;
+          throw new Error("proxy prototype trap must not run");
+        },
+        ownKeys() {
+          trap_call_count += 1;
+          throw new Error("proxy ownKeys trap must not run");
+        },
+      },
+    );
+    let getter_call_count = 0;
+    const nested_accessor = {};
+    Object.defineProperty(nested_accessor, "value", {
+      enumerable: true,
+      get() {
+        getter_call_count += 1;
+        return "unsafe";
+      },
+    });
+
+    for (const value of [
+      { nested: nested_proxy },
+      { nested: nested_accessor },
+    ]) {
+      let thrown_error;
+      try {
+        compile_operation_patch(index, {
+          version: 1,
+          operations: [
+            {
+              target: { locator: service.locator },
+              operation: { type: "set_mapping_value", key: "timeout", value },
+            },
+          ],
+        });
+      } catch (error) {
+        thrown_error = error;
+      }
+      expect(thrown_error).toMatchObject({
+        name: "Yaml_patch_error",
+        code: "REQUEST_ERROR",
+      });
+    }
+    expect(trap_call_count).toBe(0);
+    expect(getter_call_count).toBe(0);
+  });
+
+  it.each([
+    [
+      "cycle",
+      () => {
+        const nested = {};
+        nested.self = nested;
+        return { nested };
+      },
+    ],
+    ["function", () => ({ nested: () => true })],
+    ["undefined", () => ({ nested: undefined })],
+    ["sparse array", () => ({ nested: new Array(1) })],
+    [
+      "symbol extra field",
+      () => {
+        const nested = { value: true };
+        nested[Symbol("extra")] = true;
+        return { nested };
+      },
+    ],
+    [
+      "non-enumerable extra field",
+      () => {
+        const nested = { value: true };
+        Object.defineProperty(nested, "extra", {
+          value: true,
+          enumerable: false,
+        });
+        return { nested };
+      },
+    ],
+  ])(
+    "rejects %s in set_mapping_value operation values",
+    (_label, create_value) => {
+      const index = create_index("service:\n  timeout: 30\n");
+      const service = select_unique_node(index, {
+        path: [{ mapping_key: "service" }],
+      });
+
+      expect(() =>
+        compile_operation_patch(index, {
+          version: 1,
+          operations: [
+            {
+              target: { locator: service.locator },
+              operation: {
+                type: "set_mapping_value",
+                key: "timeout",
+                value: create_value(),
+              },
+            },
+          ],
+        }),
+      ).toThrowError(
+        expect.objectContaining({
+          name: "Yaml_patch_error",
+          code: "REQUEST_ERROR",
+        }),
+      );
+    },
+  );
+
   it("validates operation request objects before resolving locators", () => {
     const index = create_index("service:\n  timeout: 30\n");
     const service = select_unique_node(index, {
@@ -696,6 +844,14 @@ describe("fragment patch compiler", () => {
       { operation: {} },
       { operation: { type: 1 } },
       { operation: invalid_proxy },
+      {
+        target: { locator: "missing-locator" },
+        operation: {
+          type: "set_mapping_value",
+          key: "timeout",
+          value: { nested: () => true },
+        },
+      },
       { limits: null },
       { limits: { expect_matches: 2 } },
       { limits: { max_deleted_bytes: -1 } },

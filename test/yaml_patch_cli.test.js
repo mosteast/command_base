@@ -801,6 +801,15 @@ describe("yaml_patch patch and validate", () => {
         code: "UNSUPPORTED_EDIT_UNIT",
       },
       {
+        name: "missing mapping value",
+        entry: {
+          target: valid_target,
+          operation: { type: "set_mapping_value", key: "timeout" },
+        },
+        exit_code: 2,
+        code: "REQUEST_ERROR",
+      },
+      {
         name: "expect matches",
         entry: {
           target: valid_target,
@@ -869,6 +878,37 @@ describe("yaml_patch patch and validate", () => {
         code: test_case.code,
       });
     }
+
+    const non_finite_value_path = path.join(
+      directory,
+      "non_finite_mapping_value.json",
+    );
+    const non_finite_value_document = JSON.stringify({
+      version: 1,
+      operations: [
+        {
+          target: valid_target,
+          operation: {
+            type: "set_mapping_value",
+            key: "timeout",
+            value: "__NON_FINITE_VALUE__",
+          },
+        },
+      ],
+    }).replace('"__NON_FINITE_VALUE__"', "1e400");
+    await fs.writeFile(non_finite_value_path, non_finite_value_document);
+
+    const non_finite_value_result = await run_cli([
+      "patch",
+      source_path,
+      "--operations",
+      non_finite_value_path,
+    ]);
+    expect(non_finite_value_result.exit_code).toBe(2);
+    expect(JSON.parse(non_finite_value_result.stdout)).toMatchObject({
+      ok: false,
+      code: "REQUEST_ERROR",
+    });
   });
 
   it("returns a stable validation failure for invalid YAML", async () => {

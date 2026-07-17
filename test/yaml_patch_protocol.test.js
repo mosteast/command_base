@@ -10,6 +10,7 @@ import {
   assert_object,
   canonical_digest,
   canonical_json,
+  clone_json_value,
   create_diagnostic,
   error_response,
   exit_code_for_error,
@@ -67,6 +68,24 @@ describe("yaml_patch artifact versions", () => {
 });
 
 describe("yaml_patch canonical JSON", () => {
+  it("deep-clones JSON values without changing legal value order or scalars", () => {
+    const input = {
+      second: [1, true, null, "value"],
+      first: { nested: 2 },
+    };
+
+    const cloned = clone_json_value(input, "operation value");
+
+    expect(cloned).toEqual(input);
+    expect(cloned).not.toBe(input);
+    expect(cloned.second).not.toBe(input.second);
+    expect(cloned.first).not.toBe(input.first);
+    expect(Object.keys(cloned)).toEqual(["second", "first"]);
+    for (const scalar of [null, false, true, 0, 42, "value"]) {
+      expect(clone_json_value(scalar, "operation value")).toBe(scalar);
+    }
+  });
+
   it("recursively sorts object keys while preserving array order", () => {
     const left = {
       z: [{ y: 2, x: 1 }, "second"],
