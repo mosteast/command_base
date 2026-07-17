@@ -37,6 +37,7 @@
     "inquirer": "^7.0.4",
     "jsdom": "^23.0.1",
     "lodash": "^4.17.15",
+    "minimatch": "^10.0.3",
     "minimist": "^1.2.8",
     "playwright": "^1.49.1",
     "shelljs": "^0.8.3",
