@@ -146,4 +146,23 @@ describe("yaml@2.8.0 parser adapter", () => {
     });
     expect(parsed.errors[0].message).toContain("Flow sequence");
   });
+
+  it("classifies only stack-exhaustion RangeErrors as structural limits", () => {
+    const source = create_source_record(Buffer.from("value: old\n", "utf8"));
+
+    expect(() =>
+      parse_yaml_source(source, {
+        parse_all_documents() {
+          throw new RangeError("Maximum call stack size exceeded");
+        },
+      }),
+    ).toThrowError(expect.objectContaining({ code: "CHANGE_LIMIT_EXCEEDED" }));
+    expect(() =>
+      parse_yaml_source(source, {
+        parse_all_documents() {
+          throw new RangeError("numeric range is invalid");
+        },
+      }),
+    ).toThrowError(expect.objectContaining({ code: "INTERNAL_ERROR" }));
+  });
 });

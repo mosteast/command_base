@@ -9,9 +9,9 @@ import addressable_module from "../lib/yaml_patch/addressable";
 
 const require = createRequire(import.meta.url);
 const { canonical_json } = artifact_version_module;
-const { create_source_record } = source_module;
+const { create_source_record, sha256_digest } = source_module;
 const { parse_yaml_source } = parser_module;
-const { build_node_index, get_index_node } = node_index_module;
+const { build_node_index, encode_locator, get_index_node } = node_index_module;
 const {
   DEFAULT_MAX_ADDRESSABLE_COUNT,
   DEFAULT_MAX_ALIAS_RESOLUTION_COUNT,
@@ -140,6 +140,28 @@ describe("YAML addressable resource and integrity boundaries", () => {
     );
   });
 
+  it("rejects v1 range and raw metadata redirected to another node", () => {
+    const index = create_index("a: one\nb: two\n");
+    const first_value = index.entries.find(
+      (entry) =>
+        entry.mapping_key === "a" && entry.relationship === "mapping_value",
+    );
+    const second_value = index.entries.find(
+      (entry) =>
+        entry.mapping_key === "b" && entry.relationship === "mapping_value",
+    );
+    first_value.source = { ...second_value.source };
+    first_value.raw = second_value.raw;
+    first_value.raw_digest = second_value.raw_digest;
+    first_value.size_bytes = second_value.size_bytes;
+    first_value.size_characters = second_value.size_characters;
+    first_value.locator = encode_locator(first_value);
+
+    expect(() => build_addressable_index(index)).toThrowError(
+      expect.objectContaining({ code: "PRECONDITION_FAILED" }),
+    );
+  });
+
   it("resolves aliases from one deterministic table without node.resolve", () => {
     const alias_count = 100;
     const text = `values: [&shared target, ${Array.from(
@@ -210,17 +232,86 @@ describe("YAML addressable resource and integrity boundaries", () => {
     const range_index = create_index("values: [&shared target, *shared]\n");
     const range_addressable = build_addressable_index(range_index);
     const range_alias = entries_of_type(range_addressable, "alias")[0];
-    range_alias.source.start_byte -= 1;
-    range_alias.path = [];
-    range_alias.locator = encode_locator_v2(
-      range_alias,
+    const forged_range_alias = {
+      ...range_alias,
+      source: {
+        ...range_alias.source,
+        start_byte: range_alias.source.start_byte - 1,
+      },
+      path: [],
+      child_ids: [...range_alias.child_ids],
+    };
+    forged_range_alias.locator = encode_locator_v2(
+      forged_range_alias,
       range_index.source.digest,
     );
+    range_addressable.by_id.set(forged_range_alias.id, forged_range_alias);
+    range_addressable.node_entry_by_id.set(
+      forged_range_alias.node_id,
+      forged_range_alias,
+    );
     expect(() =>
-      resolve_alias_target(range_index, range_alias, {
+      resolve_alias_target(range_index, forged_range_alias, {
         addressable_index: range_addressable,
       }),
     ).toThrowError(expect.objectContaining({ code: "PRECONDITION_FAILED" }));
+  });
+
+  it("rejects resigned alias provenance and synchronized map replacement", () => {
+    const index = create_index("values: [&shared target, *shared]\n");
+    const addressable_index = build_addressable_index(index);
+    const alias_entry = entries_of_type(addressable_index, "alias")[0];
+    const forged_alias = {
+      ...alias_entry,
+      raw: "*forged",
+      raw_digest: sha256_digest(Buffer.from("*forged")),
+      source: {
+        ...alias_entry.source,
+        line: alias_entry.source.line + 1,
+        column: alias_entry.source.column + 1,
+      },
+      path: alias_entry.path.map((step) => ({ ...step })),
+      child_ids: [...alias_entry.child_ids],
+    };
+    forged_alias.locator = encode_locator_v2(forged_alias, index.source.digest);
+    addressable_index.by_id.set(forged_alias.id, forged_alias);
+    addressable_index.node_entry_by_id.set(forged_alias.node_id, forged_alias);
+
+    expect(() =>
+      resolve_alias_target(index, forged_alias, { addressable_index }),
+    ).toThrowError(expect.objectContaining({ code: "PRECONDITION_FAILED" }));
+
+    const map_index = create_index("values: [&shared target, *shared]\n");
+    const map_addressable = build_addressable_index(map_index);
+    const canonical_alias = entries_of_type(map_addressable, "alias")[0];
+    const replacement = {
+      ...canonical_alias,
+      path: canonical_alias.path.map((step) => ({ ...step })),
+      source: { ...canonical_alias.source },
+      child_ids: [...canonical_alias.child_ids],
+    };
+    expect(() => {
+      map_addressable.entries[canonical_alias.ordinal] = replacement;
+    }).toThrow(TypeError);
+    map_addressable.by_id.set(replacement.id, replacement);
+    map_addressable.node_entry_by_id.set(replacement.node_id, replacement);
+
+    expect(() =>
+      resolve_alias_target(map_index, replacement, {
+        addressable_index: map_addressable,
+      }),
+    ).toThrowError(expect.objectContaining({ code: "PRECONDITION_FAILED" }));
+  });
+
+  it("freezes canonical public entry metadata after construction", () => {
+    const index = create_index("value: old\n");
+    const addressable_index = build_addressable_index(index);
+    const entry = addressable_index.entries.at(-1);
+
+    expect(Object.isFrozen(entry)).toBe(true);
+    expect(Object.isFrozen(entry.path)).toBe(true);
+    expect(Object.isFrozen(entry.source)).toBe(true);
+    expect(Object.isFrozen(entry.child_ids)).toBe(true);
   });
 });
 

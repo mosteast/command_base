@@ -1,3 +1,4 @@
+import { createRequire } from "node:module";
 import { describe, expect, it } from "vitest";
 
 import source_module from "../lib/yaml_patch/source";
@@ -10,6 +11,9 @@ const { parse_yaml_source } = parser_module;
 const { build_node_index, get_index_node } = node_index_module;
 const { build_addressable_index, resolve_alias_target, typed_scalar_metadata } =
   addressable_module;
+const commonjs_node_index = createRequire(import.meta.url)(
+  "../lib/yaml_patch/node_index",
+);
 
 function create_index(text_or_buffer, options = {}) {
   const buffer = Buffer.isBuffer(text_or_buffer)
@@ -46,6 +50,13 @@ root:
 `;
 
 describe("YAML addressable index", () => {
+  it("keeps the node-index compatibility exports bound to the facade", () => {
+    expect(commonjs_node_index.build_addressable_index).toBeTypeOf("function");
+    expect(commonjs_node_index.encode_locator_v2).toBeTypeOf("function");
+    expect(commonjs_node_index.resolve_alias_target).toBeTypeOf("function");
+    expect(commonjs_node_index.typed_scalar_metadata).toBeTypeOf("function");
+  });
+
   it("adds every node and relationship without changing the v1 index", () => {
     const index = create_index(graph_fixture);
     const v1_snapshot = JSON.stringify(index.entries);
