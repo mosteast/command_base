@@ -147,6 +147,54 @@ describe("yaml_patch canonical JSON", () => {
       }),
     );
   });
+
+  it("rejects every non-JSON own property without invoking getters", () => {
+    let getter_call_count = 0;
+    const hidden_data = {};
+    Object.defineProperty(hidden_data, "hidden", {
+      value: true,
+      enumerable: false,
+    });
+    const hidden_accessor = {};
+    Object.defineProperty(hidden_accessor, "hidden", {
+      enumerable: false,
+      get() {
+        getter_call_count += 1;
+        return true;
+      },
+    });
+    const symbol_data = { value: true };
+    symbol_data[Symbol("hidden")] = true;
+    const array_extra_string = ["value"];
+    array_extra_string.extra = true;
+    const array_extra_symbol = ["value"];
+    array_extra_symbol[Symbol("extra")] = true;
+    const array_extra_accessor = ["value"];
+    Object.defineProperty(array_extra_accessor, "extra", {
+      enumerable: false,
+      get() {
+        getter_call_count += 1;
+        return true;
+      },
+    });
+
+    for (const value of [
+      hidden_data,
+      hidden_accessor,
+      symbol_data,
+      array_extra_string,
+      array_extra_symbol,
+      array_extra_accessor,
+    ]) {
+      expect(() => canonical_json(value)).toThrowError(
+        expect.objectContaining({
+          name: "Yaml_patch_error",
+          code: "VALIDATION_FAILED",
+        }),
+      );
+    }
+    expect(getter_call_count).toBe(0);
+  });
 });
 
 describe("yaml_patch shared schema validation", () => {
@@ -171,6 +219,50 @@ describe("yaml_patch shared schema validation", () => {
         details: { label: "request", field: "unexpected" },
       }),
     );
+  });
+
+  it("rejects hidden, symbol, and accessor fields without invoking getters", () => {
+    let getter_call_count = 0;
+    const hidden_unknown = { version: 1 };
+    Object.defineProperty(hidden_unknown, "unexpected", {
+      value: true,
+      enumerable: false,
+    });
+    const symbol_field = { version: 1 };
+    symbol_field[Symbol("unexpected")] = true;
+    const known_accessor = { version: 1 };
+    Object.defineProperty(known_accessor, "known", {
+      enumerable: true,
+      get() {
+        getter_call_count += 1;
+        return true;
+      },
+    });
+    const hidden_accessor = { version: 1 };
+    Object.defineProperty(hidden_accessor, "unexpected", {
+      enumerable: false,
+      get() {
+        getter_call_count += 1;
+        return true;
+      },
+    });
+
+    for (const value of [
+      hidden_unknown,
+      symbol_field,
+      known_accessor,
+      hidden_accessor,
+    ]) {
+      expect(() =>
+        assert_known_fields(value, ["version", "known"], "request"),
+      ).toThrowError(
+        expect.objectContaining({
+          name: "Yaml_patch_error",
+          code: "VALIDATION_FAILED",
+        }),
+      );
+    }
+    expect(getter_call_count).toBe(0);
   });
 });
 

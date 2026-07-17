@@ -212,6 +212,56 @@ describe("yaml_patch general CLI", () => {
     expect(response.message).toContain("unknown");
   });
 
+  it.each(["--version", "--help"])(
+    "validates unknown options before handling %s",
+    async (option) => {
+      const result = await run_cli([option, "--unknown"]);
+      const response = JSON.parse(result.stdout);
+
+      expect(result.exit_code).toBe(2);
+      expect(response).toMatchObject({
+        ok: false,
+        protocol_version: 1,
+        code: "REQUEST_ERROR",
+      });
+      expect(response.message).toContain("unknown");
+      expect(result.stderr).toBe("");
+    },
+  );
+
+  it("classifies incomplete and unreadable request inputs as exit 2", async () => {
+    const directory = await create_workspace();
+    const source_path = path.join(directory, "source.yaml");
+    const query_path = path.join(directory, "query.json");
+    const invalid_query_path = path.join(directory, "invalid-query.json");
+    await write_json(query_path, { version: 1 });
+    await fs.writeFile(invalid_query_path, "{not-json\n");
+
+    const request_args = [
+      ["inspect"],
+      ["find", source_path],
+      ["find", "--query", query_path],
+      ["find", source_path, "--query", invalid_query_path],
+      [
+        "find",
+        source_path,
+        "--query",
+        path.join(directory, "missing-query.json"),
+      ],
+      ["extract", source_path, "--query", query_path],
+      ["patch", source_path],
+    ];
+
+    for (const args of request_args) {
+      const result = await run_cli(args);
+      expect(result.exit_code, args.join(" ")).toBe(2);
+      expect(JSON.parse(result.stdout), args.join(" ")).toMatchObject({
+        ok: false,
+        code: "REQUEST_ERROR",
+      });
+    }
+  });
+
   it("reports deterministic platform capabilities as JSON", async () => {
     const result = await run_cli(["capabilities", "--json", "--quiet"]);
     const response = JSON.parse(result.stdout);
@@ -298,6 +348,24 @@ describe("yaml_patch inspect and find", () => {
     });
     expect(response.result.matches[0].locator).toBeTruthy();
     expect(response.result.matches[0].raw).toBeUndefined();
+  });
+
+  it("keeps a valid query with no results in the query-conflict category", async () => {
+    const directory = await create_workspace();
+    const source_path = path.join(directory, "source.yaml");
+    const query_path = path.join(directory, "query.json");
+    await write_json(query_path, {
+      version: 1,
+      path: [{ mapping_key: "missing" }],
+    });
+
+    const result = await run_cli(["find", source_path, "--query", query_path]);
+
+    expect(result.exit_code).toBe(3);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      ok: false,
+      code: "NO_MATCH",
+    });
   });
 
   it("paginates broad find queries with an explicit result limit", async () => {
