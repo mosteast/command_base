@@ -1,0 +1,15 @@
+#!/usr/bin/env node
+
+"use strict";
+
+const { run_cli } = require("../lib/yaml_patch/cli");
+
+run_cli().then(
+  (exit_code) => {
+    process.exitCode = exit_code;
+  },
+  (error) => {
+    process.stderr.write(`${error && error.stack ? error.stack : error}\n`);
+    process.exitCode = 1;
+  },
+);

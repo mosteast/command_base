@@ -13,7 +13,10 @@
   },
   "license": "ISC",
   "author": "",
-  "main": "index.js",
+  "main": "lib/yaml_patch/index.js",
+  "bin": {
+    "yamlpatch": "bin/yamlpatch"
+  },
   "scripts": {
     "format": "npx sort-package-json && git diff --name-only --diff-filter=d -z | xargs -0 -r npx prettier --write --ignore-unknown",
     "test": "echo \"Error: no test specified\" && exit 1"
@@ -40,7 +43,7 @@
     "tree-model": "^1.0.7",
     "turndown": "^7.1.2",
     "vtt-to-text": "^1.0.1",
-    "yaml": "^2.8.1",
+    "yaml": "2.8.0",
     "yargs": "^15.1.0"
   },
   "devDependencies": {
