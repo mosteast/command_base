@@ -108,7 +108,7 @@ describe("cooperative YAML patch lock", () => {
 
     const stale_lock_path = path.join(
       path.dirname(file_path),
-      `.${path.basename(file_path)}.yamlpatch.lock`,
+      `.${path.basename(file_path)}.yaml_patch.lock`,
     );
     const stale_lock = {
       source_path: file_path,
@@ -142,7 +142,7 @@ describe("cooperative YAML patch lock", () => {
     const { file_path } = await create_temp_source();
     const stale_lock_path = path.join(
       path.dirname(file_path),
-      `.${path.basename(file_path)}.yamlpatch.lock`,
+      `.${path.basename(file_path)}.yaml_patch.lock`,
     );
     const stale_lock = {
       source_path: file_path,
@@ -181,7 +181,7 @@ describe("cooperative YAML patch lock", () => {
     await release_file_lock(new_lock);
     expect(
       (await fs.readdir(path.dirname(file_path))).filter((name) =>
-        name.includes("yamlpatch.lock"),
+        name.includes("yaml_patch.lock"),
       ),
     ).toEqual([]);
   });
@@ -411,7 +411,7 @@ describe("atomic YAML patch writer", () => {
     "preserves macOS extended attributes across atomic replacement",
     async () => {
       const { file_path } = await create_temp_source();
-      const attribute_name = "com.command-base.yamlpatch-test";
+      const attribute_name = "com.command-base.yaml_patch-test";
       await exec_file("xattr", ["-w", attribute_name, "preserved", file_path]);
       const edit_package = await create_edit_package(file_path, "new");
 

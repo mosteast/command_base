@@ -65,7 +65,7 @@ describe("YAML edit package", () => {
       "name: api\n  timeout: 30 # keep\n",
     );
     expect(edit_package.manifest).toMatchObject({
-      format: "yamlpatch-edit",
+      format: "yaml_patch-edit",
       version: 1,
       source: {
         path: "/tmp/source.yaml",
@@ -410,7 +410,7 @@ describe("fragment patch compiler", () => {
       "before: untouched\nvalue: 'new value' # tail\nafter: untouched\n",
     );
     expect(result.proof).toMatchObject({
-      format: "yamlpatch-byte-proof",
+      format: "yaml_patch-byte-proof",
       version: 1,
       verified: true,
     });

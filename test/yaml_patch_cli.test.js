@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import package_json from "../package.json";
 
-const cli_path = path.resolve(__dirname, "../bin/yamlpatch");
+const cli_path = path.resolve(__dirname, "../bin/yaml_patch");
 const temp_directories = [];
 
 afterEach(async () => {
@@ -38,7 +38,7 @@ function run_cli(args) {
 }
 
 async function create_workspace(files = { "source.yaml": "value: old\n" }) {
-  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "yamlpatch-cli-"));
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "yaml_patch-cli-"));
   temp_directories.push(directory);
   await Promise.all(
     Object.entries(files).map(async ([relative_path, content]) => {
@@ -54,7 +54,7 @@ async function write_json(file_path, value) {
   await fs.writeFile(file_path, `${JSON.stringify(value, null, 2)}\n`);
 }
 
-describe("yamlpatch general CLI", () => {
+describe("yaml_patch general CLI", () => {
   it("prints only the package version", async () => {
     const result = await run_cli(["--version"]);
 
@@ -65,9 +65,9 @@ describe("yamlpatch general CLI", () => {
     });
   });
 
-  it("publishes the core library and yamlpatch executable", () => {
+  it("publishes the core library and yaml_patch executable", () => {
     expect(package_json.main).toBe("lib/yaml_patch/index.js");
-    expect(package_json.bin).toEqual({ yamlpatch: "bin/yamlpatch" });
+    expect(package_json.bin).toEqual({ yaml_patch: "bin/yaml_patch" });
   });
 
   it("documents usage, commands, options, edit-unit values, and examples", async () => {
@@ -97,7 +97,7 @@ describe("yamlpatch general CLI", () => {
   it("inspects and explicitly breaks a proven stale cooperative lock", async () => {
     const directory = await create_workspace();
     const source_path = path.join(directory, "source.yaml");
-    const lock_path = path.join(directory, ".source.yaml.yamlpatch.lock");
+    const lock_path = path.join(directory, ".source.yaml.yaml_patch.lock");
     const lock = {
       source_path,
       pid: 999999,
@@ -136,7 +136,7 @@ describe("yamlpatch general CLI", () => {
     const source_path = path.join(directory, "source.yaml");
     const guard_path = path.join(
       directory,
-      ".source.yaml.yamlpatch.lock.guard",
+      ".source.yaml.yaml_patch.lock.guard",
     );
     const guard = {
       source_path,
@@ -164,7 +164,7 @@ describe("yamlpatch general CLI", () => {
     const session_path = path.join(directory, "missing session");
     const extract_lock_path = path.join(
       directory,
-      ".missing session.yamlpatch-extract.lock",
+      ".missing session.yaml_patch-extract.lock",
     );
     const extract_lock = {
       output_directory: session_path,
@@ -230,7 +230,7 @@ describe("yamlpatch general CLI", () => {
   });
 });
 
-describe("yamlpatch inspect and find", () => {
+describe("yaml_patch inspect and find", () => {
   it("expands glob patterns and inspects YAML streams in stable path order", async () => {
     const directory = await create_workspace({
       "b.yaml": "enabled: false\n",
@@ -422,7 +422,7 @@ describe("yamlpatch inspect and find", () => {
   });
 });
 
-describe("yamlpatch extract and apply", () => {
+describe("yaml_patch extract and apply", () => {
   it("extracts with refresh protection, dry-runs by default, then writes explicitly", async () => {
     const directory = await create_workspace({
       "source.yaml": "before: same\nvalue: old # tail\nafter: same\n",
@@ -508,7 +508,7 @@ describe("yamlpatch extract and apply", () => {
   });
 });
 
-describe("yamlpatch patch and validate", () => {
+describe("yaml_patch patch and validate", () => {
   it("dry-runs and writes one declarative mapping-value operation", async () => {
     const directory = await create_workspace({
       "source.yaml": "service:\n  timeout: 30\n  enabled: true\n",

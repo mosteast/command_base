@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
-**Goal:** Build the approved first-version lossless YAML patch core and `yamlpatch` CLI with exact-target extraction, full-candidate validation, byte-preservation proof, and guarded atomic writes.
+**Goal:** Build the approved first-version lossless YAML patch core and `yaml_patch` CLI with exact-target extraction, full-candidate validation, byte-preservation proof, and guarded atomic writes.
 
 **Architecture:** Add a focused CommonJS package under `lib/yaml_patch`, with stable plain-object boundaries between source reading, parser adaptation, node indexing/query, fragment packaging, patch validation/proof, and atomic writing. The CLI emits versioned JSON on stdout and diagnostics on stderr; all write paths reuse original buffers and replace exactly one proven byte range.
 
@@ -142,8 +142,8 @@ Expected: PASS.
 - Create: `lib/yaml_patch/protocol.js`
 - Create: `lib/yaml_patch/index.js`
 - Create: `lib/yaml_patch/cli.js`
-- Create: `bin/yamlpatch`
-- Create: `test/yamlpatch_cli.test.js`
+- Create: `bin/yaml_patch`
+- Create: `test/yaml_patch_cli.test.js`
 
 - [x] **Step 1: Write failing CLI tests**
 
@@ -151,9 +151,9 @@ Cover `inspect`, `find`, `extract`, `apply`, `patch`, `validate`, and `capabilit
 
 - [x] **Step 2: Verify RED**
 
-Run: `npx vitest run test/yamlpatch_cli.test.js`
+Run: `npx vitest run test/yaml_patch_cli.test.js`
 
-Expected: FAIL because `bin/yamlpatch` does not exist.
+Expected: FAIL because `bin/yaml_patch` does not exist.
 
 - [x] **Step 3: Implement protocol and CLI orchestration**
 
@@ -161,7 +161,7 @@ Use `{ ok, protocol_version, result }` success envelopes and `{ ok: false, proto
 
 - [x] **Step 4: Verify GREEN and focused regression**
 
-Run: `npx vitest run test/yamlpatch_cli.test.js test/yaml_patch_source_parser.test.js test/yaml_patch_query_range.test.js test/yaml_patch_fragment_patch.test.js test/yaml_patch_writer.test.js`
+Run: `npx vitest run test/yaml_patch_cli.test.js test/yaml_patch_source_parser.test.js test/yaml_patch_query_range.test.js test/yaml_patch_fragment_patch.test.js test/yaml_patch_writer.test.js`
 
 Expected: PASS.
 
@@ -179,7 +179,7 @@ Expected: exactly `2.8.0`.
 
 - [x] **Step 2: Verify CLI surface**
 
-Run: `bin/yamlpatch --version && bin/yamlpatch --help`
+Run: `bin/yaml_patch --version && bin/yaml_patch --help`
 
 Expected: version-only first line, followed by complete help with usage, description, options, edit-unit values, and examples.
 
