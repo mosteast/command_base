@@ -111,6 +111,51 @@ describe("YAML full-subtree edits", () => {
     ).toBe("items:\n  - name: remain\n");
   });
 
+  it("rejects unknown fields in the public subtree operation contract", () => {
+    const source_index = create_index(
+      "items:\n  - name: remove\n",
+      "/repo/source.yaml",
+    );
+
+    expect(() =>
+      compile_subtree_operation(
+        { index: source_index },
+        target(source_index, [{ mapping_key: "items" }, { sequence_index: 0 }]),
+        null,
+        null,
+        {
+          id: "delete-with-extra",
+          type: "delete_subtree",
+          unexpected: true,
+        },
+      ),
+    ).toThrowError(expect.objectContaining({ code: "REQUEST_ERROR" }));
+  });
+
+  it("rejects accessor-backed public subtree operations with a stable error", () => {
+    const source_index = create_index(
+      "items:\n  - name: remove\n",
+      "/repo/source.yaml",
+    );
+    const operation = { id: "accessor-type" };
+    Object.defineProperty(operation, "type", {
+      enumerable: true,
+      get() {
+        throw new Error("raw getter failure");
+      },
+    });
+
+    expect(() =>
+      compile_subtree_operation(
+        { index: source_index },
+        target(source_index, [{ mapping_key: "items" }, { sequence_index: 0 }]),
+        null,
+        null,
+        operation,
+      ),
+    ).toThrowError(expect.objectContaining({ code: "REQUEST_ERROR" }));
+  });
+
   it("moves a complete mapping pair with its owned comment and original child bytes", () => {
     const source = `catalog:
   keep:
@@ -281,5 +326,36 @@ describe("YAML full-subtree edits", () => {
     ).toThrowError(
       expect.objectContaining({ code: "CROSS_BOUNDARY_DEPENDENCY" }),
     );
+  });
+
+  it("validates dangling aliases across each complete participating document", () => {
+    const cases = [
+      {
+        source: "items:\n  - name: moved\nbroken: *missing\n",
+        destination: "items:\n  - name: existing\n",
+      },
+      {
+        source: "items:\n  - name: moved\n",
+        destination: "items:\n  - name: existing\nbroken: *missing\n",
+      },
+    ];
+
+    for (const test_case of cases) {
+      expect(() =>
+        compile_cross_file(
+          test_case.source,
+          [{ mapping_key: "items" }, { sequence_index: 0 }],
+          test_case.destination,
+          [{ mapping_key: "items" }],
+          {
+            id: "dangling-alias",
+            type: "move_subtree",
+            position: { kind: "append" },
+          },
+        ),
+      ).toThrowError(
+        expect.objectContaining({ code: "CROSS_BOUNDARY_DEPENDENCY" }),
+      );
+    }
   });
 });

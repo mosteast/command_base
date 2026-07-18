@@ -113,6 +113,86 @@ describe("YAML transaction planning", () => {
     );
   });
 
+  it("moves a subtree within its current sequence collection", async () => {
+    const input = file(
+      "main",
+      "config.yaml",
+      "items:\n  - name: first\n  - name: second\n",
+    );
+    const result = await plan_transaction(
+      request(
+        [input],
+        [
+          {
+            id: "move-first-to-end",
+            type: "move_subtree",
+            source: {
+              file: "main",
+              selector: {
+                version: 1,
+                path: [{ mapping_key: "items" }, { sequence_index: 0 }],
+              },
+            },
+            destination: {
+              file: "main",
+              selector: { version: 1, path: [{ mapping_key: "items" }] },
+              position: { kind: "append" },
+            },
+            result_handle: "moved",
+          },
+        ],
+      ),
+      options([input]),
+    );
+
+    expect(result.candidates.main.buffer.toString()).toBe(
+      "items:\n  - name: second\n  - name: first\n",
+    );
+    expect(result.operations[0]).toMatchObject({ result_handle: "moved" });
+  });
+
+  it("rejects moving a subtree into its own descendant collection", async () => {
+    const input = file(
+      "main",
+      "config.yaml",
+      "items:\n  - name: parent\n    children:\n      - name: child\n",
+    );
+
+    await expect(
+      plan_transaction(
+        request(
+          [input],
+          [
+            {
+              id: "move-into-self",
+              type: "move_subtree",
+              source: {
+                file: "main",
+                selector: {
+                  version: 1,
+                  path: [{ mapping_key: "items" }, { sequence_index: 0 }],
+                },
+              },
+              destination: {
+                file: "main",
+                selector: {
+                  version: 1,
+                  path: [
+                    { mapping_key: "items" },
+                    { sequence_index: 0 },
+                    { mapping_key: "children" },
+                  ],
+                },
+                position: { kind: "append" },
+              },
+            },
+          ],
+        ),
+        options([input]),
+      ),
+    ).rejects.toMatchObject({ code: "CROSS_BOUNDARY_DEPENDENCY" });
+  });
+
   it("accepts a matching typed operation precondition", async () => {
     const input = file("main", "config.yaml", "value: old\n");
     const result = await plan_transaction(
@@ -241,6 +321,274 @@ describe("YAML transaction planning", () => {
     expect(source_move.before.raw).toContain("name: first");
   });
 
+  it("moves descendant handle bindings with a cross-file parent subtree", async () => {
+    const source = file(
+      "source",
+      "source.yaml",
+      "items:\n  - name: parent\n    child:\n      name: nested\n",
+    );
+    const destination = file(
+      "destination",
+      "destination.yaml",
+      "items:\n  - name: existing\n",
+    );
+    const result = await plan_transaction(
+      request(
+        [source, destination],
+        [
+          {
+            id: "bind-descendant",
+            type: "bind",
+            file: "source",
+            selector: {
+              version: 1,
+              path: [
+                { mapping_key: "items" },
+                { sequence_index: 0 },
+                { mapping_key: "child" },
+                { mapping_key: "name" },
+              ],
+            },
+            handle: "nested_name",
+          },
+          {
+            id: "move-parent",
+            type: "move_subtree",
+            source: {
+              file: "source",
+              selector: {
+                version: 1,
+                path: [{ mapping_key: "items" }, { sequence_index: 0 }],
+              },
+            },
+            destination: {
+              file: "destination",
+              selector: { version: 1, path: [{ mapping_key: "items" }] },
+              position: { kind: "append" },
+            },
+          },
+          {
+            id: "edit-descendant",
+            type: "replace_scalar_raw",
+            target: { handle: "nested_name" },
+            raw: "renamed",
+          },
+        ],
+      ),
+      options([source, destination]),
+    );
+
+    expect(result.candidates.source.buffer.toString()).toBe("items:\n  []\n");
+    expect(result.candidates.destination.buffer.toString()).toContain(
+      "      name: renamed\n",
+    );
+  });
+
+  it("binds the exact copied result when an identical node already exists", async () => {
+    const source = file(
+      "source",
+      "source.yaml",
+      "items:\n  - name: duplicate\n",
+    );
+    const destination = file(
+      "destination",
+      "destination.yaml",
+      "items:\n  - name: duplicate\n",
+    );
+    const result = await plan_transaction(
+      request(
+        [source, destination],
+        [
+          {
+            id: "copy-duplicate",
+            type: "copy_subtree",
+            source: {
+              file: "source",
+              selector: {
+                version: 1,
+                path: [{ mapping_key: "items" }, { sequence_index: 0 }],
+              },
+            },
+            destination: {
+              file: "destination",
+              selector: { version: 1, path: [{ mapping_key: "items" }] },
+              position: { kind: "append" },
+            },
+            result_handle: "copied",
+          },
+          {
+            id: "edit-copy",
+            type: "replace_scalar_raw",
+            target: { handle: "copied", path: [{ mapping_key: "name" }] },
+            raw: "renamed",
+          },
+        ],
+      ),
+      options([source, destination]),
+    );
+
+    expect(result.candidates.destination.buffer.toString()).toBe(
+      "items:\n  - name: duplicate\n  - name: renamed\n",
+    );
+  });
+
+  it("tracks an exact handle through a byte-identical sequence reorder", async () => {
+    const input = file(
+      "main",
+      "config.yaml",
+      "items:\n  - name: duplicate\n  - name: duplicate\n",
+    );
+    const result = await plan_transaction(
+      request(
+        [input],
+        [
+          {
+            id: "bind-first",
+            type: "bind",
+            file: "main",
+            selector: {
+              version: 1,
+              path: [{ mapping_key: "items" }, { sequence_index: 0 }],
+            },
+            handle: "first",
+          },
+          {
+            id: "reorder-identical",
+            type: "reorder_sequence_items",
+            file: "main",
+            target: {
+              selector: { version: 1, path: [{ mapping_key: "items" }] },
+            },
+            indices: [1, 0],
+          },
+          {
+            id: "edit-first",
+            type: "replace_scalar_raw",
+            target: { handle: "first", path: [{ mapping_key: "name" }] },
+            raw: "tracked",
+          },
+        ],
+      ),
+      options([input]),
+    );
+
+    expect(result.candidates.main.buffer.toString()).toBe(
+      "items:\n  - name: duplicate\n  - name: tracked\n",
+    );
+  });
+
+  it("resolves a subtree destination through a transaction handle", async () => {
+    const source = file("source", "source.yaml", "items:\n  - name: copied\n");
+    const destination = file(
+      "destination",
+      "destination.yaml",
+      "items:\n  - name: existing\n",
+    );
+    const result = await plan_transaction(
+      request(
+        [source, destination],
+        [
+          {
+            id: "bind-destination",
+            type: "bind",
+            file: "destination",
+            selector: { version: 1, path: [{ mapping_key: "items" }] },
+            handle: "destination_items",
+          },
+          {
+            id: "copy-through-handle",
+            type: "copy_subtree",
+            source: {
+              file: "source",
+              selector: {
+                version: 1,
+                path: [{ mapping_key: "items" }, { sequence_index: 0 }],
+              },
+            },
+            destination: {
+              handle: "destination_items",
+              position: { kind: "append" },
+            },
+          },
+        ],
+      ),
+      options([source, destination]),
+    );
+
+    expect(result.candidates.destination.buffer.toString()).toBe(
+      "items:\n  - name: existing\n  - name: copied\n",
+    );
+  });
+
+  it("previews the complete owned-comment move range and relocation evidence", async () => {
+    const source = file(
+      "source",
+      "source.yaml",
+      "items:\n  # owned by moved\n  - name: moved\n  - name: remain\n",
+    );
+    const destination = file(
+      "destination",
+      "destination.yaml",
+      "items:\n  - name: existing\n",
+    );
+    const result = await plan_transaction(
+      request(
+        [source, destination],
+        [
+          {
+            id: "move-with-comment",
+            type: "move_subtree",
+            source: {
+              file: "source",
+              selector: {
+                version: 1,
+                path: [{ mapping_key: "items" }, { sequence_index: 0 }],
+              },
+            },
+            destination: {
+              file: "destination",
+              selector: { version: 1, path: [{ mapping_key: "items" }] },
+              position: { kind: "append" },
+            },
+          },
+        ],
+      ),
+      options([source, destination]),
+    );
+    const source_diff = result.diffs.find(
+      (diff) => diff.structured.file_id === "source",
+    );
+    const structured_move = source_diff.structured.operations.find(
+      (operation) => operation.id === "move-with-comment",
+    );
+    const semantic_move = source_diff.semantic.operations.find(
+      (operation) => operation.id === "move-with-comment",
+    );
+
+    expect(structured_move.moved_range).toMatchObject({
+      owner: "source",
+      includes_owned_comment: true,
+    });
+    expect(structured_move.moved_range.start_byte).toBeLessThan(
+      structured_move.original_range.start_byte,
+    );
+    expect(semantic_move).toMatchObject({
+      source: {
+        file_id: "source",
+        parent: expect.objectContaining({
+          path: [expect.objectContaining({ mapping_pair_index: 0 })],
+        }),
+      },
+      destination: {
+        file_id: "destination",
+        parent: expect.objectContaining({
+          path: [expect.objectContaining({ mapping_pair_index: 0 })],
+        }),
+        position: { kind: "append" },
+      },
+    });
+  });
+
   it("validates all declared participants before loading any source", async () => {
     const load_source = vi.fn();
     await expect(
@@ -263,6 +611,41 @@ describe("YAML transaction planning", () => {
         { load_source },
       ),
     ).rejects.toMatchObject({ code: "CROSS_BOUNDARY_DEPENDENCY" });
+    expect(load_source).not.toHaveBeenCalled();
+  });
+
+  it("digests participants whose optional file digest was omitted", () => {
+    expect(participant_digest_for([{ id: "main", path: "config.yaml" }])).toBe(
+      canonical_digest([{ id: "main", digest: null }]),
+    );
+  });
+
+  it("rejects unknown subtree reference fields before loading sources", async () => {
+    const load_source = vi.fn();
+
+    await expect(
+      plan_transaction(
+        {
+          version: 1,
+          files: [{ id: "main", path: "config.yaml" }],
+          operations: [
+            {
+              id: "malformed-source",
+              type: "delete_subtree",
+              source: {
+                file: "main",
+                selector: {
+                  version: 1,
+                  path: [{ mapping_key: "items" }, { sequence_index: 0 }],
+                },
+                unexpected: true,
+              },
+            },
+          ],
+        },
+        { load_source },
+      ),
+    ).rejects.toMatchObject({ code: "REQUEST_ERROR" });
     expect(load_source).not.toHaveBeenCalled();
   });
 
@@ -307,6 +690,143 @@ describe("YAML transaction planning", () => {
         details: expect.objectContaining({ scope: expect.any(String) }),
       });
     }
+  });
+
+  it("checks delete_subtree preconditions against its current source", async () => {
+    const input = file(
+      "main",
+      "config.yaml",
+      "items:\n  - name: selected\n  - name: remain\n",
+    );
+
+    await expect(
+      plan_transaction(
+        request(
+          [input],
+          [
+            {
+              id: "delete-selected",
+              type: "delete_subtree",
+              source: {
+                file: "main",
+                selector: {
+                  version: 1,
+                  path: [{ mapping_key: "items" }, { sequence_index: 0 }],
+                },
+              },
+              preconditions: { raw: "name: stale" },
+            },
+          ],
+        ),
+        options([input]),
+      ),
+    ).rejects.toMatchObject({
+      code: "PRECONDITION_FAILED",
+      details: expect.objectContaining({
+        scope: "operation",
+        field: "raw",
+      }),
+    });
+  });
+
+  it("checks add_subtree preconditions against its current destination", async () => {
+    const input = file("main", "config.yaml", "items:\n  - existing\n");
+
+    await expect(
+      plan_transaction(
+        request(
+          [input],
+          [
+            {
+              id: "add-selected",
+              type: "add_subtree",
+              destination: {
+                file: "main",
+                selector: { version: 1, path: [{ mapping_key: "items" }] },
+                position: { kind: "append" },
+              },
+              raw: "name: created",
+              preconditions: { target_digest: "f".repeat(64) },
+            },
+          ],
+        ),
+        options([input]),
+      ),
+    ).rejects.toMatchObject({
+      code: "PRECONDITION_FAILED",
+      details: expect.objectContaining({
+        scope: "operation",
+        field: "target_digest",
+      }),
+    });
+  });
+
+  it("invalidates descendant handles when their parent subtree is deleted", async () => {
+    const input = file(
+      "main",
+      "config.yaml",
+      "items:\n  - name: parent\n    child: nested\n",
+    );
+    const result = await plan_transaction(
+      request(
+        [input],
+        [
+          {
+            id: "bind-descendant",
+            type: "bind",
+            file: "main",
+            selector: {
+              version: 1,
+              path: [
+                { mapping_key: "items" },
+                { sequence_index: 0 },
+                { mapping_key: "child" },
+              ],
+            },
+            handle: "child",
+          },
+          {
+            id: "delete-parent",
+            type: "delete_subtree",
+            source: {
+              file: "main",
+              selector: {
+                version: 1,
+                path: [{ mapping_key: "items" }, { sequence_index: 0 }],
+              },
+            },
+          },
+        ],
+      ),
+      options([input]),
+    );
+
+    expect(result.candidates.main.buffer.toString()).toBe("items:\n  []\n");
+  });
+
+  it("rejects a dangling alias in an intermediate candidate", async () => {
+    const input = file("main", "config.yaml", "items:\n  - existing\n");
+
+    await expect(
+      plan_transaction(
+        request(
+          [input],
+          [
+            {
+              id: "introduce-alias",
+              type: "add_subtree",
+              destination: {
+                file: "main",
+                selector: { version: 1, path: [{ mapping_key: "items" }] },
+                position: { kind: "append" },
+              },
+              raw: "*missing",
+            },
+          ],
+        ),
+        options([input]),
+      ),
+    ).rejects.toMatchObject({ code: "ANCHOR_CONFLICT" });
   });
 
   it("enforces structural and byte limits with one algorithm for dry-run and write planning", async () => {

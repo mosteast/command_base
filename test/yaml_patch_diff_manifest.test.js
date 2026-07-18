@@ -191,6 +191,79 @@ describe("YAML transaction diffs and manifests", () => {
     expect(validate_transaction_manifest(first)).toEqual(first);
   });
 
+  it("keeps semantic relative paths in the reproducible request binding", () => {
+    const fixture = diff_fixture();
+    const result = {
+      no_op: true,
+      files: [],
+      validation: { diagnostics: [] },
+    };
+    const request_with_path = (mapping_key) => ({
+      version: 1,
+      files: [
+        {
+          id: fixture.file_id,
+          path: fixture.path,
+          digest: fixture.proof.original_digest,
+        },
+      ],
+      operations: [
+        {
+          id: "replace",
+          type: "replace_scalar_raw",
+          target: { handle: "root", path: [{ mapping_key }] },
+          raw: "new",
+        },
+      ],
+    });
+    const first = create_transaction_manifest({
+      request: request_with_path("first"),
+      result,
+    });
+    const second = create_transaction_manifest({
+      request: request_with_path("second"),
+      result,
+    });
+
+    expect(first.request_digest).not.toBe(second.request_digest);
+    expect(first.reproducible_digest).not.toBe(second.reproducible_digest);
+  });
+
+  it("excludes environment-bound transaction proof paths from reproducibility", () => {
+    const request = { version: 1, files: [], operations: [] };
+    const result_with_proof = (source_path, transaction_digest) => ({
+      no_op: true,
+      files: [],
+      validation: { diagnostics: [] },
+      transaction_proof: {
+        format: "yaml_patch-transaction-proof",
+        version: 1,
+        verified: true,
+        operation_order: [],
+        files: [
+          {
+            source_path,
+            original_digest: "a".repeat(64),
+            candidate_digest: "a".repeat(64),
+            no_op: true,
+            proof_digest: "b".repeat(64),
+          },
+        ],
+        transaction_digest,
+      },
+    });
+    const first = create_transaction_manifest({
+      request,
+      result: result_with_proof("/workspace-a/config.yaml", "c".repeat(64)),
+    });
+    const second = create_transaction_manifest({
+      request,
+      result: result_with_proof("/workspace-b/config.yaml", "d".repeat(64)),
+    });
+
+    expect(first.reproducible_digest).toBe(second.reproducible_digest);
+  });
+
   it("detects replay conflicts in source, profile, capability, and request bindings", () => {
     const fixture = diff_fixture("config.yaml");
     const preview = create_file_diff(fixture);
@@ -247,5 +320,48 @@ describe("YAML transaction diffs and manifests", () => {
         expect.objectContaining({ code: "PRECONDITION_FAILED" }),
       );
     }
+  });
+
+  it("replay binds the actual source digest when the request omitted it", () => {
+    const fixture = diff_fixture("config.yaml");
+    const request = {
+      version: 1,
+      files: [{ id: "config", path: "config.yaml" }],
+      operations: [],
+    };
+    const manifest = create_transaction_manifest({
+      request,
+      result: {
+        no_op: true,
+        files: [
+          {
+            file_id: "config",
+            path: "config.yaml",
+            original_digest: fixture.proof.original_digest,
+            candidate_digest: fixture.proof.original_digest,
+            no_op: true,
+            proof: fixture.proof,
+          },
+        ],
+        validation: { diagnostics: [] },
+      },
+    });
+    const current = {
+      request,
+      source_digests: { config: fixture.proof.original_digest },
+      profile_digest: null,
+      capability_digest: null,
+      tool_version: null,
+    };
+
+    expect(validate_manifest_replay(manifest, current)).toMatchObject({
+      ok: true,
+    });
+    expect(() =>
+      validate_manifest_replay(manifest, {
+        ...current,
+        source_digests: { config: "f".repeat(64) },
+      }),
+    ).toThrowError(expect.objectContaining({ code: "PRECONDITION_FAILED" }));
   });
 });
