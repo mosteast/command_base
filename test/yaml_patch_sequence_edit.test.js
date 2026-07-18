@@ -432,6 +432,66 @@ describe("YAML sequence structural edits", () => {
     ).toThrowError(expect.objectContaining({ code: "PRECONDITION_FAILED" }));
   });
 
+  it.each(["compile_operation", "compile_cross_file_move"])(
+    "%s rejects a target from a stale source digest when target bytes are unchanged",
+    (compiler_name) => {
+      const old_index = create_index(`meta: old
+items:
+  - one
+  - two
+`);
+      const current_index = create_index(`meta: new
+items:
+  - one
+  - two
+`);
+      const old_target = sequence_for(old_index, "items");
+      const current_target = sequence_for(current_index, "items");
+      expect(old_target).toMatchObject({
+        locator: current_target.locator,
+        raw_digest: current_target.raw_digest,
+        source: {
+          start_byte: current_target.source.start_byte,
+          end_byte: current_target.source.end_byte,
+        },
+      });
+      expect(old_index.source.digest).not.toBe(current_index.source.digest);
+      expect(old_target.source_digest).toBe(old_index.source.digest);
+      expect(current_target.source_digest).toBe(current_index.source.digest);
+
+      if (compiler_name === "compile_operation") {
+        expect(() =>
+          apply_operation(current_index, old_target, {
+            id: "stale-source-single-file",
+            type: "append_sequence_item",
+            value: "three",
+          }),
+        ).toThrowError(
+          expect.objectContaining({ code: "PRECONDITION_FAILED" }),
+        );
+        return;
+      }
+
+      const destination_index = create_index(`items:
+  - destination
+`);
+      expect(() =>
+        compile_cross_file_move(
+          { index: current_index },
+          old_target,
+          { index: destination_index },
+          sequence_for(destination_index, "items"),
+          {
+            id: "stale-source-cross-file",
+            type: "move_sequence_item",
+            index: 0,
+            position: { kind: "append" },
+          },
+        ),
+      ).toThrowError(expect.objectContaining({ code: "PRECONDITION_FAILED" }));
+    },
+  );
+
   it("rejects negative, out-of-range, vanished, and flow collection positions", () => {
     const index = create_index(sequence_source);
     const target = sequence_for(index, "items");
