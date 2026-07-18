@@ -591,6 +591,44 @@ describe("YAML transaction diffs and manifests", () => {
     }
   });
 
+  it("rejects forged v2 step digests during manifest validation", () => {
+    const fixture = diff_fixture("config.yaml");
+    const forged_proof = structuredClone(fixture.proof);
+    forged_proof.operations[0].steps[0].removed_digest = "0".repeat(64);
+    forged_proof.operations[0].steps[0].replacement_digest = "0".repeat(64);
+    const manifest = create_transaction_manifest({
+      request: {
+        version: 1,
+        files: [
+          {
+            id: fixture.file_id,
+            path: fixture.path,
+            digest: fixture.proof.original_digest,
+          },
+        ],
+        operations: [{ id: "replace", type: "replace_scalar_raw" }],
+      },
+      result: {
+        no_op: false,
+        files: [
+          {
+            file_id: fixture.file_id,
+            path: fixture.path,
+            original_digest: forged_proof.original_digest,
+            candidate_digest: forged_proof.candidate_digest,
+            no_op: forged_proof.no_op,
+            proof: forged_proof,
+          },
+        ],
+        validation: { diagnostics: [] },
+      },
+    });
+
+    expect(() => validate_transaction_manifest(manifest)).toThrowError(
+      expect.objectContaining({ code: "VALIDATION_FAILED" }),
+    );
+  });
+
   it("rejects undeclared result participants", () => {
     const fixture = diff_fixture("config.yaml");
     const result_file = {
