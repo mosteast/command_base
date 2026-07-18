@@ -124,6 +124,29 @@ describe("YAML scalar structural edits", () => {
   });
 
   it.each([
+    ["value: 01\n", "plain", { type: "integer", value: 1 }],
+    ["value: TRUE\n", "plain", { type: "boolean", value: true }],
+    ['value: "a\\x62"\n', "double", { type: "string", value: "ab" }],
+    ["value: |2-\n    old\n", "literal", { type: "string", value: "  old" }],
+    ["value: >+\n  old\n\n", "folded", { type: "string", value: "old\n\n" }],
+  ])(
+    "keeps current %s bytes for an explicit same-style typed value",
+    (source, style, value) => {
+      const index = create_index(source);
+      const result = apply_operation(index, scalar_for(index, "value"), {
+        id: `same-${style}-style`,
+        type: "set_scalar_value",
+        value,
+        style,
+      });
+      expect(result.text).toBe(source);
+      expect(result.compiled.splices).toEqual([]);
+      expect(result.compiled.result_range).toBeNull();
+      expect(result.compiled.semantic_change.no_op).toBe(true);
+    },
+  );
+
+  it.each([
     ["plain: old\n", "plain", { type: "string", value: "new" }, "plain: new\n"],
     [
       "single: 'old'\n",

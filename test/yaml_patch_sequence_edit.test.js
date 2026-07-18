@@ -131,6 +131,24 @@ describe("YAML sequence structural edits", () => {
 `);
   });
 
+  it("moves owned comments while leaving blank-line separator comments behind", () => {
+    const source =
+      "items:\n  - a # inline a\n  # owned b\n  - b # inline b\n  # separator\n\n  - c # inline c\n";
+    const index = create_index(source);
+    const result = apply_operation(index, sequence_for(index, "items"), {
+      id: "sequence-comment-move",
+      type: "move_sequence_item",
+      index: 2,
+      position: { kind: "prepend" },
+    });
+    expect(result.text).toBe(
+      "items:\n  - c # inline c\n  - a # inline a\n  # owned b\n  - b # inline b\n  # separator\n\n",
+    );
+    expect(
+      parse_yaml_source(create_source_record(Buffer.from(result.text))).errors,
+    ).toEqual([]);
+  });
+
   it("reports identity edits and exact structural result ranges", () => {
     const index = create_index(sequence_source);
     const target = sequence_for(index, "items");
@@ -610,5 +628,48 @@ items:
       value: "two",
     });
     expect(result.text).toBe("items:\r  - one\r  - two\r");
+  });
+
+  it.each([
+    {
+      name: "LF append",
+      source: "items:\n  - one",
+      operation: {
+        id: "eof-append",
+        type: "append_sequence_item",
+        value: "two",
+      },
+      expected: "items:\n  - one\n  - two",
+    },
+    {
+      name: "CRLF move",
+      source: "items:\r\n  - one\r\n  - two",
+      operation: {
+        id: "eof-move",
+        type: "move_sequence_item",
+        index: 1,
+        position: { kind: "prepend" },
+      },
+      expected: "items:\r\n  - two\r\n  - one",
+    },
+    {
+      name: "CR reorder",
+      source: "items:\r  - one\r  - two\r  - three",
+      operation: {
+        id: "eof-reorder",
+        type: "reorder_sequence_items",
+        indices: [2, 0, 1],
+      },
+      expected: "items:\r  - three\r  - one\r  - two",
+    },
+  ])("preserves a missing terminal newline for sequence $name", (test_case) => {
+    const index = create_index(test_case.source);
+    const result = apply_operation(
+      index,
+      sequence_for(index, "items"),
+      test_case.operation,
+    );
+    expect(result.text).toBe(test_case.expected);
+    expect(result.text).not.toMatch(/[\r\n]$/);
   });
 });

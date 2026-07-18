@@ -8,6 +8,7 @@ import range_set_module from "../lib/yaml_patch/range_set";
 import mapping_edit_module from "../lib/yaml_patch/mapping_edit";
 import addressable_module from "../lib/yaml_patch/addressable";
 import profile_module from "../lib/yaml_patch/profile";
+import layout_module from "../lib/yaml_patch/layout";
 
 const { create_source_record } = source_module;
 const { parse_yaml_source } = parser_module;
@@ -17,6 +18,7 @@ const { apply_range_set } = range_set_module;
 const { compile_operation } = mapping_edit_module;
 const { build_addressable_index } = addressable_module;
 const { load_profile } = profile_module;
+const { collection_items, join_item_buffers } = layout_module;
 
 function create_index(text) {
   const source = create_source_record(Buffer.from(text, "utf8"));
@@ -332,6 +334,83 @@ node_sets:
     expect(reordered.text).toBe(moved.text);
   });
 
+  it.each([
+    {
+      name: "LF add before an owned comment",
+      source: "map:\n  a: one # inline a\n  # owned b\n  b: two # inline b\n",
+      operation: {
+        id: "comment-add",
+        type: "add_mapping_pair",
+        key: "added",
+        value: true,
+        position: { kind: "before", pair: { index: 1 } },
+      },
+      expected:
+        "map:\n  a: one # inline a\n  added: true\n  # owned b\n  b: two # inline b\n",
+    },
+    {
+      name: "CRLF move leaves a blank-line separator comment behind",
+      source:
+        "map:\r\n  a: one # inline a\r\n  b: two # inline b\r\n  # separator\r\n\r\n  c: three # inline c\r\n",
+      operation: {
+        id: "comment-move",
+        type: "move_mapping_pair",
+        pair: { index: 2 },
+        position: { kind: "prepend" },
+      },
+      expected:
+        "map:\r\n  c: three # inline c\r\n  a: one # inline a\r\n  b: two # inline b\r\n  # separator\r\n\r\n",
+    },
+    {
+      name: "CR reorder moves an owned comment with its pair",
+      source:
+        "map:\r  a: one # inline a\r  # owned b\r  b: two # inline b\r  c: three # inline c\r",
+      operation: {
+        id: "comment-reorder",
+        type: "reorder_mapping_pairs",
+        pairs: [{ index: 1 }, { index: 0 }, { index: 2 }],
+      },
+      expected:
+        "map:\r  # owned b\r  b: two # inline b\r  a: one # inline a\r  c: three # inline c\r",
+    },
+  ])("preserves mapping comment ownership for $name", (test_case) => {
+    const index = create_index(test_case.source);
+    const result = apply_operation(
+      index,
+      mapping_for(index, "map"),
+      test_case.operation,
+    );
+    expect(result.text).toBe(test_case.expected);
+    expect(
+      parse_yaml_source(create_source_record(Buffer.from(result.text))).errors,
+    ).toEqual([]);
+  });
+
+  it("covers mapping collection bytes with non-overlapping comment-aware records", () => {
+    const index = create_index(
+      "map:\n  a: one\n  # owned b\n  b: two\n  # separator\n\n  c: three\n",
+    );
+    const layout = collection_items(
+      { index },
+      mapping_for(index, "map"),
+      "mapping",
+    );
+    expect(layout.records[0].coverage_start_byte).toBe(layout.start_byte);
+    for (
+      let record_index = 1;
+      record_index < layout.records.length;
+      record_index += 1
+    ) {
+      expect(layout.records[record_index - 1].coverage_end_byte).toBe(
+        layout.records[record_index].coverage_start_byte,
+      );
+    }
+    expect(layout.records.at(-1).coverage_end_byte).toBe(layout.end_byte);
+    expect(
+      join_item_buffers(layout.records, layout.indent, layout.line_break),
+    ).toEqual(index.source.buffer.subarray(layout.start_byte, layout.end_byte));
+  });
+
   it("reports identity edits and exact structural result ranges", () => {
     const index = create_index(mapping_source);
     const target = mapping_for(index, "settings");
@@ -450,6 +529,58 @@ node_sets:
   keep: untouched # retain pair
 `);
     expect(sequence_result.text).toContain("keep: untouched # retain pair");
+  });
+
+  it("rejects structural styles and non-JSON mapping values", () => {
+    const index = create_index("map:\n  target: old\n  keep: untouched\n");
+    const target = mapping_for(index, "map");
+    const cyclic = { nested: true };
+    cyclic.self = cyclic;
+    const invalid_operations = [
+      {
+        id: "mapping-style",
+        type: "set_mapping_value",
+        pair: { index: 0 },
+        value: { nested: true },
+        style: "plain",
+      },
+      {
+        id: "sequence-style",
+        type: "set_mapping_value",
+        pair: { index: 0 },
+        value: ["one"],
+        style: "double",
+      },
+      ...[
+        undefined,
+        () => true,
+        Number.NaN,
+        Number.POSITIVE_INFINITY,
+        cyclic,
+        new Date(0),
+      ].map((value, case_index) => ({
+        id: `unsafe-value-${case_index}`,
+        type: "set_mapping_value",
+        pair: { index: 0 },
+        value,
+      })),
+    ];
+    invalid_operations.forEach((operation) => {
+      expect(() => apply_operation(index, target, operation)).toThrowError(
+        expect.objectContaining({ code: "REQUEST_ERROR" }),
+      );
+    });
+
+    const scalar_style = apply_operation(index, target, {
+      id: "scalar-style-remains-supported",
+      type: "set_mapping_value",
+      pair: { index: 0 },
+      value: "changed",
+      style: "double",
+    });
+    expect(scalar_style.text).toBe(
+      'map:\n  target: "changed"\n  keep: untouched\n',
+    );
   });
 
   it("returns exact value-node ranges for scalar-to-collection replacements", () => {
@@ -599,6 +730,62 @@ plain: second
     expect(result.text).toContain("first # retain");
   });
 
+  it("resolves a mapping pair locator without a prebuilt addressable context", () => {
+    const index = create_index(
+      "? [complex, key]\n: first # retain\nplain: second\n",
+    );
+    const target = select_unique_node(index, {
+      path: [],
+      node_type: "mapping",
+    });
+    const addressable_index = build_addressable_index(index);
+    const target_addressable = addressable_index.node_entry_by_id.get(
+      target.id,
+    );
+    const complex_pair = addressable_index.entries.find(
+      (entry) =>
+        entry.addressable_type === "mapping_pair" &&
+        entry.parent_id === target_addressable.id &&
+        entry.mapping_pair_index === 0,
+    );
+    const result = apply_operation(index, target, {
+      id: "public-pair-locator",
+      type: "rename_mapping_key",
+      pair: { locator: complex_pair.locator },
+      key: "renamed",
+    });
+    expect(result.text).toBe("? renamed\n: first # retain\nplain: second\n");
+  });
+
+  it("rejects multiline key renames and preserves structural-looking key semantics", () => {
+    const source = "old: 1\nkeep: 2\n";
+    const index = create_index(source);
+    const target = select_unique_node(index, {
+      path: [],
+      node_type: "mapping",
+    });
+    expect(() =>
+      apply_operation(index, target, {
+        id: "reject-multiline-key",
+        type: "rename_mapping_key",
+        pair: { index: 0 },
+        key: "a\nb",
+      }),
+    ).toThrowError(expect.objectContaining({ code: "UNSUPPORTED_EDIT_SHAPE" }));
+    expect(index.source.buffer.toString("utf8")).toBe(source);
+
+    const result = apply_operation(index, target, {
+      id: "structural-looking-key",
+      type: "rename_mapping_key",
+      pair: { index: 0 },
+      key: "a: b",
+    });
+    const candidate_source = create_source_record(Buffer.from(result.text));
+    const parsed = parse_yaml_source(candidate_source);
+    expect(parsed.errors).toEqual([]);
+    expect(parsed.documents[0].toJSON()).toEqual({ "a: b": 1, keep: 2 });
+  });
+
   it("rejects flow collections and invalid pair positions", () => {
     const index = create_index("map: { alpha: one }\n");
     const target = mapping_for(index, "map");
@@ -657,6 +844,50 @@ plain: second
     expect(result.text).toBe("map:\r  alpha: one\r  beta: two\r");
   });
 
+  it.each([
+    {
+      name: "LF add",
+      source: "map:\n  a: one",
+      operation: {
+        id: "eof-add",
+        type: "add_mapping_pair",
+        key: "b",
+        value: "two",
+      },
+      expected: "map:\n  a: one\n  b: two",
+    },
+    {
+      name: "CRLF move",
+      source: "map:\r\n  a: one\r\n  b: two",
+      operation: {
+        id: "eof-move",
+        type: "move_mapping_pair",
+        pair: { index: 1 },
+        position: { kind: "prepend" },
+      },
+      expected: "map:\r\n  b: two\r\n  a: one",
+    },
+    {
+      name: "CR reorder",
+      source: "map:\r  a: one\r  b: two\r  c: three",
+      operation: {
+        id: "eof-reorder",
+        type: "reorder_mapping_pairs",
+        pairs: [{ index: 2 }, { index: 0 }, { index: 1 }],
+      },
+      expected: "map:\r  c: three\r  a: one\r  b: two",
+    },
+  ])("preserves a missing terminal newline for mapping $name", (test_case) => {
+    const index = create_index(test_case.source);
+    const result = apply_operation(
+      index,
+      mapping_for(index, "map"),
+      test_case.operation,
+    );
+    expect(result.text).toBe(test_case.expected);
+    expect(result.text).not.toMatch(/[\r\n]$/);
+  });
+
   it("rejects a pair locator owned by another mapping", () => {
     const index = create_index("first:\n  a: one\nsecond:\n  b: two\n");
     const addressable_index = build_addressable_index(index);
@@ -672,16 +903,11 @@ plain: second
     );
 
     expect(() =>
-      apply_operation(
-        index,
-        target,
-        {
-          id: "cross-parent",
-          type: "delete_mapping_pair",
-          pair: { locator: other_pair.locator },
-        },
-        { addressable_index },
-      ),
+      apply_operation(index, target, {
+        id: "cross-parent",
+        type: "delete_mapping_pair",
+        pair: { locator: other_pair.locator },
+      }),
     ).toThrowError(expect.objectContaining({ code: "PRECONDITION_FAILED" }));
   });
 });

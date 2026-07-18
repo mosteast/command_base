@@ -22,8 +22,10 @@ const { compile_operation: compile_sequence_operation } = sequence_edit_module;
 const { apply_range_set } = range_set_module;
 const public_api = createRequire(import.meta.url)("..");
 
-function create_index(text) {
-  const source = create_source_record(Buffer.from(text, "utf8"));
+function create_index(text, requested_path) {
+  const source = create_source_record(Buffer.from(text, "utf8"), {
+    ...(requested_path === undefined ? {} : { requested_path }),
+  });
   return build_node_index(source, parse_yaml_source(source));
 }
 
@@ -379,6 +381,35 @@ items:
         raw: "changed",
       }),
     ).toThrowError(expect.objectContaining({ code: "PRECONDITION_FAILED" }));
+  });
+
+  it("binds identical source bytes to normalized file identity", () => {
+    const text = "items:\n  - one\n";
+    const left_index = create_index(text, "/tmp/a/../source-a.yaml");
+    const right_index = create_index(text, "/tmp/source-b.yaml");
+    expect(() =>
+      public_api.compile_cross_file_move(
+        { index: left_index },
+        target_for(right_index, "items"),
+        { index: right_index },
+        target_for(left_index, "items"),
+        {
+          id: "swapped-identical-sources",
+          type: "move_sequence_item",
+          index: 0,
+          position: { kind: "prepend" },
+        },
+      ),
+    ).toThrowError(expect.objectContaining({ code: "PRECONDITION_FAILED" }));
+
+    const refreshed_index = create_index(text, "/tmp/source-a.yaml");
+    expect(() =>
+      compile_sequence_operation(
+        { index: refreshed_index },
+        target_for(left_index, "items"),
+        { id: "same-file-refresh", type: "append_sequence_item", value: "two" },
+      ),
+    ).not.toThrow();
   });
 
   it.each([

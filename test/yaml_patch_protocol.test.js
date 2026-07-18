@@ -14,6 +14,7 @@ import {
   create_diagnostic,
   error_response,
   exit_code_for_error,
+  request_error,
   success_response,
   validate_artifact_version,
 } from "../lib/yaml_patch";
@@ -511,6 +512,18 @@ describe("yaml_patch error registry and exit codes", () => {
       UNSUPPORTED_ENCODING: "limit_structure_capability",
       UNSUPPORTED_FILE_TYPE: "limit_structure_capability",
       YAML_DIAGNOSTIC: "validation",
+    });
+  });
+
+  it("keeps request_error as a public error factory", () => {
+    const error = request_error("invalid request", {
+      details: { field: "value" },
+    });
+    expect(error).toBeInstanceOf(Yaml_patch_error);
+    expect(error).toMatchObject({
+      code: "REQUEST_ERROR",
+      message: "invalid request",
+      details: { field: "value" },
     });
   });
 
