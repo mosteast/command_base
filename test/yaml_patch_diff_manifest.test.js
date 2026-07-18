@@ -665,6 +665,52 @@ describe("YAML transaction diffs and manifests", () => {
     );
   });
 
+  it("binds relative participant paths during validation and replay", () => {
+    const fixture = diff_fixture("main.yaml");
+    const request_data = {
+      version: 1,
+      files: [
+        {
+          id: fixture.file_id,
+          path: fixture.path,
+          digest: fixture.proof.original_digest,
+        },
+      ],
+      operations: [{ id: "replace", type: "replace_scalar_raw" }],
+    };
+    const manifest = create_transaction_manifest({
+      request: request_data,
+      result: {
+        no_op: false,
+        files: [
+          {
+            file_id: fixture.file_id,
+            path: "evil.yaml",
+            original_digest: fixture.proof.original_digest,
+            candidate_digest: fixture.proof.candidate_digest,
+            no_op: fixture.proof.no_op,
+            proof: fixture.proof,
+          },
+        ],
+        validation: { diagnostics: [] },
+      },
+    });
+    const current = {
+      request: request_data,
+      source_digests: { [fixture.file_id]: fixture.proof.original_digest },
+      profile_digest: null,
+      capability_digest: null,
+      tool_version: null,
+    };
+
+    expect(() => validate_transaction_manifest(manifest)).toThrowError(
+      expect.objectContaining({ code: "VALIDATION_FAILED" }),
+    );
+    expect(() => validate_manifest_replay(manifest, current)).toThrowError(
+      expect.objectContaining({ code: "VALIDATION_FAILED" }),
+    );
+  });
+
   it("rejects unknown top-level manifest fields", () => {
     const fixture = diff_fixture("config.yaml");
     const manifest = create_transaction_manifest({
