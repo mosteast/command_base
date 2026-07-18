@@ -495,6 +495,71 @@ node_sets:
     }
   });
 
+  it.each([
+    {
+      name: "spaced LF separator with comment",
+      source:
+        "map:\n  before: keep\n  target : old # target header\n  after: keep\n",
+      expected:
+        "map:\n  before: keep\n  target : # target header\n    nested: true\n  after: keep\n",
+      value_raw: "nested: true\n",
+    },
+    {
+      name: "ordinary LF separator without comment",
+      source: "map:\n  before: keep\n  target: old\n  after: keep\n",
+      expected:
+        "map:\n  before: keep\n  target:\n    nested: true\n  after: keep\n",
+      value_raw: "nested: true\n",
+    },
+    {
+      name: "spaced CRLF separator with comment",
+      source:
+        "map:\r\n  before: keep\r\n  target : old # target header\r\n  after: keep\r\n",
+      expected:
+        "map:\r\n  before: keep\r\n  target : # target header\r\n    nested: true\r\n  after: keep\r\n",
+      value_raw: "nested: true\r\n",
+    },
+    {
+      name: "ordinary CR separator without comment",
+      source: "map:\r  before: keep\r  target: old\r  after: keep\r",
+      expected:
+        "map:\r  before: keep\r  target:\r    nested: true\r  after: keep\r",
+      value_raw: "nested: true\r",
+    },
+  ])("preserves $name when creating a collection value", (test_case) => {
+    const index = create_index(test_case.source);
+    const result = apply_operation(index, mapping_for(index, "map"), {
+      id: `preserve-${test_case.name}`,
+      type: "set_mapping_value",
+      pair: { index: 1 },
+      value: { nested: true },
+    });
+    expect(result.text).toBe(test_case.expected);
+
+    const candidate_source = create_source_record(
+      Buffer.from(result.text, "utf8"),
+    );
+    const candidate_index = build_node_index(
+      candidate_source,
+      parse_yaml_source(candidate_source),
+    );
+    const candidate_value = select_unique_node(candidate_index, {
+      path: [{ mapping_key: "map" }, { mapping_key: "target" }],
+    });
+    expect(result.compiled.result_range).toEqual({
+      start_byte: candidate_value.source.start_byte,
+      end_byte: candidate_value.source.end_byte,
+    });
+    expect(
+      candidate_source.buffer
+        .subarray(
+          result.compiled.result_range.start_byte,
+          result.compiled.result_range.end_byte,
+        )
+        .toString("utf8"),
+    ).toBe(test_case.value_raw);
+  });
+
   it("renames only a selected key and supports complex-key pair locators", () => {
     const index = create_index(`? [complex, key]
 : first # retain
