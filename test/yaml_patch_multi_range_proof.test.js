@@ -335,6 +335,59 @@ describe("YAML multi-range splice and byte proof", () => {
     ).toThrowError(expect.objectContaining({ code: "BYTE_GUARANTEE_FAILED" }));
   });
 
+  it("rejects forged v2 step snapshot bounds", () => {
+    const original = Buffer.from("value: old\n");
+    const result = apply_range_set(original, [
+      splice(7, 10, "new", "replace", 0),
+    ]);
+    const out_of_bounds = structuredClone(result.proof);
+    out_of_bounds.operations[0].steps[0].snapshot_end_byte = 999;
+
+    expect(() =>
+      validate_byte_proof(out_of_bounds, {
+        original_buffer: original,
+        candidate_buffer: result.candidate_buffer,
+      }),
+    ).toThrowError(expect.objectContaining({ code: "BYTE_GUARANTEE_FAILED" }));
+  });
+
+  it("rejects forged v2 step digests when final ranges are reconstructible", () => {
+    const original = Buffer.from("value: old\n");
+    const result = apply_range_set(original, [
+      splice(7, 10, "new", "replace", 0),
+    ]);
+    const forged_digests = structuredClone(result.proof);
+    forged_digests.operations[0].steps[0].removed_digest = "0".repeat(64);
+    forged_digests.operations[0].steps[0].replacement_digest = "0".repeat(64);
+
+    expect(() =>
+      validate_byte_proof(forged_digests, {
+        original_buffer: original,
+        candidate_buffer: result.candidate_buffer,
+      }),
+    ).toThrowError(expect.objectContaining({ code: "BYTE_GUARANTEE_FAILED" }));
+  });
+
+  it("accepts valid intermediate snapshots before a lower-offset deletion", () => {
+    const original = Buffer.alloc(100, "a");
+    let table = create_piece_table(original);
+    table = apply_snapshot_splices(table, [
+      splice(0, 99, "", "delete-prefix", 0),
+    ]);
+    table = apply_snapshot_splices(table, [
+      splice(0, 1, "b", "replace-final", 1),
+    ]);
+    const candidate = materialize_piece_table(table);
+    const proof = create_multi_range_byte_proof(original, candidate, table);
+
+    expect(() =>
+      validate_byte_proof(proof, {
+        original_buffer: original,
+        candidate_buffer: candidate,
+      }),
+    ).not.toThrow();
+  });
+
   it("preserves BOM, Unicode, mixed newline, and untouched bytes exactly", () => {
     const original = Buffer.concat([
       Buffer.from([0xef, 0xbb, 0xbf]),
