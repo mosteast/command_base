@@ -10,7 +10,7 @@ import operation_module from "../lib/yaml_patch/operation";
 
 const { create_source_record } = source_module;
 const { parse_yaml_source } = parser_module;
-const { build_node_index } = node_index_module;
+const { build_node_index, get_index_node } = node_index_module;
 const { select_unique_node } = query_module;
 const { apply_range_set } = range_set_module;
 const { compile_operation } = scalar_edit_module;
@@ -203,6 +203,49 @@ describe("YAML scalar structural edits", () => {
     expect(
       parse_yaml_source(candidate_source).documents[0].toJSON().value,
     ).toBe(test_case.after);
+  });
+
+  it.each([
+    {
+      name: "plain to literal without an EOF newline",
+      source: "value: old",
+      expected: "value: |\n  changed",
+      style: "literal",
+      value: "changed\n",
+      header: "|",
+    },
+    {
+      name: "literal to folded",
+      source: "value: |\n  old\n",
+      expected: "value: >\n  changed\n",
+      style: "folded",
+      value: "changed\n",
+      header: ">",
+    },
+    {
+      name: "folded to literal without an EOF newline",
+      source: "value: >\n  old",
+      expected: "value: |\n  changed",
+      style: "literal",
+      value: "changed\n",
+      header: "|",
+    },
+  ])("converts $name with a source-bound block range", (test_case) => {
+    const index = create_index(test_case.source);
+    const result = apply_operation(index, scalar_for(index, "value"), {
+      id: `convert-${test_case.name}`,
+      type: "set_scalar_value",
+      value: { type: "string", value: test_case.value },
+      style: test_case.style,
+    });
+    expect(result.text).toBe(test_case.expected);
+
+    const candidate_index = create_index(result.text);
+    const candidate_target = scalar_for(candidate_index, "value");
+    const candidate_node = get_index_node(candidate_index, candidate_target);
+    expect(candidate_index.parser_result.errors).toEqual([]);
+    expect(candidate_node.value).toBe(test_case.value);
+    expect(candidate_node.srcToken.props[0].source[0]).toBe(test_case.header);
   });
 
   it.each([
