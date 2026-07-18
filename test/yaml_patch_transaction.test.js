@@ -82,6 +82,91 @@ function per_operation_profile(per_operation_rule) {
 }
 
 describe("YAML transaction planning", () => {
+  it("keeps a target handle on the exact duplicate node after a generic edit", async () => {
+    const scalar_input = file(
+      "main",
+      "config.yaml",
+      "first: duplicate\nsecond: duplicate\n",
+    );
+    const scalar_result = await plan_transaction(
+      request(
+        [scalar_input],
+        [
+          {
+            id: "bind-first",
+            type: "bind",
+            file: "main",
+            selector: { version: 1, path: [{ mapping_key: "first" }] },
+            handle: "first",
+          },
+          {
+            id: "edit-first-once",
+            type: "replace_scalar_raw",
+            target: { handle: "first" },
+            raw: "changed",
+          },
+          {
+            id: "edit-first-twice",
+            type: "replace_scalar_raw",
+            target: { handle: "first" },
+            raw: "final",
+          },
+        ],
+      ),
+      options([scalar_input]),
+    );
+
+    expect(scalar_result.candidates.main.buffer.toString()).toBe(
+      "first: final\nsecond: duplicate\n",
+    );
+  });
+
+  it("keeps a target handle on the exact duplicate node after a deletion edit", async () => {
+    const sequence_input = file(
+      "main",
+      "config.yaml",
+      "groups:\n  - items:\n      - duplicate\n      - keep\n  - items:\n      - duplicate\n      - keep\n",
+    );
+    const sequence_result = await plan_transaction(
+      request(
+        [sequence_input],
+        [
+          {
+            id: "bind-first-group",
+            type: "bind",
+            file: "main",
+            selector: {
+              version: 1,
+              path: [
+                { mapping_key: "groups" },
+                { sequence_index: 0 },
+                { mapping_key: "items" },
+              ],
+            },
+            handle: "first_group",
+          },
+          {
+            id: "delete-from-first-group",
+            type: "delete_sequence_item",
+            target: { handle: "first_group" },
+            index: 0,
+          },
+          {
+            id: "append-to-first-group",
+            type: "append_sequence_item",
+            target: { handle: "first_group" },
+            value: "tracked",
+          },
+        ],
+      ),
+      options([sequence_input]),
+    );
+
+    expect(sequence_result.candidates.main.buffer.toString()).toBe(
+      "groups:\n  - items:\n      - keep\n      - tracked\n  - items:\n      - duplicate\n      - keep\n",
+    );
+  });
+
   it("binds an added subtree result for a following relative edit", async () => {
     const input = file("main", "config.yaml", "items:\n  - name: existing\n");
     const result = await plan_transaction(
@@ -925,6 +1010,23 @@ describe("YAML transaction planning", () => {
     );
   });
 
+  it("rejects malformed public participant digest entries with request errors", () => {
+    for (const malformed of [
+      [null],
+      [42],
+      [[]],
+      [{}],
+      [{ id: "" }],
+      [{ id: "main", digest: null }],
+      [{ id: "main", digest: "not-a-digest" }],
+      [{ id: "main" }, { id: "main" }],
+    ]) {
+      expect(() => participant_digest_for(malformed)).toThrowError(
+        expect.objectContaining({ code: "REQUEST_ERROR" }),
+      );
+    }
+  });
+
   it("rejects unknown subtree reference fields before loading sources", async () => {
     const load_source = vi.fn();
 
@@ -995,6 +1097,91 @@ describe("YAML transaction planning", () => {
         details: expect.objectContaining({ scope: expect.any(String) }),
       });
     }
+  });
+
+  it("bounds raw bind evidence in diffs and manifests", async () => {
+    const raw = "x".repeat(1024 * 1024);
+    const input = file("main", "large.yaml", `value: ${raw}\n`);
+    const result = await plan_transaction(
+      request(
+        [input],
+        [
+          {
+            id: "bind-large",
+            type: "bind",
+            file: "main",
+            selector: { version: 1, path: [{ mapping_key: "value" }] },
+            handle: "large",
+          },
+        ],
+      ),
+      options([input]),
+    );
+    const evidence = result.diffs[0].structured.operations[0];
+
+    for (const value of [evidence.before, evidence.after]) {
+      expect(value).toMatchObject({
+        raw_digest: sha256_digest(Buffer.from(raw)),
+        size_bytes: Buffer.byteLength(raw),
+        truncated: true,
+        raw: expect.any(String),
+        typed: null,
+      });
+      expect(Buffer.byteLength(value.raw)).toBeLessThanOrEqual(4 * 1024);
+    }
+    expect(Buffer.byteLength(JSON.stringify(result.manifest))).toBeLessThan(
+      32 * 1024,
+    );
+  });
+
+  it("bounds raw operation precondition error details", async () => {
+    const raw = "x".repeat(1024 * 1024);
+    const input = file("main", "large.yaml", `value: ${raw}\n`);
+    let failure;
+    try {
+      await plan_transaction(
+        request(
+          [input],
+          [
+            {
+              id: "bind-large",
+              type: "bind",
+              file: "main",
+              selector: { version: 1, path: [{ mapping_key: "value" }] },
+              handle: "large",
+              preconditions: { raw: "different" },
+            },
+          ],
+        ),
+        options([input]),
+      );
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toMatchObject({
+      code: "PRECONDITION_FAILED",
+      details: {
+        scope: "operation",
+        expected: {
+          raw: "different",
+          raw_digest: sha256_digest(Buffer.from("different")),
+          size_bytes: Buffer.byteLength("different"),
+          truncated: false,
+        },
+        actual: {
+          raw: expect.any(String),
+          raw_digest: sha256_digest(Buffer.from(raw)),
+          size_bytes: Buffer.byteLength(raw),
+          truncated: true,
+        },
+        operation_id: "bind-large",
+        field: "raw",
+      },
+    });
+    expect(Buffer.byteLength(JSON.stringify(failure.details))).toBeLessThan(
+      16 * 1024,
+    );
   });
 
   it("checks delete_subtree preconditions against its current source", async () => {

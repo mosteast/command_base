@@ -121,6 +121,27 @@ describe("YAML transaction diffs and manifests", () => {
     expect(preview.semantic).toMatchObject({ no_op: true, operation_count: 0 });
   });
 
+  it("rejects forged byte proofs before creating a file diff", () => {
+    const fixture = diff_fixture();
+    const forged_proofs = [
+      { ...fixture.proof, version: 999 },
+      { ...fixture.proof, verified: false },
+      { ...fixture.proof, original_digest: "f".repeat(64) },
+      { ...fixture.proof, candidate_digest: "f".repeat(64) },
+      { ...fixture.proof, no_op: true },
+      {
+        ...fixture.proof,
+        summary: { ...fixture.proof.summary, touched_bytes: 0 },
+      },
+    ];
+
+    for (const proof of forged_proofs) {
+      expect(() => create_file_diff({ ...fixture, proof })).toThrowError(
+        expect.objectContaining({ code: "VALIDATION_FAILED" }),
+      );
+    }
+  });
+
   it("separates canonical request/result data and excludes paths and runtime fields from its digest", () => {
     const fixture = diff_fixture();
     const preview = create_file_diff(fixture);
@@ -227,6 +248,72 @@ describe("YAML transaction diffs and manifests", () => {
 
     expect(first.request_digest).not.toBe(second.request_digest);
     expect(first.reproducible_digest).not.toBe(second.reproducible_digest);
+  });
+
+  it("keeps runtime-like field names inside semantic operation values", () => {
+    const fixture = diff_fixture("config.yaml");
+    const result = {
+      no_op: false,
+      files: [
+        {
+          file_id: fixture.file_id,
+          path: fixture.path,
+          original_digest: fixture.proof.original_digest,
+          candidate_digest: fixture.proof.candidate_digest,
+          no_op: fixture.proof.no_op,
+          proof: fixture.proof,
+        },
+      ],
+      validation: { diagnostics: [] },
+    };
+    const request_for = (suffix) => ({
+      version: 1,
+      files: [
+        {
+          id: fixture.file_id,
+          path: fixture.path,
+          digest: fixture.proof.original_digest,
+        },
+      ],
+      operations: [
+        {
+          id: "set-metadata",
+          type: "add_mapping_pair",
+          file: fixture.file_id,
+          target: { selector: { version: 1, path: [] } },
+          key: "metadata",
+          value: {
+            timestamp: `timestamp-${suffix}`,
+            source_path: `semantic/${suffix}.yaml`,
+            random_id: `semantic-${suffix}`,
+          },
+        },
+      ],
+    });
+    const first_request = request_for("first");
+    const second_request = request_for("second");
+    const first = create_transaction_manifest({
+      request: first_request,
+      result,
+    });
+    const second = create_transaction_manifest({
+      request: second_request,
+      result,
+    });
+
+    expect(first.request_digest).not.toBe(second.request_digest);
+    expect(first.reproducible_digest).not.toBe(second.reproducible_digest);
+    expect(() =>
+      validate_manifest_replay(first, {
+        request: second_request,
+        source_digests: {
+          [fixture.file_id]: fixture.proof.original_digest,
+        },
+        profile_digest: null,
+        capability_digest: null,
+        tool_version: null,
+      }),
+    ).toThrowError(expect.objectContaining({ code: "PRECONDITION_FAILED" }));
   });
 
   it("keeps relative participant paths in the reproducible request binding", () => {
@@ -359,6 +446,7 @@ describe("YAML transaction diffs and manifests", () => {
 
   it("replay binds the actual source digest when the request omitted it", () => {
     const fixture = diff_fixture("config.yaml");
+    const proof = apply_range_set(fixture.original_buffer, []).proof;
     const request = {
       version: 1,
       files: [{ id: "config", path: "config.yaml" }],
@@ -372,10 +460,10 @@ describe("YAML transaction diffs and manifests", () => {
           {
             file_id: "config",
             path: "config.yaml",
-            original_digest: fixture.proof.original_digest,
-            candidate_digest: fixture.proof.original_digest,
+            original_digest: proof.original_digest,
+            candidate_digest: proof.candidate_digest,
             no_op: true,
-            proof: fixture.proof,
+            proof,
           },
         ],
         validation: { diagnostics: [] },
@@ -383,7 +471,7 @@ describe("YAML transaction diffs and manifests", () => {
     });
     const current = {
       request,
-      source_digests: { config: fixture.proof.original_digest },
+      source_digests: { config: proof.original_digest },
       profile_digest: null,
       capability_digest: null,
       tool_version: null,
@@ -398,6 +486,126 @@ describe("YAML transaction diffs and manifests", () => {
         source_digests: { config: "f".repeat(64) },
       }),
     ).toThrowError(expect.objectContaining({ code: "PRECONDITION_FAILED" }));
+  });
+
+  it("rejects forged byte proofs during manifest validation", () => {
+    const fixture = diff_fixture("config.yaml");
+    for (const forged of [
+      { proof: { ...fixture.proof, verified: false } },
+      { proof: { ...fixture.proof, no_op: true } },
+      {
+        proof: {
+          ...fixture.proof,
+          summary: { ...fixture.proof.summary, deleted_bytes: 0 },
+        },
+      },
+      { proof: fixture.proof, candidate_digest: "f".repeat(64) },
+    ]) {
+      const proof = forged.proof;
+      const manifest = create_transaction_manifest({
+        request: {
+          version: 1,
+          files: [
+            {
+              id: fixture.file_id,
+              path: fixture.path,
+              digest: fixture.proof.original_digest,
+            },
+          ],
+          operations: [],
+        },
+        result: {
+          no_op: proof.no_op,
+          files: [
+            {
+              file_id: fixture.file_id,
+              path: fixture.path,
+              original_digest: proof.original_digest,
+              candidate_digest:
+                forged.candidate_digest || proof.candidate_digest,
+              no_op: proof.no_op,
+              proof,
+            },
+          ],
+          validation: { diagnostics: [] },
+        },
+      });
+
+      expect(() => validate_transaction_manifest(manifest)).toThrowError(
+        expect.objectContaining({ code: "VALIDATION_FAILED" }),
+      );
+    }
+  });
+
+  it("rejects undeclared result participants", () => {
+    const fixture = diff_fixture("config.yaml");
+    const result_file = {
+      path: fixture.path,
+      original_digest: fixture.proof.original_digest,
+      candidate_digest: fixture.proof.candidate_digest,
+      no_op: fixture.proof.no_op,
+      proof: fixture.proof,
+    };
+    const manifest = create_transaction_manifest({
+      request: {
+        version: 1,
+        files: [
+          {
+            id: fixture.file_id,
+            path: fixture.path,
+            digest: fixture.proof.original_digest,
+          },
+        ],
+        operations: [],
+      },
+      result: {
+        no_op: false,
+        files: [
+          { ...result_file, file_id: fixture.file_id },
+          { ...result_file, file_id: "undeclared" },
+        ],
+        validation: { diagnostics: [] },
+      },
+    });
+
+    expect(() => validate_transaction_manifest(manifest)).toThrowError(
+      expect.objectContaining({ code: "VALIDATION_FAILED" }),
+    );
+  });
+
+  it("rejects unknown top-level manifest fields", () => {
+    const fixture = diff_fixture("config.yaml");
+    const manifest = create_transaction_manifest({
+      request: {
+        version: 1,
+        files: [
+          {
+            id: fixture.file_id,
+            path: fixture.path,
+            digest: fixture.proof.original_digest,
+          },
+        ],
+        operations: [],
+      },
+      result: {
+        no_op: false,
+        files: [
+          {
+            file_id: fixture.file_id,
+            path: fixture.path,
+            original_digest: fixture.proof.original_digest,
+            candidate_digest: fixture.proof.candidate_digest,
+            no_op: fixture.proof.no_op,
+            proof: fixture.proof,
+          },
+        ],
+        validation: { diagnostics: [] },
+      },
+    });
+
+    expect(() =>
+      validate_transaction_manifest({ ...manifest, unexpected: true }),
+    ).toThrowError(expect.objectContaining({ code: "VALIDATION_FAILED" }));
   });
 
   it("rejects a manifest whose participant has no proven source binding", () => {
