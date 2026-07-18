@@ -1,6 +1,8 @@
 import { createRequire } from "node:module";
 import { describe, expect, it } from "vitest";
 
+import diff_module from "../lib/yaml_patch/diff";
+import proof_module from "../lib/yaml_patch/proof";
 import range_set_module from "../lib/yaml_patch/range_set";
 import source_module from "../lib/yaml_patch/source";
 
@@ -15,6 +17,8 @@ const {
   validate_byte_proof,
 } = range_set_module;
 const { sha256_digest } = source_module;
+const { create_byte_proof } = proof_module;
+const { create_file_diff } = diff_module;
 const public_api = createRequire(import.meta.url)("../lib/yaml_patch");
 
 function splice(
@@ -225,6 +229,44 @@ describe("YAML multi-range splice and byte proof", () => {
         (operation) => operation.present_in_final === false,
       ),
     ).toBe(true);
+  });
+
+  it("accepts a valid legacy v1 empty insertion no-op proof", () => {
+    const original = Buffer.alloc(0);
+    const proof = create_byte_proof(original, original, {
+      start_byte: 0,
+      end_byte: 0,
+      replacement_buffer: Buffer.alloc(0),
+    });
+
+    expect(proof).toMatchObject({
+      version: 1,
+      verified: true,
+      no_op: true,
+      ranges: [
+        expect.objectContaining({
+          original_start_byte: 0,
+          original_end_byte: 0,
+          candidate_start_byte: 0,
+          candidate_end_byte: 0,
+        }),
+      ],
+    });
+    expect(() =>
+      validate_byte_proof(proof, {
+        original_buffer: original,
+        candidate_buffer: original,
+      }),
+    ).not.toThrow();
+    expect(() =>
+      create_file_diff({
+        file_id: "empty",
+        original_buffer: original,
+        candidate_buffer: original,
+        proof,
+        operations: [],
+      }),
+    ).not.toThrow();
   });
 
   it("rejects operation provenance ranges outside their named root range", () => {
