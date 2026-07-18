@@ -167,6 +167,301 @@ describe("YAML transaction planning", () => {
     );
   });
 
+  it("invalidates a descendant handle when its sequence item is deleted", async () => {
+    const sequence_input = file(
+      "main",
+      "config.yaml",
+      "items:\n  - name: deleted\n  - name: surviving\n",
+    );
+
+    await expect(
+      plan_transaction(
+        request(
+          [sequence_input],
+          [
+            {
+              id: "bind-deleted-name",
+              type: "bind",
+              file: "main",
+              selector: {
+                version: 1,
+                path: [
+                  { mapping_key: "items" },
+                  { sequence_index: 0 },
+                  { mapping_key: "name" },
+                ],
+              },
+              handle: "deleted_name",
+            },
+            {
+              id: "delete-first-item",
+              type: "delete_sequence_item",
+              file: "main",
+              target: {
+                selector: { version: 1, path: [{ mapping_key: "items" }] },
+              },
+              index: 0,
+            },
+            {
+              id: "edit-deleted-name",
+              type: "replace_scalar_raw",
+              target: { handle: "deleted_name" },
+              raw: "must-not-apply",
+            },
+          ],
+        ),
+        options([sequence_input]),
+      ),
+    ).rejects.toMatchObject({ code: "PRECONDITION_FAILED" });
+  });
+
+  it("shifts a descendant handle when an identical sequence item is prepended", async () => {
+    const sequence_input = file(
+      "main",
+      "config.yaml",
+      "items:\n  - name: duplicate\n",
+    );
+    const result = await plan_transaction(
+      request(
+        [sequence_input],
+        [
+          {
+            id: "bind-original-name",
+            type: "bind",
+            file: "main",
+            selector: {
+              version: 1,
+              path: [
+                { mapping_key: "items" },
+                { sequence_index: 0 },
+                { mapping_key: "name" },
+              ],
+            },
+            handle: "original_name",
+          },
+          {
+            id: "prepend-identical-item",
+            type: "prepend_sequence_item",
+            file: "main",
+            target: {
+              selector: { version: 1, path: [{ mapping_key: "items" }] },
+            },
+            value: { name: "duplicate" },
+          },
+          {
+            id: "edit-original-name",
+            type: "replace_scalar_raw",
+            target: { handle: "original_name" },
+            raw: "tracked",
+          },
+        ],
+      ),
+      options([sequence_input]),
+    );
+
+    expect(result.candidates.main.buffer.toString()).toBe(
+      "items:\n  - name: duplicate\n  - name: tracked\n",
+    );
+  });
+
+  it("invalidates a descendant handle when its mapping pair is deleted", async () => {
+    const mapping_input = file(
+      "main",
+      "config.yaml",
+      "record:\n  first:\n    name: duplicate\n  second:\n    name: duplicate\n",
+    );
+
+    await expect(
+      plan_transaction(
+        request(
+          [mapping_input],
+          [
+            {
+              id: "bind-deleted-mapping-name",
+              type: "bind",
+              file: "main",
+              selector: {
+                version: 1,
+                path: [
+                  { mapping_key: "record" },
+                  { mapping_key: "first" },
+                  { mapping_key: "name" },
+                ],
+              },
+              handle: "deleted_mapping_name",
+            },
+            {
+              id: "delete-first-pair",
+              type: "delete_mapping_pair",
+              file: "main",
+              target: {
+                selector: { version: 1, path: [{ mapping_key: "record" }] },
+              },
+              pair: { index: 0 },
+            },
+            {
+              id: "edit-deleted-mapping-name",
+              type: "replace_scalar_raw",
+              target: { handle: "deleted_mapping_name" },
+              raw: "must-not-apply",
+            },
+          ],
+        ),
+        options([mapping_input]),
+      ),
+    ).rejects.toMatchObject({ code: "PRECONDITION_FAILED" });
+  });
+
+  it("shifts a descendant handle when an identical mapping pair is prepended", async () => {
+    const mapping_input = file(
+      "main",
+      "config.yaml",
+      "record:\n  original:\n    name: duplicate\n",
+    );
+    const result = await plan_transaction(
+      request(
+        [mapping_input],
+        [
+          {
+            id: "bind-original-mapping-name",
+            type: "bind",
+            file: "main",
+            selector: {
+              version: 1,
+              path: [
+                { mapping_key: "record" },
+                { mapping_key: "original" },
+                { mapping_key: "name" },
+              ],
+            },
+            handle: "original_mapping_name",
+          },
+          {
+            id: "prepend-identical-pair",
+            type: "add_mapping_pair",
+            file: "main",
+            target: {
+              selector: { version: 1, path: [{ mapping_key: "record" }] },
+            },
+            key: "inserted",
+            value: { name: "duplicate" },
+            position: { kind: "prepend" },
+          },
+          {
+            id: "edit-original-mapping-name",
+            type: "replace_scalar_raw",
+            target: { handle: "original_mapping_name" },
+            raw: "tracked",
+          },
+        ],
+      ),
+      options([mapping_input]),
+    );
+
+    expect(result.candidates.main.buffer.toString()).toBe(
+      "record:\n  inserted:\n    name: duplicate\n  original:\n    name: tracked\n",
+    );
+  });
+
+  it("moves a mapping descendant handle by pair identity", async () => {
+    const mapping_input = file(
+      "main",
+      "config.yaml",
+      "record:\n  first:\n    name: duplicate\n  second:\n    name: duplicate\n",
+    );
+    const result = await plan_transaction(
+      request(
+        [mapping_input],
+        [
+          {
+            id: "bind-first-mapping-name",
+            type: "bind",
+            file: "main",
+            selector: {
+              version: 1,
+              path: [
+                { mapping_key: "record" },
+                { mapping_key: "first" },
+                { mapping_key: "name" },
+              ],
+            },
+            handle: "first_mapping_name",
+          },
+          {
+            id: "move-first-pair",
+            type: "move_mapping_pair",
+            file: "main",
+            target: {
+              selector: { version: 1, path: [{ mapping_key: "record" }] },
+            },
+            pair: { index: 0 },
+            position: { kind: "append" },
+          },
+          {
+            id: "edit-moved-mapping-name",
+            type: "replace_scalar_raw",
+            target: { handle: "first_mapping_name" },
+            raw: "tracked",
+          },
+        ],
+      ),
+      options([mapping_input]),
+    );
+
+    expect(result.candidates.main.buffer.toString()).toBe(
+      "record:\n  second:\n    name: duplicate\n  first:\n    name: tracked\n",
+    );
+  });
+
+  it("reorders a mapping descendant handle by pair identity", async () => {
+    const mapping_input = file(
+      "main",
+      "config.yaml",
+      "record:\n  first:\n    name: duplicate\n  second:\n    name: duplicate\n",
+    );
+    const result = await plan_transaction(
+      request(
+        [mapping_input],
+        [
+          {
+            id: "bind-first-reordered-name",
+            type: "bind",
+            file: "main",
+            selector: {
+              version: 1,
+              path: [
+                { mapping_key: "record" },
+                { mapping_key: "first" },
+                { mapping_key: "name" },
+              ],
+            },
+            handle: "first_reordered_name",
+          },
+          {
+            id: "reorder-mapping-pairs",
+            type: "reorder_mapping_pairs",
+            file: "main",
+            target: {
+              selector: { version: 1, path: [{ mapping_key: "record" }] },
+            },
+            pairs: [{ index: 1 }, { index: 0 }],
+          },
+          {
+            id: "edit-reordered-mapping-name",
+            type: "replace_scalar_raw",
+            target: { handle: "first_reordered_name" },
+            raw: "tracked",
+          },
+        ],
+      ),
+      options([mapping_input]),
+    );
+
+    expect(result.candidates.main.buffer.toString()).toBe(
+      "record:\n  second:\n    name: duplicate\n  first:\n    name: tracked\n",
+    );
+  });
+
   it("binds an added subtree result for a following relative edit", async () => {
     const input = file("main", "config.yaml", "items:\n  - name: existing\n");
     const result = await plan_transaction(
