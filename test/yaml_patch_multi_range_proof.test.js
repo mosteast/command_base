@@ -368,6 +368,55 @@ describe("YAML multi-range splice and byte proof", () => {
     ).toThrowError(expect.objectContaining({ code: "BYTE_GUARANTEE_FAILED" }));
   });
 
+  it("rejects forged multi-operation step digests with or without buffers", () => {
+    const original = Buffer.from("abcdefgh");
+    const result = apply_range_set(original, [
+      splice(1, 2, "X", "replace-b", 0),
+      splice(6, 7, "Y", "replace-g", 1),
+    ]);
+    const forged_digests = structuredClone(result.proof);
+    for (const operation of forged_digests.operations) {
+      for (const step of operation.steps) {
+        step.removed_digest = "0".repeat(64);
+        step.replacement_digest = "0".repeat(64);
+      }
+    }
+
+    expect(() => validate_byte_proof(forged_digests)).toThrowError(
+      expect.objectContaining({ code: "BYTE_GUARANTEE_FAILED" }),
+    );
+    expect(() =>
+      validate_byte_proof(forged_digests, {
+        original_buffer: original,
+        candidate_buffer: result.candidate_buffer,
+      }),
+    ).toThrowError(expect.objectContaining({ code: "BYTE_GUARANTEE_FAILED" }));
+  });
+
+  it("rejects forged multi-operation snapshot bounds with or without buffers", () => {
+    const original = Buffer.from("abcdefgh");
+    const result = apply_range_set(original, [
+      splice(1, 2, "X", "replace-b", 0),
+      splice(6, 7, "Y", "replace-g", 1),
+    ]);
+    const forged_bounds = structuredClone(result.proof);
+    for (const operation of forged_bounds.operations) {
+      for (const step of operation.steps) {
+        step.snapshot_end_byte = 999999;
+      }
+    }
+
+    expect(() => validate_byte_proof(forged_bounds)).toThrowError(
+      expect.objectContaining({ code: "BYTE_GUARANTEE_FAILED" }),
+    );
+    expect(() =>
+      validate_byte_proof(forged_bounds, {
+        original_buffer: original,
+        candidate_buffer: result.candidate_buffer,
+      }),
+    ).toThrowError(expect.objectContaining({ code: "BYTE_GUARANTEE_FAILED" }));
+  });
+
   it("accepts valid intermediate snapshots before a lower-offset deletion", () => {
     const original = Buffer.alloc(100, "a");
     let table = create_piece_table(original);
