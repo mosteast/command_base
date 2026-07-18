@@ -452,6 +452,49 @@ node_sets:
     expect(sequence_result.text).toContain("keep: untouched # retain pair");
   });
 
+  it("returns exact value-node ranges for scalar-to-collection replacements", () => {
+    const source = `map:
+  before: keep # before
+  target: old # target header
+  after: keep # after
+`;
+    const path = [{ mapping_key: "map" }, { mapping_key: "target" }];
+    const index = create_index(source);
+    const target = mapping_for(index, "map");
+
+    for (const [id, value, expected] of [
+      ["scalar-to-mapping-range", { nested: true }, "nested: true\n"],
+      ["scalar-to-sequence-range", ["one", "two"], "- one\n    - two\n"],
+    ]) {
+      const result = apply_operation(index, target, {
+        id,
+        type: "set_mapping_value",
+        pair: { index: 1 },
+        value,
+      });
+      const candidate_source = create_source_record(
+        Buffer.from(result.text, "utf8"),
+      );
+      const candidate_index = build_node_index(
+        candidate_source,
+        parse_yaml_source(candidate_source),
+      );
+      const candidate_value = select_unique_node(candidate_index, { path });
+      expect(result.compiled.result_range).toEqual({
+        start_byte: candidate_value.source.start_byte,
+        end_byte: candidate_value.source.end_byte,
+      });
+      expect(
+        Buffer.from(result.text, "utf8")
+          .subarray(
+            result.compiled.result_range.start_byte,
+            result.compiled.result_range.end_byte,
+          )
+          .toString("utf8"),
+      ).toBe(expected);
+    }
+  });
+
   it("renames only a selected key and supports complex-key pair locators", () => {
     const index = create_index(`? [complex, key]
 : first # retain
