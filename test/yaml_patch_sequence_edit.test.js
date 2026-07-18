@@ -368,6 +368,47 @@ describe("YAML sequence structural edits", () => {
     ).toThrowError(expect.objectContaining({ code: "PRECONDITION_FAILED" }));
   });
 
+  it("validates new sequence subtrees before YAML serialization", () => {
+    const index = create_index("items:\n  - keep # retain\n");
+    const target = sequence_for(index, "items");
+    const cyclic = {};
+    cyclic.self = cyclic;
+    const sparse = [];
+    sparse[1] = "value";
+    const invalid_values = [
+      undefined,
+      () => true,
+      Symbol("value"),
+      1n,
+      new Date(0),
+      cyclic,
+      sparse,
+      Number.NaN,
+      Number.NEGATIVE_INFINITY,
+    ];
+    invalid_values.forEach((value, case_index) => {
+      expect(() =>
+        apply_operation(index, target, {
+          id: `unsafe-append-${case_index}`,
+          type: "append_sequence_item",
+          value,
+        }),
+      ).toThrowError(expect.objectContaining({ code: "REQUEST_ERROR" }));
+    });
+
+    const legal = apply_operation(index, target, {
+      id: "safe-append-subtree",
+      type: "append_sequence_item",
+      value: { nested: ["one", true] },
+    });
+    expect(legal.text).toContain("- keep # retain");
+    expect(
+      parse_yaml_source(
+        create_source_record(Buffer.from(legal.text)),
+      ).documents[0].toJSON(),
+    ).toEqual({ items: ["keep", { nested: ["one", true] }] });
+  });
+
   it("treats safe integer and decimal_string representations as one typed value", () => {
     const index = create_index(`values:
   - 1

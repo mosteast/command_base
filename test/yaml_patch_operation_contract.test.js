@@ -22,10 +22,12 @@ const { compile_operation: compile_sequence_operation } = sequence_edit_module;
 const { apply_range_set } = range_set_module;
 const public_api = createRequire(import.meta.url)("..");
 
-function create_index(text, requested_path) {
-  const source = create_source_record(Buffer.from(text, "utf8"), {
-    ...(requested_path === undefined ? {} : { requested_path }),
-  });
+function create_index(text, source_options = {}) {
+  const options =
+    typeof source_options === "string"
+      ? { requested_path: source_options }
+      : source_options;
+  const source = create_source_record(Buffer.from(text, "utf8"), options);
   return build_node_index(source, parse_yaml_source(source));
 }
 
@@ -410,6 +412,44 @@ items:
         { id: "same-file-refresh", type: "append_sequence_item", value: "two" },
       ),
     ).not.toThrow();
+  });
+
+  it("distinguishes anonymous instances and supports explicit source refresh identity", () => {
+    const text = "items:\n  - one\n";
+    const first_anonymous = create_index(text);
+    const second_anonymous = create_index(text);
+    expect(() =>
+      compile_sequence_operation(
+        { index: second_anonymous },
+        target_for(first_anonymous, "items"),
+        { id: "cross-anonymous", type: "append_sequence_item", value: "two" },
+      ),
+    ).toThrowError(expect.objectContaining({ code: "PRECONDITION_FAILED" }));
+    expect(() =>
+      compile_sequence_operation(
+        { index: first_anonymous },
+        target_for(first_anonymous, "items"),
+        { id: "same-anonymous", type: "append_sequence_item", value: "two" },
+      ),
+    ).not.toThrow();
+
+    const first_named = create_index(text, { source_id: "logical-source" });
+    const refreshed_named = create_index(text, { source_id: "logical-source" });
+    expect(() =>
+      compile_sequence_operation(
+        { index: refreshed_named },
+        target_for(first_named, "items"),
+        { id: "named-refresh", type: "append_sequence_item", value: "two" },
+      ),
+    ).not.toThrow();
+    const other_named = create_index(text, { source_id: "other-source" });
+    expect(() =>
+      compile_sequence_operation(
+        { index: other_named },
+        target_for(first_named, "items"),
+        { id: "cross-named", type: "append_sequence_item", value: "two" },
+      ),
+    ).toThrowError(expect.objectContaining({ code: "PRECONDITION_FAILED" }));
   });
 
   it.each([

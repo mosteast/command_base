@@ -584,6 +584,7 @@ items:
       end_byte: first_entry.source.end_byte,
       path: first_entry.path,
       source_digest: first_index.source.digest,
+      source_identity: first_index.source.source_identity,
       start_byte: first_entry.source.start_byte,
       target_digest: first_entry.raw_digest,
       version: 2,

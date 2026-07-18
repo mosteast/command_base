@@ -583,6 +583,49 @@ node_sets:
     );
   });
 
+  it("validates new mapping pair subtrees before YAML serialization", () => {
+    const index = create_index("map:\n  keep: untouched # retain\n");
+    const target = mapping_for(index, "map");
+    const cyclic = {};
+    cyclic.self = cyclic;
+    const sparse = [];
+    sparse[1] = "value";
+    const invalid_values = [
+      undefined,
+      () => true,
+      Symbol("value"),
+      1n,
+      new Date(0),
+      cyclic,
+      sparse,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+    ];
+    invalid_values.forEach((value, case_index) => {
+      expect(() =>
+        apply_operation(index, target, {
+          id: `unsafe-add-${case_index}`,
+          type: "add_mapping_pair",
+          key: `unsafe_${case_index}`,
+          value,
+        }),
+      ).toThrowError(expect.objectContaining({ code: "REQUEST_ERROR" }));
+    });
+
+    const legal = apply_operation(index, target, {
+      id: "safe-add-subtree",
+      type: "add_mapping_pair",
+      key: "added",
+      value: { nested: ["one", true] },
+    });
+    expect(legal.text).toContain("keep: untouched # retain");
+    expect(
+      parse_yaml_source(
+        create_source_record(Buffer.from(legal.text)),
+      ).documents[0].toJSON(),
+    ).toEqual({ map: { keep: "untouched", added: { nested: ["one", true] } } });
+  });
+
   it("returns exact value-node ranges for scalar-to-collection replacements", () => {
     const source = `map:
   before: keep # before

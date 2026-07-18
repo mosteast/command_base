@@ -147,6 +147,65 @@ describe("YAML scalar structural edits", () => {
   );
 
   it.each([
+    {
+      name: "literal clip with LF",
+      source: "value: |\n  old",
+      expected: "value: |\n  new",
+      style: "literal",
+      before: "old\n",
+      after: "new\n",
+    },
+    {
+      name: "literal strip with LF",
+      source: "value: |-\n  old",
+      expected: "value: |-\n  new",
+      style: "literal",
+      before: "old",
+      after: "new",
+    },
+    {
+      name: "literal keep with CRLF",
+      source: "value: |+\r\n  old",
+      expected: "value: |+\r\n  new",
+      style: "literal",
+      before: "old\n",
+      after: "new\n",
+    },
+    {
+      name: "folded clip with CR",
+      source: "value: >\r  old",
+      expected: "value: >\r  new",
+      style: "folded",
+      before: "old\n",
+      after: "new\n",
+    },
+  ])("preserves missing physical EOF newline for $name", (test_case) => {
+    const index = create_index(test_case.source);
+    const target = scalar_for(index, "value");
+    const no_op = apply_operation(index, target, {
+      id: `block-eof-no-op-${test_case.name}`,
+      type: "set_scalar_value",
+      value: { type: "string", value: test_case.before },
+      style: test_case.style,
+    });
+    expect(no_op.compiled.splices).toEqual([]);
+    expect(no_op.text).toBe(test_case.source);
+
+    const changed = apply_operation(index, target, {
+      id: `block-eof-change-${test_case.name}`,
+      type: "set_scalar_value",
+      value: { type: "string", value: test_case.after },
+      style: test_case.style,
+    });
+    expect(changed.text).toBe(test_case.expected);
+    expect(changed.text).not.toMatch(/[\r\n]$/);
+    const candidate_source = create_source_record(Buffer.from(changed.text));
+    expect(
+      parse_yaml_source(candidate_source).documents[0].toJSON().value,
+    ).toBe(test_case.after);
+  });
+
+  it.each([
     ["plain: old\n", "plain", { type: "string", value: "new" }, "plain: new\n"],
     [
       "single: 'old'\n",
