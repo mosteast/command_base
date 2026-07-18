@@ -526,13 +526,31 @@ node_sets:
         "map:\r  before: keep\r  target:\r    nested: true\r  after: keep\r",
       value_raw: "nested: true\r",
     },
+    {
+      name: "LF separator header comment",
+      source:
+        "map:\n  before: keep\n  target: # header\n    old\n  after: keep\n",
+      expected:
+        "map:\n  before: keep\n  target: # header\n    nested: true\n  after: keep\n",
+      value_raw: "nested: true\n",
+      value: { nested: true },
+    },
+    {
+      name: "CRLF separator header comment for a sequence",
+      source:
+        "map:\r\n  before: keep\r\n  target: # header\r\n    old\r\n  after: keep\r\n",
+      expected:
+        "map:\r\n  before: keep\r\n  target: # header\r\n    - one\r\n    - two\r\n  after: keep\r\n",
+      value_raw: "- one\r\n    - two\r\n",
+      value: ["one", "two"],
+    },
   ])("preserves $name when creating a collection value", (test_case) => {
     const index = create_index(test_case.source);
     const result = apply_operation(index, mapping_for(index, "map"), {
       id: `preserve-${test_case.name}`,
       type: "set_mapping_value",
       pair: { index: 1 },
-      value: { nested: true },
+      value: test_case.value || { nested: true },
     });
     expect(result.text).toBe(test_case.expected);
 
