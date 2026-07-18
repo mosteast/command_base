@@ -41,6 +41,46 @@ function options(files, overrides = {}) {
   };
 }
 
+function per_operation_profile(per_operation_rule) {
+  return {
+    version: 1,
+    node_sets: {
+      record: {
+        query: {
+          version: 2,
+          where: {
+            all: [
+              { predicate: "node_type", equals: "mapping" },
+              {
+                predicate: "relation",
+                relation: "parent",
+                where: {
+                  predicate: "addressable_type",
+                  equals: "sequence_item",
+                },
+              },
+            ],
+          },
+          select: { kind: "self", missing: "error" },
+          projection: { fields: ["path"], missing: "error" },
+        },
+        fields: {
+          allowed: ["key", "other"],
+          required: ["key"],
+          optional: ["other"],
+          rules: { key: { types: ["string"] } },
+        },
+        field_order: ["key", "other"],
+        diagnostic_projection: ["key"],
+      },
+    },
+    identity: [],
+    protected: [],
+    field_aliases: [],
+    per_operation_rule,
+  };
+}
+
 describe("YAML transaction planning", () => {
   it("binds an added subtree result for a following relative edit", async () => {
     const input = file("main", "config.yaml", "items:\n  - name: existing\n");
@@ -804,6 +844,145 @@ describe("YAML transaction planning", () => {
     expect(result.candidates.main.buffer.toString()).toBe("items:\n  []\n");
   });
 
+  it("tracks an identical sibling handle across subtree deletion", async () => {
+    const input = file(
+      "main",
+      "config.yaml",
+      "items:\n  - name: duplicate\n  - name: duplicate\n  - name: duplicate\n",
+    );
+    const result = await plan_transaction(
+      request(
+        [input],
+        [
+          {
+            id: "bind-second",
+            type: "bind",
+            file: "main",
+            selector: {
+              version: 1,
+              path: [{ mapping_key: "items" }, { sequence_index: 1 }],
+            },
+            handle: "second",
+          },
+          {
+            id: "delete-first",
+            type: "delete_subtree",
+            source: {
+              file: "main",
+              selector: {
+                version: 1,
+                path: [{ mapping_key: "items" }, { sequence_index: 0 }],
+              },
+            },
+          },
+          {
+            id: "edit-second",
+            type: "replace_scalar_raw",
+            target: { handle: "second", path: [{ mapping_key: "name" }] },
+            raw: "tracked",
+          },
+        ],
+      ),
+      options([input]),
+    );
+
+    expect(result.candidates.main.buffer.toString()).toBe(
+      "items:\n  - name: tracked\n  - name: duplicate\n",
+    );
+  });
+
+  it("tracks an identical handle through a sequence swap", async () => {
+    const input = file(
+      "main",
+      "config.yaml",
+      "items:\n  - name: duplicate\n  - name: duplicate\n",
+    );
+    const result = await plan_transaction(
+      request(
+        [input],
+        [
+          {
+            id: "bind-first",
+            type: "bind",
+            file: "main",
+            selector: {
+              version: 1,
+              path: [{ mapping_key: "items" }, { sequence_index: 0 }],
+            },
+            handle: "first",
+          },
+          {
+            id: "swap-identical",
+            type: "swap_sequence_items",
+            file: "main",
+            target: {
+              selector: { version: 1, path: [{ mapping_key: "items" }] },
+            },
+            left_index: 0,
+            right_index: 1,
+          },
+          {
+            id: "edit-first",
+            type: "replace_scalar_raw",
+            target: { handle: "first", path: [{ mapping_key: "name" }] },
+            raw: "tracked",
+          },
+        ],
+      ),
+      options([input]),
+    );
+
+    expect(result.candidates.main.buffer.toString()).toBe(
+      "items:\n  - name: duplicate\n  - name: tracked\n",
+    );
+  });
+
+  it("tracks an identical handle through a sequence move", async () => {
+    const input = file(
+      "main",
+      "config.yaml",
+      "items:\n  - name: duplicate\n  - name: duplicate\n",
+    );
+    const result = await plan_transaction(
+      request(
+        [input],
+        [
+          {
+            id: "bind-first",
+            type: "bind",
+            file: "main",
+            selector: {
+              version: 1,
+              path: [{ mapping_key: "items" }, { sequence_index: 0 }],
+            },
+            handle: "first",
+          },
+          {
+            id: "move-identical",
+            type: "move_sequence_item",
+            file: "main",
+            target: {
+              selector: { version: 1, path: [{ mapping_key: "items" }] },
+            },
+            index: 0,
+            position: { kind: "append" },
+          },
+          {
+            id: "edit-first",
+            type: "replace_scalar_raw",
+            target: { handle: "first", path: [{ mapping_key: "name" }] },
+            raw: "tracked",
+          },
+        ],
+      ),
+      options([input]),
+    );
+
+    expect(result.candidates.main.buffer.toString()).toBe(
+      "items:\n  - name: duplicate\n  - name: tracked\n",
+    );
+  });
+
   it("rejects a dangling alias in an intermediate candidate", async () => {
     const input = file("main", "config.yaml", "items:\n  - existing\n");
 
@@ -827,6 +1006,105 @@ describe("YAML transaction planning", () => {
         options([input]),
       ),
     ).rejects.toMatchObject({ code: "ANCHOR_CONFLICT" });
+  });
+
+  it("enforces selected profile rules before the next operation", async () => {
+    const input = file(
+      "main",
+      "config.yaml",
+      "records:\n  - key: one\n    other: keep\n",
+    );
+    const profile = per_operation_profile(["record.fields.key.required"]);
+
+    await expect(
+      plan_transaction(
+        request(
+          [input],
+          [
+            {
+              id: "remove-key",
+              type: "delete_mapping_pair",
+              file: "main",
+              target: {
+                selector: {
+                  version: 1,
+                  path: [{ mapping_key: "records" }, { sequence_index: 0 }],
+                },
+              },
+              pair: { index: 0 },
+            },
+            {
+              id: "restore-key",
+              type: "add_mapping_pair",
+              file: "main",
+              target: {
+                selector: {
+                  version: 1,
+                  path: [{ mapping_key: "records" }, { sequence_index: 0 }],
+                },
+              },
+              key: "key",
+              value: "one",
+            },
+          ],
+        ),
+        options([input], { profile }),
+      ),
+    ).rejects.toMatchObject({
+      code: "VALIDATION_FAILED",
+      details: expect.objectContaining({
+        operation_id: "restore-key",
+        operation_index: 1,
+        diagnostics: expect.arrayContaining([
+          expect.objectContaining({ rule_id: "record.fields.key.required" }),
+        ]),
+      }),
+    });
+  });
+
+  it("allows an unselected profile violation to be restored before final validation", async () => {
+    const input = file(
+      "main",
+      "config.yaml",
+      "records:\n  - key: one\n    other: keep\n",
+    );
+    const profile = per_operation_profile(["record.fields.key.type"]);
+    const result = await plan_transaction(
+      request(
+        [input],
+        [
+          {
+            id: "remove-key",
+            type: "delete_mapping_pair",
+            file: "main",
+            target: {
+              selector: {
+                version: 1,
+                path: [{ mapping_key: "records" }, { sequence_index: 0 }],
+              },
+            },
+            pair: { index: 0 },
+          },
+          {
+            id: "restore-key",
+            type: "add_mapping_pair",
+            file: "main",
+            target: {
+              selector: {
+                version: 1,
+                path: [{ mapping_key: "records" }, { sequence_index: 0 }],
+              },
+            },
+            key: "key",
+            value: "one",
+          },
+        ],
+      ),
+      options([input], { profile }),
+    );
+
+    expect(result.validation.diagnostics).toEqual([]);
+    expect(result.candidates.main.buffer.toString()).toContain("key: one");
   });
 
   it("enforces structural and byte limits with one algorithm for dry-run and write planning", async () => {

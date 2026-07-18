@@ -229,6 +229,41 @@ describe("YAML transaction diffs and manifests", () => {
     expect(first.reproducible_digest).not.toBe(second.reproducible_digest);
   });
 
+  it("keeps relative participant paths in the reproducible request binding", () => {
+    const fixture = diff_fixture();
+    const manifest_for_path = (file_path) =>
+      create_transaction_manifest({
+        request: {
+          version: 1,
+          files: [
+            {
+              id: fixture.file_id,
+              path: file_path,
+              digest: fixture.proof.original_digest,
+            },
+          ],
+          operations: [],
+        },
+        result: {
+          no_op: true,
+          files: [
+            {
+              file_id: fixture.file_id,
+              path: file_path,
+              original_digest: fixture.proof.original_digest,
+              candidate_digest: fixture.proof.original_digest,
+              proof: fixture.proof,
+            },
+          ],
+          validation: { diagnostics: [] },
+        },
+      });
+
+    expect(manifest_for_path("first.yaml").request_digest).not.toBe(
+      manifest_for_path("second.yaml").request_digest,
+    );
+  });
+
   it("excludes environment-bound transaction proof paths from reproducibility", () => {
     const request = { version: 1, files: [], operations: [] };
     const result_with_proof = (source_path, transaction_digest) => ({
@@ -363,5 +398,20 @@ describe("YAML transaction diffs and manifests", () => {
         source_digests: { config: "f".repeat(64) },
       }),
     ).toThrowError(expect.objectContaining({ code: "PRECONDITION_FAILED" }));
+  });
+
+  it("rejects a manifest whose participant has no proven source binding", () => {
+    const manifest = create_transaction_manifest({
+      request: {
+        version: 1,
+        files: [{ id: "main", path: "main.yaml" }],
+        operations: [],
+      },
+      result: { no_op: true, files: [], validation: { diagnostics: [] } },
+    });
+
+    expect(() => validate_transaction_manifest(manifest)).toThrowError(
+      expect.objectContaining({ code: "VALIDATION_FAILED" }),
+    );
   });
 });

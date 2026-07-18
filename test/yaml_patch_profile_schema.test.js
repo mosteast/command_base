@@ -261,6 +261,28 @@ identity:
     }
   });
 
+  it("validates selected per-operation diagnostic rule ids", () => {
+    expect(
+      validate_profile({
+        ...complete_profile,
+        per_operation_rule: ["record_key", "record.fields.tenant.required"],
+      }).diagnostics,
+    ).toEqual([]);
+    expect(
+      validate_profile(complete_profile).profile.per_operation_rule || [],
+    ).toEqual([]);
+
+    for (const per_operation_rule of [
+      [true],
+      ["record_key", "record_key"],
+      ["unknown_rule"],
+    ]) {
+      expect(() =>
+        validate_profile({ ...complete_profile, per_operation_rule }),
+      ).toThrowError(expect.objectContaining({ code: "VALIDATION_FAILED" }));
+    }
+  });
+
   it("requires coherent field declarations, ordering, and diagnostic projection", () => {
     const invalid_fields = [
       {
