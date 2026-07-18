@@ -131,6 +131,66 @@ describe("YAML sequence structural edits", () => {
 `);
   });
 
+  it("reports identity edits and exact structural result ranges", () => {
+    const index = create_index(sequence_source);
+    const target = sequence_for(index, "items");
+    for (const operation of [
+      {
+        id: "identity-reorder",
+        type: "reorder_sequence_items",
+        indices: [0, 1, 2],
+      },
+      {
+        id: "identity-move",
+        type: "move_sequence_item",
+        index: 0,
+        position: { kind: "prepend" },
+      },
+    ]) {
+      const { compiled, text } = apply_operation(index, target, operation);
+      expect(text).toBe(sequence_source);
+      expect(compiled.splices).toEqual([]);
+      expect(compiled.result_range).toBeNull();
+      expect(compiled.semantic_change).toMatchObject({ no_op: true });
+    }
+
+    const appended = apply_operation(index, target, {
+      id: "range-append",
+      type: "append_sequence_item",
+      value: "four",
+    });
+    expect(
+      Buffer.from(appended.text)
+        .subarray(
+          appended.compiled.result_range.start_byte,
+          appended.compiled.result_range.end_byte,
+        )
+        .toString("utf8"),
+    ).toBe("- four\n");
+
+    const moved = apply_operation(index, target, {
+      id: "range-move",
+      type: "move_sequence_item",
+      index: 0,
+      position: { kind: "append" },
+    });
+    expect(
+      Buffer.from(moved.text)
+        .subarray(
+          moved.compiled.result_range.start_byte,
+          moved.compiled.result_range.end_byte,
+        )
+        .toString("utf8"),
+    ).toBe("- one # first\n");
+
+    const deleted = apply_operation(index, target, {
+      id: "range-delete",
+      type: "delete_sequence_item",
+      index: 1,
+    });
+    expect(deleted.compiled.result_range).toBeNull();
+  });
+
   it("compiles a cross-file move into source and destination contracts", () => {
     const source_index = create_index(
       `items:
@@ -171,10 +231,6 @@ describe("YAML sequence structural edits", () => {
             replacement_buffer: expect.any(Buffer),
           },
         ],
-        result_range: {
-          start_byte: expect.any(Number),
-          end_byte: expect.any(Number),
-        },
         provenance: {
           operation_id: "cross-file-move",
           type: "move_sequence_item",
@@ -182,6 +238,7 @@ describe("YAML sequence structural edits", () => {
         semantic_change: { no_op: false },
       });
     }
+    expect(compiled.source.result_range).toBeNull();
     expect(
       apply_range_set(
         source_index.source.buffer,
@@ -203,6 +260,14 @@ describe("YAML sequence structural edits", () => {
     expect(destination_text).toContain(
       "- name: 'move me' # retained\n    nested:\n      key: value\n",
     );
+    expect(
+      Buffer.from(destination_text)
+        .subarray(
+          compiled.destination.result_range.start_byte,
+          compiled.destination.result_range.end_byte,
+        )
+        .toString("utf8"),
+    ).toBe("- name: 'move me' # retained\n    nested:\n      key: value\n");
   });
 
   it("rebases only structural indentation for a cross-file move", () => {
@@ -535,5 +600,15 @@ items:
       { id: "delete-final", type: "delete_sequence_item", index: 0 },
     );
     expect(deleted.text).toBe("[]\n");
+  });
+
+  it("keeps CR-only separators in structural sequence edits", () => {
+    const index = create_index("items:\r  - one\r");
+    const result = apply_operation(index, sequence_for(index, "items"), {
+      id: "cr-append",
+      type: "append_sequence_item",
+      value: "two",
+    });
+    expect(result.text).toBe("items:\r  - one\r  - two\r");
   });
 });

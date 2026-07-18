@@ -124,6 +124,116 @@ node_sets:
     expect(explicit.text).toBe("map:\n  alpha: one\n  beta: two\n  gamma: 3\n");
   });
 
+  it("rejects conflicting matching field orders and accepts identical orders", () => {
+    const index = create_index("map:\n  alpha: one\n  beta: two\n");
+    const target = mapping_for(index, "map");
+    const profile_source = (second_order) => `version: 1
+node_sets:
+  first:
+    query:
+      version: 2
+      where:
+        all:
+          - { predicate: node_type, equals: mapping }
+          - predicate: field_exists
+            field: { key: { type: string, value: alpha } }
+      select: { kind: self, missing: error }
+      projection: { fields: [path], missing: error }
+    fields: { allowed: [gamma, beta, alpha] }
+    field_order: [gamma, beta, alpha]
+  second:
+    query:
+      version: 2
+      where:
+        all:
+          - { predicate: node_type, equals: mapping }
+          - predicate: field_exists
+            field: { key: { type: string, value: alpha } }
+      select: { kind: self, missing: error }
+      projection: { fields: [path], missing: error }
+    fields: { allowed: [gamma, beta, alpha] }
+    field_order: ${second_order}
+`;
+
+    const conflicting_profile = load_profile(
+      Buffer.from(profile_source("[beta, gamma, alpha]")),
+    );
+    expect(() =>
+      apply_operation(
+        index,
+        target,
+        {
+          id: "conflicting-field-order",
+          type: "add_mapping_pair",
+          key: "gamma",
+          value: 3,
+        },
+        { profile: conflicting_profile },
+      ),
+    ).toThrowError(expect.objectContaining({ code: "REQUEST_ERROR" }));
+
+    const identical_profile = load_profile(
+      Buffer.from(profile_source("[gamma, beta, alpha]")),
+    );
+    const result = apply_operation(
+      index,
+      target,
+      {
+        id: "identical-field-order",
+        type: "add_mapping_pair",
+        key: "gamma",
+        value: 3,
+      },
+      { profile: identical_profile },
+    );
+    expect(result.text).toBe("map:\n  gamma: 3\n  alpha: one\n  beta: two\n");
+  });
+
+  it("resolves field order for a late target without projecting all matches", () => {
+    const record_count = 6_000;
+    const source = `records:\n${Array.from(
+      { length: record_count },
+      (_, index) => `  - alpha: value-${index}\n    beta: kept-${index}\n`,
+    ).join("")}`;
+    const index = create_index(source);
+    const target = select_unique_node(index, {
+      path: [{ mapping_key: "records" }, { sequence_index: record_count - 1 }],
+      node_type: "mapping",
+    });
+    const profile = load_profile(
+      Buffer.from(`version: 1
+node_sets:
+  record:
+    query:
+      version: 2
+      where:
+        all:
+          - { predicate: node_type, equals: mapping }
+          - predicate: field_exists
+            field: { key: { type: string, value: alpha } }
+      select: { kind: self, missing: error }
+      projection: { fields: [path], missing: error }
+    fields: { allowed: [gamma, alpha, beta] }
+    field_order: [gamma, alpha, beta]
+`),
+    );
+
+    const result = apply_operation(
+      index,
+      target,
+      {
+        id: "late-profile-target",
+        type: "add_mapping_pair",
+        key: "gamma",
+        value: true,
+      },
+      { profile },
+    );
+    expect(result.text).toContain(
+      `  - gamma: true\n    alpha: value-${record_count - 1}\n    beta: kept-${record_count - 1}\n`,
+    );
+  }, 15_000);
+
   it("sets, deletes, moves, and reorders pairs as source slices", () => {
     const index = create_index(mapping_source);
     const target = mapping_for(index, "settings");
@@ -220,6 +330,75 @@ node_sets:
       pairs: [{ index: 2 }, { index: 0 }, { index: 1 }],
     });
     expect(reordered.text).toBe(moved.text);
+  });
+
+  it("reports identity edits and exact structural result ranges", () => {
+    const index = create_index(mapping_source);
+    const target = mapping_for(index, "settings");
+    const identity_operations = [
+      {
+        id: "identity-rename",
+        type: "rename_mapping_key",
+        pair: { index: 0 },
+        key: "alpha",
+      },
+      {
+        id: "identity-reorder",
+        type: "reorder_mapping_pairs",
+        pairs: [{ index: 0 }, { index: 1 }, { index: 2 }],
+      },
+      {
+        id: "identity-move",
+        type: "move_mapping_pair",
+        pair: { index: 0 },
+        position: { kind: "prepend" },
+      },
+    ];
+    for (const operation of identity_operations) {
+      const { compiled, text } = apply_operation(index, target, operation);
+      expect(text).toBe(mapping_source);
+      expect(compiled.splices).toEqual([]);
+      expect(compiled.result_range).toBeNull();
+      expect(compiled.semantic_change).toMatchObject({ no_op: true });
+    }
+
+    const added = apply_operation(index, target, {
+      id: "range-add",
+      type: "add_mapping_pair",
+      key: "inserted",
+      value: "value",
+      position: { kind: "before", pair: { index: 1 } },
+    });
+    expect(
+      Buffer.from(added.text)
+        .subarray(
+          added.compiled.result_range.start_byte,
+          added.compiled.result_range.end_byte,
+        )
+        .toString("utf8"),
+    ).toBe("inserted: value\n");
+
+    const moved = apply_operation(index, target, {
+      id: "range-move",
+      type: "move_mapping_pair",
+      pair: { index: 2 },
+      position: { kind: "prepend" },
+    });
+    expect(
+      Buffer.from(moved.text)
+        .subarray(
+          moved.compiled.result_range.start_byte,
+          moved.compiled.result_range.end_byte,
+        )
+        .toString("utf8"),
+    ).toBe("gamma:\n    nested: yes\n");
+
+    const deleted = apply_operation(index, target, {
+      id: "range-delete",
+      type: "delete_mapping_pair",
+      pair: { index: 1 },
+    });
+    expect(deleted.compiled.result_range).toBeNull();
   });
 
   it("replaces existing collection values without rebuilding their pairs", () => {
@@ -339,6 +518,17 @@ plain: second
       { id: "delete-final", type: "delete_mapping_pair", pair: { index: 0 } },
     );
     expect(deleted.text).toBe("{}\n");
+  });
+
+  it("keeps CR-only separators in structural mapping edits", () => {
+    const index = create_index("map:\r  alpha: one\r");
+    const result = apply_operation(index, mapping_for(index, "map"), {
+      id: "cr-add",
+      type: "add_mapping_pair",
+      key: "beta",
+      value: "two",
+    });
+    expect(result.text).toBe("map:\r  alpha: one\r  beta: two\r");
   });
 
   it("rejects a pair locator owned by another mapping", () => {

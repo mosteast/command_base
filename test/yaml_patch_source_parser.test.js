@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import source_module from "../lib/yaml_patch/source";
 import parser_module from "../lib/yaml_patch/parser";
+import node_index_module from "../lib/yaml_patch/node_index";
 
 const {
   create_source_record,
@@ -14,6 +15,7 @@ const {
 } = source_module;
 const { SUPPORTED_YAML_VERSION, get_yaml_parser_version, parse_yaml_source } =
   parser_module;
+const { build_node_index } = node_index_module;
 
 const temp_directories = [];
 
@@ -130,6 +132,24 @@ describe("yaml@2.8.0 parser adapter", () => {
     expect(parsed.documents[0].contents.srcToken).toBeDefined();
     expect(parsed.documents[1].contents.range).toEqual([20, 31, 31]);
     expect(parsed.line_counter.linePos(20)).toEqual({ line: 4, col: 1 });
+  });
+
+  it("parses CR-only YAML without changing source byte offsets", () => {
+    const source = create_source_record(
+      Buffer.from("map:\r  alpha: one\r", "utf8"),
+    );
+    const parsed = parse_yaml_source(source);
+    const index = build_node_index(source, parsed);
+
+    expect(source.line_break_mode).toBe("cr");
+    expect(parsed.errors).toEqual([]);
+    expect(parsed.documents[0].toJSON()).toEqual({ map: { alpha: "one" } });
+    expect(
+      index.entries.find((entry) => entry.raw === "one").source,
+    ).toMatchObject({
+      start_byte: 14,
+      end_byte: 17,
+    });
   });
 
   it("normalizes syntax errors instead of relying on thrown parse calls", () => {
