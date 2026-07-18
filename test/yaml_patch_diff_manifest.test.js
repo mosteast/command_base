@@ -123,6 +123,18 @@ describe("YAML transaction diffs and manifests", () => {
 
   it("rejects forged byte proofs before creating a file diff", () => {
     const fixture = diff_fixture();
+    const forged_provenance = structuredClone(fixture.proof);
+    forged_provenance.operations[0].final_ranges = [
+      {
+        original_start_byte: 999,
+        original_end_byte: 1000,
+        candidate_start_byte: 999,
+        candidate_end_byte: 1000,
+      },
+    ];
+    const renamed_operation = structuredClone(fixture.proof);
+    renamed_operation.operations[0].operation_id = "forged";
+    renamed_operation.ranges[0].operation_ids = ["forged"];
     const forged_proofs = [
       { ...fixture.proof, version: 999 },
       { ...fixture.proof, verified: false },
@@ -133,6 +145,8 @@ describe("YAML transaction diffs and manifests", () => {
         ...fixture.proof,
         summary: { ...fixture.proof.summary, touched_bytes: 0 },
       },
+      forged_provenance,
+      renamed_operation,
     ];
 
     for (const proof of forged_proofs) {
@@ -140,6 +154,46 @@ describe("YAML transaction diffs and manifests", () => {
         expect.objectContaining({ code: "VALIDATION_FAILED" }),
       );
     }
+  });
+
+  it("binds proof operation IDs to manifest request and diff evidence", () => {
+    const fixture = diff_fixture("config.yaml");
+    const preview = create_file_diff(fixture);
+    const forged = structuredClone(fixture.proof);
+    forged.operations[0].operation_id = "forged";
+    forged.ranges[0].operation_ids = ["forged"];
+    const manifest = create_transaction_manifest({
+      request: {
+        version: 1,
+        files: [
+          {
+            id: fixture.file_id,
+            path: fixture.path,
+            digest: fixture.proof.original_digest,
+          },
+        ],
+        operations: [{ id: "replace", type: "replace_scalar_raw" }],
+      },
+      result: {
+        no_op: false,
+        files: [
+          {
+            file_id: fixture.file_id,
+            path: fixture.path,
+            original_digest: forged.original_digest,
+            candidate_digest: forged.candidate_digest,
+            no_op: forged.no_op,
+            proof: forged,
+            diff: preview.structured,
+          },
+        ],
+        validation: { diagnostics: [] },
+      },
+    });
+
+    expect(() => validate_transaction_manifest(manifest)).toThrowError(
+      expect.objectContaining({ code: "VALIDATION_FAILED" }),
+    );
   });
 
   it("separates canonical request/result data and excludes paths and runtime fields from its digest", () => {
@@ -277,7 +331,7 @@ describe("YAML transaction diffs and manifests", () => {
       ],
       operations: [
         {
-          id: "set-metadata",
+          id: "replace",
           type: "add_mapping_pair",
           file: fixture.file_id,
           target: { selector: { version: 1, path: [] } },

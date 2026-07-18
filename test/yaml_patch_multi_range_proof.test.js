@@ -12,6 +12,7 @@ const {
   create_transaction_proof,
   materialize_piece_table,
   original_ranges_from_pieces,
+  validate_byte_proof,
 } = range_set_module;
 const { sha256_digest } = source_module;
 const public_api = createRequire(import.meta.url)("../lib/yaml_patch");
@@ -42,6 +43,7 @@ describe("YAML multi-range splice and byte proof", () => {
       "create_transaction_proof",
       "materialize_piece_table",
       "original_ranges_from_pieces",
+      "validate_byte_proof",
     ]) {
       expect(public_api[name], name).toBeTypeOf("function");
     }
@@ -223,6 +225,72 @@ describe("YAML multi-range splice and byte proof", () => {
         (operation) => operation.present_in_final === false,
       ),
     ).toBe(true);
+  });
+
+  it("rejects operation provenance ranges outside their named root range", () => {
+    const original = Buffer.from("value: old\n");
+    const result = apply_range_set(original, [
+      splice(7, 10, "new", "replace", 0),
+    ]);
+    const forged = structuredClone(result.proof);
+    forged.operations[0].final_ranges = [
+      {
+        original_start_byte: 999,
+        original_end_byte: 1000,
+        candidate_start_byte: 999,
+        candidate_end_byte: 1000,
+      },
+    ];
+
+    expect(() =>
+      validate_byte_proof(forged, {
+        original_buffer: original,
+        candidate_buffer: result.candidate_buffer,
+      }),
+    ).toThrowError(expect.objectContaining({ code: "BYTE_GUARANTEE_FAILED" }));
+  });
+
+  it("rejects out-of-bounds and noncanonical removed original ranges", () => {
+    const original = Buffer.from("value: old\n");
+    const result = apply_range_set(original, [
+      splice(7, 10, "new", "replace", 0),
+    ]);
+    const out_of_bounds = structuredClone(result.proof);
+    out_of_bounds.operations[0].steps[0].removed_original_ranges = [
+      { start_byte: 7, end_byte: original.length + 1 },
+    ];
+    const overlapping = structuredClone(result.proof);
+    overlapping.operations[0].steps[0].removed_original_ranges = [
+      { start_byte: 8, end_byte: 10 },
+      { start_byte: 7, end_byte: 9 },
+    ];
+
+    for (const proof of [out_of_bounds, overlapping]) {
+      expect(() =>
+        validate_byte_proof(proof, {
+          original_buffer: original,
+          candidate_buffer: result.candidate_buffer,
+        }),
+      ).toThrowError(
+        expect.objectContaining({ code: "BYTE_GUARANTEE_FAILED" }),
+      );
+    }
+  });
+
+  it("rejects duplicate operation IDs in root range metadata", () => {
+    const original = Buffer.from("value: old\n");
+    const result = apply_range_set(original, [
+      splice(7, 10, "new", "replace", 0),
+    ]);
+    const forged = structuredClone(result.proof);
+    forged.ranges[0].operation_ids = ["replace", "replace"];
+
+    expect(() =>
+      validate_byte_proof(forged, {
+        original_buffer: original,
+        candidate_buffer: result.candidate_buffer,
+      }),
+    ).toThrowError(expect.objectContaining({ code: "BYTE_GUARANTEE_FAILED" }));
   });
 
   it("preserves BOM, Unicode, mixed newline, and untouched bytes exactly", () => {
