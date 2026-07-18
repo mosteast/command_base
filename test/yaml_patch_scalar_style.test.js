@@ -172,6 +172,45 @@ describe("YAML scalar structural edits", () => {
     expect(result.text).toBe(expected);
   });
 
+  it.each([
+    [
+      "literal keep with trailing breaks",
+      "value: |+ # literal header\n  old\n",
+      "new\n\n\n",
+      "value: |+ # literal header\n  new\n\n\n",
+    ],
+    [
+      "folded keep with two trailing breaks",
+      "value: >+ # folded header\n  old\n",
+      "new\n\n",
+      "value: >+ # folded header\n  new\n\n",
+    ],
+    [
+      "chomping before indent indicator",
+      "value: |+2 # plus first\n  old\n",
+      "new\n\n",
+      "value: |+2 # plus first\n  new\n\n",
+    ],
+    [
+      "indent before chomping indicator",
+      "value: >2+ # indent first\n  old\n",
+      "first\n\nsecond\n\n\n",
+      "value: >2+ # indent first\n  first\n\n\n  second\n\n\n",
+    ],
+  ])(
+    "preserves block scalar header trivia for %s",
+    (_name, source, value, expected) => {
+      const index = create_index(source);
+      const result = apply_operation(index, scalar_for(index, "value"), {
+        id: "block-style-regression",
+        type: "set_scalar_value",
+        value: { type: "string", value },
+      });
+
+      expect(result.text).toBe(expected);
+    },
+  );
+
   it("requires an explicit style change when the old style is unsafe", () => {
     const index = create_index("value: old\n");
     const target = scalar_for(index, "value");

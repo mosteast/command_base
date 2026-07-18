@@ -6,16 +6,20 @@ import node_index_module from "../lib/yaml_patch/node_index";
 import query_module from "../lib/yaml_patch/query";
 import range_set_module from "../lib/yaml_patch/range_set";
 import sequence_edit_module from "../lib/yaml_patch/sequence_edit";
+import addressable_module from "../lib/yaml_patch/addressable";
 
 const { create_source_record } = source_module;
 const { parse_yaml_source } = parser_module;
 const { build_node_index } = node_index_module;
 const { select_unique_node } = query_module;
 const { apply_range_set } = range_set_module;
-const { compile_operation } = sequence_edit_module;
+const { compile_cross_file_move, compile_operation } = sequence_edit_module;
+const { build_addressable_index } = addressable_module;
 
-function create_index(text) {
-  const source = create_source_record(Buffer.from(text, "utf8"));
+function create_index(text, requested_path) {
+  const source = create_source_record(Buffer.from(text, "utf8"), {
+    ...(requested_path === undefined ? {} : { requested_path }),
+  });
   return build_node_index(source, parse_yaml_source(source));
 }
 
@@ -23,8 +27,8 @@ function sequence_for(index, mapping_key) {
   return select_unique_node(index, { path: [{ mapping_key }] });
 }
 
-function apply_operation(index, target, operation) {
-  const compiled = compile_operation({ index }, target, operation);
+function apply_operation(index, target, operation, context = {}) {
+  const compiled = compile_operation({ index, ...context }, target, operation);
   return {
     compiled,
     text: apply_range_set(
@@ -127,6 +131,118 @@ describe("YAML sequence structural edits", () => {
 `);
   });
 
+  it("compiles a cross-file move into source and destination contracts", () => {
+    const source_index = create_index(
+      `items:
+  - keep: source
+  - name: 'move me' # retained
+    nested:
+      key: value
+`,
+      "/tmp/source.yaml",
+    );
+    const destination_index = create_index(
+      `items:
+  - name: existing
+`,
+      "/tmp/destination.yaml",
+    );
+    const operation = {
+      id: "cross-file-move",
+      type: "move_sequence_item",
+      index: 1,
+      position: { kind: "prepend" },
+    };
+
+    const compiled = compile_cross_file_move(
+      { index: source_index },
+      sequence_for(source_index, "items"),
+      { index: destination_index },
+      sequence_for(destination_index, "items"),
+      operation,
+    );
+
+    expect(Object.keys(compiled).sort()).toEqual(["destination", "source"]);
+    for (const side of [compiled.source, compiled.destination]) {
+      expect(side).toMatchObject({
+        splices: [
+          {
+            operation_id: "cross-file-move",
+            replacement_buffer: expect.any(Buffer),
+          },
+        ],
+        result_range: {
+          start_byte: expect.any(Number),
+          end_byte: expect.any(Number),
+        },
+        provenance: {
+          operation_id: "cross-file-move",
+          type: "move_sequence_item",
+        },
+        semantic_change: { no_op: false },
+      });
+    }
+    expect(
+      apply_range_set(
+        source_index.source.buffer,
+        compiled.source.splices,
+      ).candidate_buffer.toString("utf8"),
+    ).toBe(`items:
+  - keep: source
+`);
+    const destination_text = apply_range_set(
+      destination_index.source.buffer,
+      compiled.destination.splices,
+    ).candidate_buffer.toString("utf8");
+    expect(destination_text).toBe(`items:
+  - name: 'move me' # retained
+    nested:
+      key: value
+  - name: existing
+`);
+    expect(destination_text).toContain(
+      "- name: 'move me' # retained\n    nested:\n      key: value\n",
+    );
+  });
+
+  it("rebases only structural indentation for a cross-file move", () => {
+    const source_index = create_index(`items:
+  - name: moved # retain
+    nested: value
+`);
+    const destination_index = create_index(`wrapper:
+  items:
+    - name: existing
+`);
+    const compiled = compile_cross_file_move(
+      { index: source_index },
+      sequence_for(source_index, "items"),
+      { index: destination_index },
+      select_unique_node(destination_index, {
+        path: [{ mapping_key: "wrapper" }, { mapping_key: "items" }],
+      }),
+      {
+        id: "rebase-cross-file-move",
+        type: "move_sequence_item",
+        index: 0,
+        position: { kind: "prepend" },
+      },
+    );
+
+    const destination_text = apply_range_set(
+      destination_index.source.buffer,
+      compiled.destination.splices,
+    ).candidate_buffer.toString("utf8");
+    expect(destination_text).toBe(`wrapper:
+  items:
+    - name: moved # retain
+      nested: value
+    - name: existing
+`);
+    expect(destination_text).toContain("name: moved # retain");
+    expect(destination_text).toContain("nested: value");
+  });
+
   it("uses typed equality for unique append and precise value deletion", () => {
     const source = `values:
   - 1
@@ -166,6 +282,153 @@ describe("YAML sequence structural edits", () => {
         id: "duplicates",
         type: "assert_sequence_unique",
       }),
+    ).toThrowError(expect.objectContaining({ code: "PRECONDITION_FAILED" }));
+  });
+
+  it("treats safe integer and decimal_string representations as one typed value", () => {
+    const index = create_index(`values:
+  - 1
+  - 01
+`);
+    const target = sequence_for(index, "values");
+    const encoded_one = {
+      type: "integer",
+      value: "1",
+      value_encoding: "decimal_string",
+    };
+
+    const appended = apply_operation(index, target, {
+      id: "encoded-append",
+      type: "append_unique_sequence_value",
+      value: encoded_one,
+    });
+    expect(appended.compiled.splices).toEqual([]);
+
+    const deleted = apply_operation(index, target, {
+      id: "encoded-delete",
+      type: "delete_one_sequence_value",
+      value: encoded_one,
+    });
+    expect(deleted.text).toBe(`values:
+  - 01
+`);
+
+    expect(() =>
+      apply_operation(index, target, {
+        id: "encoded-duplicates",
+        type: "assert_sequence_unique",
+      }),
+    ).toThrowError(expect.objectContaining({ code: "PRECONDITION_FAILED" }));
+  });
+
+  it("resolves before and after against current sequence item references", () => {
+    const index = create_index(sequence_source);
+    const target = sequence_for(index, "items");
+    const addressable_index = build_addressable_index(index);
+    const target_addressable = addressable_index.node_entry_by_id.get(
+      target.id,
+    );
+    const item_entries = addressable_index.entries.filter(
+      (entry) =>
+        entry.addressable_type === "sequence_item" &&
+        entry.parent_id === target_addressable.id,
+    );
+
+    const before = apply_operation(
+      index,
+      target,
+      {
+        id: "before-locator",
+        type: "insert_sequence_item",
+        value: "inserted",
+        position: {
+          kind: "before",
+          item: { locator: item_entries[1].locator },
+        },
+      },
+      { addressable_index },
+    );
+    expect(before.text).toContain("- inserted\n  - two");
+
+    const after = apply_operation(
+      index,
+      target,
+      {
+        id: "after-current-entry",
+        type: "insert_sequence_item",
+        value: "inserted",
+        position: {
+          kind: "after",
+          item: { current_entry: item_entries[1] },
+        },
+      },
+      { addressable_index },
+    );
+    expect(after.text).toContain("- two\n  - inserted");
+  });
+
+  it("rejects stale sequence targets and vanished current item references", () => {
+    const old_index = create_index(sequence_source);
+    const old_target = sequence_for(old_index, "items");
+    const old_addressable = build_addressable_index(old_index);
+    const old_target_addressable = old_addressable.node_entry_by_id.get(
+      old_target.id,
+    );
+    const old_item = old_addressable.entries.find(
+      (entry) =>
+        entry.addressable_type === "sequence_item" &&
+        entry.parent_id === old_target_addressable.id &&
+        entry.sequence_index === 1,
+    );
+    const current_index = create_index(`items:
+  - one # first
+  - replacement
+  - three
+`);
+    const current_target = sequence_for(current_index, "items");
+    const current_addressable = build_addressable_index(current_index);
+
+    expect(() =>
+      apply_operation(
+        current_index,
+        old_target,
+        { id: "stale-target", type: "append_sequence_item", value: "four" },
+        { addressable_index: current_addressable },
+      ),
+    ).toThrowError(expect.objectContaining({ code: "PRECONDITION_FAILED" }));
+
+    const destination_index = create_index(`items:
+  - destination
+`);
+    expect(() =>
+      compile_cross_file_move(
+        { index: current_index },
+        old_target,
+        { index: destination_index },
+        sequence_for(destination_index, "items"),
+        {
+          id: "stale-cross-file-source",
+          type: "move_sequence_item",
+          index: 0,
+          position: { kind: "append" },
+        },
+      ),
+    ).toThrowError(expect.objectContaining({ code: "PRECONDITION_FAILED" }));
+    expect(() =>
+      apply_operation(
+        current_index,
+        current_target,
+        {
+          id: "vanished-item",
+          type: "insert_sequence_item",
+          value: "inserted",
+          position: {
+            kind: "before",
+            item: { current_entry: old_item },
+          },
+        },
+        { addressable_index: current_addressable },
+      ),
     ).toThrowError(expect.objectContaining({ code: "PRECONDITION_FAILED" }));
   });
 

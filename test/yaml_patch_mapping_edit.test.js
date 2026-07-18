@@ -7,6 +7,7 @@ import query_module from "../lib/yaml_patch/query";
 import range_set_module from "../lib/yaml_patch/range_set";
 import mapping_edit_module from "../lib/yaml_patch/mapping_edit";
 import addressable_module from "../lib/yaml_patch/addressable";
+import profile_module from "../lib/yaml_patch/profile";
 
 const { create_source_record } = source_module;
 const { parse_yaml_source } = parser_module;
@@ -15,6 +16,7 @@ const { select_unique_node } = query_module;
 const { apply_range_set } = range_set_module;
 const { compile_operation } = mapping_edit_module;
 const { build_addressable_index } = addressable_module;
+const { load_profile } = profile_module;
 
 function create_index(text) {
   const source = create_source_record(Buffer.from(text, "utf8"));
@@ -68,14 +70,40 @@ describe("YAML mapping structural edits", () => {
   it("uses explicit position before profile order and otherwise appends stably", () => {
     const index = create_index("map:\n  alpha: one\n  beta: two\n");
     const target = mapping_for(index, "map");
-    const profile_order = {
-      suggested_mapping_order: ["gamma", "alpha", "beta"],
-    };
+    const profile = load_profile(
+      Buffer.from(`version: 1
+node_sets:
+  root_mapping:
+    query:
+      version: 2
+      where:
+        all:
+          - { predicate: node_type, equals: mapping }
+          - predicate: field_exists
+            field: { key: { type: string, value: map } }
+      select: { kind: self, missing: error }
+      projection: { fields: [path], missing: error }
+    fields: { allowed: [map] }
+    field_order: [map]
+  ordered_mapping:
+    query:
+      version: 2
+      where:
+        all:
+          - { predicate: node_type, equals: mapping }
+          - predicate: field_exists
+            field: { key: { type: string, value: alpha } }
+      select: { kind: self, missing: error }
+      projection: { fields: [path], missing: error }
+    fields: { allowed: [gamma, alpha, beta] }
+    field_order: [gamma, alpha, beta]
+`),
+    );
     const suggested = apply_operation(
       index,
       target,
       { id: "profile-order", type: "add_mapping_pair", key: "gamma", value: 3 },
-      { profile: profile_order },
+      { profile },
     );
     expect(suggested.text).toBe(
       "map:\n  gamma: 3\n  alpha: one\n  beta: two\n",
@@ -91,7 +119,7 @@ describe("YAML mapping structural edits", () => {
         value: 3,
         position: { kind: "append" },
       },
-      { profile: profile_order },
+      { profile },
     );
     expect(explicit.text).toBe("map:\n  alpha: one\n  beta: two\n  gamma: 3\n");
   });
@@ -192,6 +220,57 @@ describe("YAML mapping structural edits", () => {
       pairs: [{ index: 2 }, { index: 0 }, { index: 1 }],
     });
     expect(reordered.text).toBe(moved.text);
+  });
+
+  it("replaces existing collection values without rebuilding their pairs", () => {
+    const mapping_index = create_index(`map:
+  target: # retain header
+    nested: old
+  keep: untouched # retain pair
+`);
+    const mapping_result = apply_operation(
+      mapping_index,
+      mapping_for(mapping_index, "map"),
+      {
+        id: "mapping-to-scalar",
+        type: "set_mapping_value",
+        pair: { index: 0 },
+        value: "changed",
+      },
+    );
+    expect(mapping_result.text).toBe(`map:
+  target: # retain header
+    changed
+  keep: untouched # retain pair
+`);
+    expect(mapping_result.compiled.splices[0]).toMatchObject({
+      start_byte: mapping_index.source.buffer.indexOf(
+        Buffer.from("nested: old"),
+      ),
+      replacement_buffer: Buffer.from("changed"),
+    });
+
+    const sequence_index = create_index(`map:
+  target:
+    - old # replaced value
+  keep: untouched # retain pair
+`);
+    const sequence_result = apply_operation(
+      sequence_index,
+      mapping_for(sequence_index, "map"),
+      {
+        id: "sequence-to-mapping",
+        type: "set_mapping_value",
+        pair: { index: 0 },
+        value: { nested: true },
+      },
+    );
+    expect(sequence_result.text).toBe(`map:
+  target:
+    nested: true
+  keep: untouched # retain pair
+`);
+    expect(sequence_result.text).toContain("keep: untouched # retain pair");
   });
 
   it("renames only a selected key and supports complex-key pair locators", () => {
