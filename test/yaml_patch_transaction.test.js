@@ -424,6 +424,168 @@ describe("YAML transaction planning", () => {
     );
   });
 
+  it("keeps an identical sibling handle attached during a same-collection subtree move", async () => {
+    const input = file(
+      "main",
+      "config.yaml",
+      "items:\n  - name: duplicate\n  - name: duplicate\n",
+    );
+    const result = await plan_transaction(
+      request(
+        [input],
+        [
+          {
+            id: "bind-staying-sibling",
+            type: "bind",
+            file: "main",
+            selector: {
+              version: 1,
+              path: [{ mapping_key: "items" }, { sequence_index: 1 }],
+            },
+            handle: "staying",
+          },
+          {
+            id: "move-first-to-end",
+            type: "move_subtree",
+            source: {
+              file: "main",
+              selector: {
+                version: 1,
+                path: [{ mapping_key: "items" }, { sequence_index: 0 }],
+              },
+            },
+            destination: {
+              file: "main",
+              selector: { version: 1, path: [{ mapping_key: "items" }] },
+              position: { kind: "append" },
+            },
+          },
+          {
+            id: "edit-staying-sibling",
+            type: "replace_scalar_raw",
+            target: { handle: "staying", path: [{ mapping_key: "name" }] },
+            raw: "tracked",
+          },
+        ],
+      ),
+      options([input]),
+    );
+
+    expect(result.candidates.main.buffer.toString()).toBe(
+      "items:\n  - name: tracked\n  - name: duplicate\n",
+    );
+  });
+
+  it("keeps an identical destination sibling handle attached during a cross-file move", async () => {
+    const source = file(
+      "source",
+      "source.yaml",
+      "items:\n  - name: duplicate\n",
+    );
+    const destination = file(
+      "destination",
+      "destination.yaml",
+      "items:\n  - name: duplicate\n",
+    );
+    const result = await plan_transaction(
+      request(
+        [source, destination],
+        [
+          {
+            id: "bind-existing-destination",
+            type: "bind",
+            file: "destination",
+            selector: {
+              version: 1,
+              path: [{ mapping_key: "items" }, { sequence_index: 0 }],
+            },
+            handle: "existing",
+          },
+          {
+            id: "move-duplicate-before-existing",
+            type: "move_subtree",
+            source: {
+              file: "source",
+              selector: {
+                version: 1,
+                path: [{ mapping_key: "items" }, { sequence_index: 0 }],
+              },
+            },
+            destination: {
+              file: "destination",
+              selector: { version: 1, path: [{ mapping_key: "items" }] },
+              position: { kind: "prepend" },
+            },
+          },
+          {
+            id: "edit-existing-destination",
+            type: "replace_scalar_raw",
+            target: { handle: "existing", path: [{ mapping_key: "name" }] },
+            raw: "tracked",
+          },
+        ],
+      ),
+      options([source, destination]),
+    );
+
+    expect(result.candidates.destination.buffer.toString()).toBe(
+      "items:\n  - name: duplicate\n  - name: tracked\n",
+    );
+  });
+
+  it("moves a nested subtree to an ancestor collection without overlapping splices", async () => {
+    const input = file(
+      "main",
+      "config.yaml",
+      `items:
+  - name: parent
+    children:
+      # owned by moved
+      - name: move
+      - name: stay
+  - name: existing
+`,
+    );
+    const result = await plan_transaction(
+      request(
+        [input],
+        [
+          {
+            id: "move-child-to-root",
+            type: "move_subtree",
+            source: {
+              file: "main",
+              selector: {
+                version: 1,
+                path: [
+                  { mapping_key: "items" },
+                  { sequence_index: 0 },
+                  { mapping_key: "children" },
+                  { sequence_index: 0 },
+                ],
+              },
+            },
+            destination: {
+              file: "main",
+              selector: { version: 1, path: [{ mapping_key: "items" }] },
+              position: { kind: "append" },
+            },
+          },
+        ],
+      ),
+      options([input]),
+    );
+
+    expect(result.candidates.main.buffer.toString()).toBe(`items:
+  - name: parent
+    children:
+      - name: stay
+  - name: existing
+  # owned by moved
+  - name: move
+`);
+  });
+
   it("binds the exact copied result when an identical node already exists", async () => {
     const source = file(
       "source",
@@ -1228,6 +1390,39 @@ describe("YAML transaction planning", () => {
         }),
       ),
     ).rejects.toMatchObject({ code: "CHANGE_LIMIT_EXCEEDED" });
+  });
+
+  it("binds profile preconditions to the supplied profile object before source I/O", async () => {
+    const input = file("main", "config.yaml", "records:\n  - key: one\n");
+    const profile = per_operation_profile([]);
+    const fake_digest = "f".repeat(64);
+    const load_source = vi.fn(async () => input.source);
+
+    await expect(
+      plan_transaction(
+        request([input], [], {
+          preconditions: { profile_digest: fake_digest },
+        }),
+        options([], {
+          profile,
+          profile_digest: fake_digest,
+          load_source,
+        }),
+      ),
+    ).rejects.toMatchObject({
+      code: "PRECONDITION_FAILED",
+      details: expect.objectContaining({ field: "profile_digest" }),
+    });
+    expect(load_source).not.toHaveBeenCalled();
+
+    const digest_only = "d".repeat(64);
+    const digest_only_result = await plan_transaction(
+      request([input], [], {
+        preconditions: { profile_digest: digest_only },
+      }),
+      options([input], { profile_digest: digest_only }),
+    );
+    expect(digest_only_result.validation.profile_digest).toBe(digest_only);
   });
 
   it("normalizes a byte-identical final transaction to a deterministic success no-op", async () => {
