@@ -116,6 +116,52 @@ describe("YAML transaction planning", () => {
     expect(result.operations[0]).toMatchObject({ result_handle: "created" });
   });
 
+  it("retains an existing destination handle when add_subtree prepends an identical item", async () => {
+    const input = file(
+      "main",
+      "config.yaml",
+      "items:\n  - name: duplicate # existing bytes\n    raw: 'keep'\n",
+    );
+    const result = await plan_transaction(
+      request(
+        [input],
+        [
+          {
+            id: "bind-existing",
+            type: "bind",
+            file: "main",
+            selector: {
+              version: 1,
+              path: [{ mapping_key: "items" }, { sequence_index: 0 }],
+            },
+            handle: "existing",
+          },
+          {
+            id: "prepend-duplicate",
+            type: "add_subtree",
+            destination: {
+              file: "main",
+              selector: { version: 1, path: [{ mapping_key: "items" }] },
+              position: { kind: "prepend" },
+            },
+            raw: "name: duplicate # added bytes\nraw: 'keep'\n",
+          },
+          {
+            id: "edit-existing",
+            type: "replace_scalar_raw",
+            target: { handle: "existing", path: [{ mapping_key: "name" }] },
+            raw: "tracked",
+          },
+        ],
+      ),
+      options([input]),
+    );
+
+    expect(result.candidates.main.buffer.toString()).toBe(
+      "items:\n  - name: duplicate # added bytes\n    raw: 'keep'\n  - name: tracked # existing bytes\n    raw: 'keep'\n",
+    );
+  });
+
   it("moves a subtree between collections in one file snapshot", async () => {
     const input = file(
       "main",
@@ -631,6 +677,63 @@ describe("YAML transaction planning", () => {
 
     expect(result.candidates.destination.buffer.toString()).toBe(
       "items:\n  - name: duplicate\n  - name: renamed\n",
+    );
+  });
+
+  it("retains an existing destination handle when copy_subtree prepends an identical item", async () => {
+    const source = file(
+      "source",
+      "source.yaml",
+      "items:\n  - name: duplicate # copied bytes\n    raw: 'keep'\n",
+    );
+    const destination = file(
+      "destination",
+      "destination.yaml",
+      "items:\n  - name: duplicate # existing bytes\n    raw: 'keep'\n",
+    );
+    const result = await plan_transaction(
+      request(
+        [source, destination],
+        [
+          {
+            id: "bind-existing",
+            type: "bind",
+            file: "destination",
+            selector: {
+              version: 1,
+              path: [{ mapping_key: "items" }, { sequence_index: 0 }],
+            },
+            handle: "existing",
+          },
+          {
+            id: "copy-before-existing",
+            type: "copy_subtree",
+            source: {
+              file: "source",
+              selector: {
+                version: 1,
+                path: [{ mapping_key: "items" }, { sequence_index: 0 }],
+              },
+            },
+            destination: {
+              file: "destination",
+              selector: { version: 1, path: [{ mapping_key: "items" }] },
+              position: { kind: "prepend" },
+            },
+          },
+          {
+            id: "edit-existing",
+            type: "replace_scalar_raw",
+            target: { handle: "existing", path: [{ mapping_key: "name" }] },
+            raw: "tracked",
+          },
+        ],
+      ),
+      options([source, destination]),
+    );
+
+    expect(result.candidates.destination.buffer.toString()).toBe(
+      "items:\n  - name: duplicate # copied bytes\n    raw: 'keep'\n  - name: tracked # existing bytes\n    raw: 'keep'\n",
     );
   });
 
