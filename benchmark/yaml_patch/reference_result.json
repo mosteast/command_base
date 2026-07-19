@@ -1,0 +1,42 @@
+{
+  "tool_version": "1.0.1",
+  "parser_version": "2.8.0",
+  "environment": {
+    "os": "Darwin 25.5.0",
+    "platform": "darwin",
+    "arch": "arm64",
+    "node": "v24.15.0",
+    "cpus": 12,
+    "memory_bytes": 34359738368,
+    "storage": "local-filesystem"
+  },
+  "mode": {
+    "cold": true,
+    "warm": true,
+    "samples": 3
+  },
+  "metrics": {
+    "cold_nodes_64k": {
+      "file_path": "/Users/hailang/code_base/command_base/test/fixture/yaml_patch/scale/nodes_64k.yaml",
+      "bytes": 1641786,
+      "nodes": 128003,
+      "samples": 3,
+      "p50_ms": 37695.966167,
+      "p95_ms": 37745.958583,
+      "max_ms": 37745.958583
+    },
+    "warm_large_2mib": {
+      "file_path": "/Users/hailang/code_base/command_base/test/fixture/yaml_patch/scale/large_2mib.yaml",
+      "bytes": 2097272,
+      "nodes": 78869,
+      "samples": 3,
+      "p50_ms": 10653.204500000007,
+      "p95_ms": 11367.609333,
+      "max_ms": 11367.609333
+    }
+  },
+  "generated_at": "2026-07-19T01:26:02.504Z",
+  "comparison": {
+    "comparable": false
+  }
+}

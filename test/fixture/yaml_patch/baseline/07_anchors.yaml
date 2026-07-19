@@ -1,0 +1,5 @@
+defaults: &defaults
+  timeout: 30
+service:
+  <<: *defaults
+  name: api

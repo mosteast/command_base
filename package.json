@@ -19,7 +19,9 @@
   },
   "scripts": {
     "format": "npx sort-package-json && git diff --name-only --diff-filter=d -z | xargs -0 -r npx prettier --write --ignore-unknown",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "npx vitest run",
+    "yaml_patch:fixtures": "node benchmark/yaml_patch/generate_fixture.js",
+    "yaml_patch:benchmark": "node benchmark/yaml_patch/run_benchmark.js --output benchmark/yaml_patch/reference_result.json"
   },
   "dependencies": {
     "@mosteast/command": "^0.1.4",

@@ -602,25 +602,25 @@
 - Create: `docs/yaml_patch_protocol_v2.md`
 - Modify: `package.json`
 
-- [ ] **Step 1: Write failing resource and corpus tests**
+- [x] **Step 1: Write failing resource and corpus tests**
 
   Cover fatal limits for bytes/nodes/depth/results/output/regex/graph/time/memory; CJK/Japanese/combining characters/emoji; BOM; LF/CRLF/CR/mixed/no final newline; every scalar style; flow collections; multi-document; comments; directives; custom tags; anchors/aliases; literal/glob paths with spaces/brackets/wildcards/non-ASCII; and 10x-scale graceful completion or limit error.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
   Run: `npx vitest run test/yaml_patch_resource.test.js test/yaml_patch_yaml_corpus.test.js`
 
   Expected: FAIL until independent regex/graph/output limits and the corpus generator are wired.
 
-- [ ] **Step 3: Implement deterministic benchmark generation and runner**
+- [x] **Step 3: Implement deterministic benchmark generation and runner**
 
   Generate at least 14 baseline files, 64,000 syntax nodes, one 2 MiB/30,000-node file, and a growth set with at least 10x nodes and bytes. The runner records CPU, memory, storage description, OS, Node, parser/tool versions, cold/warm mode, samples and p50/p95. Exit nonzero on incorrect results, unbounded output, crash, or an unexplained >20% regression against a comparable reference environment; use relative-only reporting on different hardware.
 
-- [ ] **Step 4: Document every v2 artifact and CLI example**
+- [x] **Step 4: Document every v2 artifact and CLI example**
 
   The protocol document includes strict JSON examples for query, projection, cursor, locator, profile, transaction, operation, manifest, proof, diff, journal, migration and error/exit mappings. It states unsupported edit shapes and platform writer guarantees without claiming simultaneous multi-file visibility.
 
-- [ ] **Step 5: Verify focused corpus, benchmark, v1 regression, and all yaml_patch tests**
+- [x] **Step 5: Verify focused corpus, benchmark, v1 regression, and all yaml_patch tests**
 
   Run:
 
@@ -633,11 +633,13 @@
 
   Expected: all tests PASS; benchmark emits bounded JSON with both scales and environment metadata.
 
-- [ ] **Step 6: Audit every normative requirement**
+- [x] **Step 6: Audit every normative requirement**
 
   Re-read `docs/superpowers/specs/2026_07_17_yaml_patch_general_requirement_design.md` and map Q/E/T/L/W/V/D/P/M/R IDs to code, focused tests and protocol documentation. The audit fails if any platform-independent P0 ID or section 15 scenario lacks all three.
 
-- [ ] **Step 7: Commit**
+  Audit record: `docs/superpowers/progress/2026_07_19_yaml_patch_v2_acceptance_audit.md`
+
+- [x] **Step 7: Commit**
 
   ```bash
   git add benchmark/yaml_patch test/yaml_patch_resource.test.js test/yaml_patch_yaml_corpus.test.js test/fixture/yaml_patch docs/yaml_patch_protocol_v2.md package.json docs/superpowers/specs/2026_07_17_yaml_patch_general_requirement_design.md docs/superpowers/plans/2026-07-17-yaml-patch-general-requirement.md
