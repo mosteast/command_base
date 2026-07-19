@@ -15,15 +15,15 @@ const RESET = "\x1b[0m";
 
 const default_ai_commit_attempts = Object.freeze([
   Object.freeze({
-    label: "codex-cli",
-    platform: "codex",
-    model: "gpt-5.5",
-    reasoning: "low",
-  }),
-  Object.freeze({
     label: "cursor-cli",
     platform: "cursor-cli",
-    model: "composer-2.5-fast",
+    model: "cursor-grok-4.5-high-fast",
+  }),
+  Object.freeze({
+    label: "codex-cli",
+    platform: "codex",
+    model: "gpt-5.6-sol",
+    reasoning: "low",
   }),
   Object.freeze({
     label: "claude-code",

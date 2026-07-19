@@ -10,14 +10,14 @@ const {
 } = require("../utility/git_commit_message_ai");
 
 describe("git commit message ai helper", () => {
-  it("tries codex, cursor, then claude with the configured fast models", async () => {
+  it("tries cursor, then codex, then claude with the configured models", async () => {
     const calls = [];
     const invoke_adapter = vi.fn(async (platform, request) => {
       calls.push({ platform, request });
-      if (platform === "codex") {
-        throw new Error("codex unavailable");
-      }
       if (platform === "cursor-cli") {
+        throw new Error("cursor unavailable");
+      }
+      if (platform === "codex") {
         return "```markdown\nAdd AI commit message support\n```";
       }
       throw new Error("should not reach claude");
@@ -37,15 +37,15 @@ describe("git commit message ai helper", () => {
 
     expect(result).toEqual({
       message: "Add AI commit message support",
-      platform: "cursor-cli",
-      model: "composer-2.5-fast",
-      label: "cursor-cli",
+      platform: "codex",
+      model: "gpt-5.6-sol",
+      label: "codex-cli",
     });
-    expect(calls.map((call) => call.platform)).toEqual(["codex", "cursor-cli"]);
-    expect(calls[0].request.model).toBe("gpt-5.5");
-    expect(calls[0].request.reasoning).toBe("low");
+    expect(calls.map((call) => call.platform)).toEqual(["cursor-cli", "codex"]);
+    expect(calls[0].request.model).toBe("cursor-grok-4.5-high-fast");
     expect(calls[0].request.disable_fallback).toBe(true);
-    expect(calls[1].request.model).toBe("composer-2.5-fast");
+    expect(calls[1].request.model).toBe("gpt-5.6-sol");
+    expect(calls[1].request.reasoning).toBe("low");
     expect(calls[1].request.disable_fallback).toBe(true);
   });
 
@@ -103,15 +103,15 @@ Refine AI commit message formatting
   it("keeps the requested default fallback order explicit", () => {
     expect(default_ai_commit_attempts).toEqual([
       {
-        label: "codex-cli",
-        platform: "codex",
-        model: "gpt-5.5",
-        reasoning: "low",
-      },
-      {
         label: "cursor-cli",
         platform: "cursor-cli",
-        model: "composer-2.5-fast",
+        model: "cursor-grok-4.5-high-fast",
+      },
+      {
+        label: "codex-cli",
+        platform: "codex",
+        model: "gpt-5.6-sol",
+        reasoning: "low",
       },
       {
         label: "claude-code",

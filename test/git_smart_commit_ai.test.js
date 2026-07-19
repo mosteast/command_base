@@ -28,14 +28,14 @@ const valid_plan_json = JSON.stringify({
 });
 
 describe("git smart commit plan", () => {
-  it("tries codex, then cursor, returning a validated multi-group plan", async () => {
+  it("tries cursor, then codex, returning a validated multi-group plan", async () => {
     const calls = [];
     const invoke_adapter = vi.fn(async (platform, request) => {
       calls.push({ platform, request });
-      if (platform === "codex") {
-        throw new Error("codex unavailable");
-      }
       if (platform === "cursor-cli") {
+        throw new Error("cursor unavailable");
+      }
+      if (platform === "codex") {
         return "```json\n" + valid_plan_json + "\n```";
       }
       throw new Error("should not reach claude");
@@ -54,10 +54,12 @@ describe("git smart commit plan", () => {
       { message: "Add smart commit support", files: ["bin/g"] },
       { message: "Document smart commit", files: ["README.md"] },
     ]);
-    expect(plan.platform).toBe("cursor-cli");
-    expect(calls.map((call) => call.platform)).toEqual(["codex", "cursor-cli"]);
-    expect(calls[0].request.model).toBe("gpt-5.5");
+    expect(plan.platform).toBe("codex");
+    expect(calls.map((call) => call.platform)).toEqual(["cursor-cli", "codex"]);
+    expect(calls[0].request.model).toBe("cursor-grok-4.5-high-fast");
     expect(calls[0].request.disable_fallback).toBe(true);
+    expect(calls[1].request.model).toBe("gpt-5.6-sol");
+    expect(calls[1].request.disable_fallback).toBe(true);
   });
 
   it("validates that every changed file is covered exactly once", () => {
