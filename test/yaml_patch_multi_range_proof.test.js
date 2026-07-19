@@ -393,6 +393,44 @@ describe("YAML multi-range splice and byte proof", () => {
     ).toThrowError(expect.objectContaining({ code: "BYTE_GUARANTEE_FAILED" }));
   });
 
+  it("rejects forged shared-root multi-operation step digests with or without buffers", () => {
+    const original = Buffer.from("abcdefgh");
+    const result = apply_range_set(original, [
+      splice(1, 2, "X", "replace-b", 0),
+      splice(2, 3, "Y", "replace-c", 1),
+    ]);
+    expect(result.proof.ranges).toEqual([
+      expect.objectContaining({
+        operation_ids: ["replace-b", "replace-c"],
+      }),
+    ]);
+    expect(() =>
+      validate_byte_proof(result.proof, {
+        original_buffer: original,
+        candidate_buffer: result.candidate_buffer,
+      }),
+    ).not.toThrow();
+    expect(() => validate_byte_proof(result.proof)).not.toThrow();
+
+    const forged_digests = structuredClone(result.proof);
+    for (const operation of forged_digests.operations) {
+      for (const step of operation.steps) {
+        step.removed_digest = "0".repeat(64);
+        step.replacement_digest = "0".repeat(64);
+      }
+    }
+
+    expect(() => validate_byte_proof(forged_digests)).toThrowError(
+      expect.objectContaining({ code: "BYTE_GUARANTEE_FAILED" }),
+    );
+    expect(() =>
+      validate_byte_proof(forged_digests, {
+        original_buffer: original,
+        candidate_buffer: result.candidate_buffer,
+      }),
+    ).toThrowError(expect.objectContaining({ code: "BYTE_GUARANTEE_FAILED" }));
+  });
+
   it("rejects forged multi-operation snapshot bounds with or without buffers", () => {
     const original = Buffer.from("abcdefgh");
     const result = apply_range_set(original, [
