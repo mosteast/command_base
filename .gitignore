@@ -9,6 +9,7 @@ package-lock.json
 .DS_Store
 .worktrees/
 test/fixture/yaml_patch/scale/
+config/cleanup_disk/local.yaml
 
 # Python
 __pycache__/

@@ -1,0 +1,140 @@
+version: 1
+rule:
+  - id: jetbrains_cache
+    path: "~/Library/Caches/JetBrains"
+    kind: cache
+    risk: low
+    action: trash
+    min_size: 100M
+    enabled: true
+    note: "IDE rebuildable cache"
+
+  - id: cocoapods_cache
+    path: "~/Library/Caches/CocoaPods"
+    kind: cache
+    risk: low
+    action: trash
+    min_size: 100M
+    enabled: true
+    note: "CocoaPods cache"
+
+  - id: google_cache
+    path: "~/Library/Caches/Google"
+    kind: cache
+    risk: low
+    action: trash
+    min_size: 100M
+    enabled: true
+    note: "Google app cache"
+
+  - id: playwright_cache
+    path: "~/Library/Caches/ms-playwright"
+    kind: cache
+    risk: low
+    action: trash
+    min_size: 100M
+    enabled: true
+    note: "Playwright browser cache"
+
+  - id: pip_cache
+    path: "~/Library/Caches/pip"
+    kind: cache
+    risk: low
+    action: trash
+    min_size: 50M
+    enabled: true
+    note: "pip download cache"
+
+  - id: yarn_cache
+    path: "~/Library/Caches/Yarn"
+    kind: cache
+    risk: low
+    action: trash
+    min_size: 50M
+    enabled: true
+    note: "Yarn cache"
+
+  - id: homebrew_cache
+    path: "~/Library/Caches/Homebrew"
+    kind: cache
+    risk: low
+    action: trash
+    min_size: 50M
+    enabled: true
+    note: "Homebrew bottle cache"
+
+  - id: dot_cache
+    path: "~/.cache"
+    kind: cache
+    risk: low
+    action: trash
+    min_size: 100M
+    enabled: true
+    note: "User ~/.cache directory"
+
+  - id: idea_hprof
+    glob: "~/java_error_in_idea.hprof"
+    kind: artifact
+    risk: low
+    action: trash
+    enabled: true
+    note: "IntelliJ crash dump"
+
+  - id: docker_raw
+    path: "~/Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw"
+    kind: large_file
+    risk: high
+    action: report
+    min_size: 1G
+    enabled: true
+    note: "Docker VM disk image; prune manually"
+
+  - id: cursor_state_vscdb
+    path: "~/Library/Application Support/Cursor/User/globalStorage/state.vscdb"
+    kind: large_file
+    risk: high
+    action: report
+    min_size: 500M
+    enabled: true
+    note: "Cursor state database"
+
+  - id: cursor_state_vscdb_backup
+    path: "~/Library/Application Support/Cursor/User/globalStorage/state.vscdb.backup"
+    kind: large_file
+    risk: high
+    action: report
+    min_size: 500M
+    enabled: true
+    note: "Cursor state database backup"
+
+  - id: icloud_saved_video
+    path: "~/Library/Mobile Documents/com~apple~CloudDocs/main/saved/video"
+    kind: large_file
+    risk: high
+    action: report
+    min_size: 1G
+    enabled: true
+    note: "iCloud saved video library"
+
+  - id: code_base_home
+    path: "~/code_base"
+    kind: large_file
+    risk: high
+    action: report
+    min_size: 1G
+    enabled: true
+    note: "Local code workspace; report only"
+
+  - id: dev_cache_bundle
+    kind: delegate
+    risk: low
+    action: delegate
+    enabled: true
+    delegate_to: cleanup_dev_cache
+    delegate_args:
+      - report
+      - --profile
+      - xcode
+      - --profile
+      - temp_cache
+    note: "Delegate read-only report to cleanup_dev_cache"
