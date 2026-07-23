@@ -1,7 +1,7 @@
-import { describe, expect, it } from "vitest";
 import fs from "fs/promises";
 import os from "os";
 import path from "path";
+import { describe, expect, it } from "vitest";
 import { load_config, merge_rule_list } from "../lib/cleanup_disk/config.js";
 import { filter_rules } from "../lib/cleanup_disk/filter.js";
 

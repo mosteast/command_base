@@ -1,8 +1,8 @@
-import { describe, expect, it } from "vitest";
-import { execFile } from "node:child_process";
 import fs from "fs/promises";
+import { execFile } from "node:child_process";
 import os from "os";
 import path from "path";
+import { describe, expect, it } from "vitest";
 
 const cli_entry = path.resolve(__dirname, "../bin/cleanup_disk");
 

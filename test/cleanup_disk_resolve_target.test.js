@@ -1,7 +1,7 @@
-import { describe, expect, it } from "vitest";
 import fs from "fs/promises";
 import os from "os";
 import path from "path";
+import { describe, expect, it } from "vitest";
 import { resolve_rule } from "../lib/cleanup_disk/resolve_target.js";
 
 describe("cleanup_disk resolve_target", () => {

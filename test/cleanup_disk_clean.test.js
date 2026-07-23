@@ -1,8 +1,8 @@
-import { describe, expect, it } from "vitest";
 import fs from "fs/promises";
 import os from "os";
 import path from "path";
-import { plan_clean, execute_clean } from "../lib/cleanup_disk/clean.js";
+import { describe, expect, it } from "vitest";
+import { execute_clean, plan_clean } from "../lib/cleanup_disk/clean.js";
 
 async function path_exists(target_path) {
   try {

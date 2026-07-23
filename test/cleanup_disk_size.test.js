@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parse_size, format_size } from "../lib/cleanup_disk/size.js";
+import { format_size, parse_size } from "../lib/cleanup_disk/size.js";
 
 describe("cleanup_disk size", () => {
   it("parses binary-ish size suffixes", () => {
