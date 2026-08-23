@@ -37,6 +37,8 @@ describe("xsave_douyin CLI", () => {
     expect(result.stdout).toMatch(/Description/);
     expect(result.stdout).toMatch(/Options/);
     expect(result.stdout).toMatch(/like, post, one, collection/);
+    expect(result.stdout).toMatch(/gather runtime/);
+    expect(result.stdout).not.toMatch(/default: nori/);
     expect(result.stdout).toMatch(/# Download liked videos/);
     expect(result.stdout).toMatch(/\$0 -M like -u /);
   });
@@ -72,6 +74,17 @@ describe("xsave_douyin CLI", () => {
     ]);
     expect(options.max_comment).toBe(12);
     expect(options.max_danmaku).toBe(34);
+    expect(options.chrome_profile).toBe("");
+  });
+
+  it("leaves chrome-profile empty so gather runtime is used", () => {
+    const options = parse_cli([
+      "-M",
+      "like",
+      "-u",
+      "https://v.douyin.com/example/",
+    ]);
+    expect(options.chrome_profile).toBe("");
   });
 
   it("dry-run prints fill and skip without downloading", async () => {
@@ -119,6 +132,42 @@ describe("xsave_douyin CLI", () => {
       expect(stdout).toMatch(/fill/);
       expect(stdout).toMatch(/skip/);
       expect(download_media).not.toHaveBeenCalled();
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
+  });
+
+  it("uses gather runtime chrome-profile when the flag is omitted", async () => {
+    const temp_root = await fs.mkdtemp(path.join(os.tmpdir(), "xsave-douyin-"));
+    const runtime_path = path.join(temp_root, "gather.runtime.yaml");
+    await fs.writeFile(
+      runtime_path,
+      ["version: 1", "platform:", "  douyin:", '    chrome_profile: "Profile 9"', ""].join(
+        "\n",
+      ),
+      "utf8",
+    );
+    const seen = [];
+    try {
+      await run_export(
+        {
+          mode: "like",
+          url: "https://v.douyin.com/example/",
+          path: temp_root,
+          dry_run: true,
+          chrome_profile: "",
+          runtime_path,
+        },
+        {
+          resolve_cookie: async (opts) => {
+            seen.push(opts.chrome_profile);
+            return "dummy";
+          },
+          collect_list: async () => [],
+          log: () => {},
+        },
+      );
+      expect(seen).toEqual(["Profile 9"]);
     } finally {
       await fs.rm(temp_root, { recursive: true, force: true });
     }

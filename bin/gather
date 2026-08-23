@@ -36,6 +36,7 @@ const {
   read_runtime_config,
   get_cookies_from_browser,
   get_cookies_file,
+  get_platform_runtime,
 } = require("../lib/gather_doctor/runtime_config");
 const DEFAULT_CONFIG_LINES = [
   "# Gather config",
@@ -1647,6 +1648,16 @@ function build_runtime_cookie_args(platform_key, command_name, options) {
     const cookies_file = get_cookies_file(runtime_data, platform_key);
     if (!cookies_file) return [];
     return ["--cookies", cookies_file];
+  }
+
+  if (command_name === "xsave_douyin" && platform_key === "douyin") {
+    const entry = get_platform_runtime(runtime_data, platform_key);
+    const profile =
+      entry && entry.chrome_profile
+        ? String(entry.chrome_profile).trim()
+        : "";
+    if (!profile) return [];
+    return ["--chrome-profile", profile];
   }
 
   return [];

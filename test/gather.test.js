@@ -1236,6 +1236,47 @@ describe("gather CLI platform selection", () => {
       await fs.rm(temp_root, { recursive: true, force: true });
     }
   });
+
+  it("injects runtime chrome-profile into xsave_douyin commands", async () => {
+    const temp_root = await create_temp_dir();
+    const state_file = path.join(temp_root, "gather.state.json");
+    const runtime_path = path.join(temp_root, "gather.runtime.yaml");
+
+    try {
+      await fs.writeFile(
+        runtime_path,
+        [
+          "version: 1",
+          "platform:",
+          "  douyin:",
+          '    chrome_profile: "Profile 9"',
+          "",
+        ].join("\n"),
+        "utf8",
+      );
+      const config_path = await write_douyin_config_file(temp_root);
+      const result = await run_cli(
+        [
+          "--dry-run",
+          "--state-file",
+          state_file,
+          "--platform",
+          "douyin",
+          config_path,
+        ],
+        { GATHER_RUNTIME_PATH: runtime_path },
+      );
+
+      expect(result.exit_code).toBe(0);
+      expect(result.stdout).toContain(
+        "xsave_douyin -M post -u https://www.douyin.com/user/EXAMPLE_ID",
+      );
+      expect(result.stdout).toMatch(/--chrome-profile ["']?Profile 9["']?/);
+      expect(result.stdout).not.toContain("--chrome-profile nori");
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("gather CLI subcommands", () => {
