@@ -3160,6 +3160,11 @@ async function main() {
     await run_init_command();
     return;
   }
+  if (command_name === "doctor") {
+    const { run_doctor } = require("../lib/gather_doctor/cli");
+    await run_doctor(args.slice(1));
+    return;
+  }
   if (command_name === "start") {
     await run_export_command(args.slice(1));
     return;

@@ -4,13 +4,13 @@ import os from "os";
 import path from "path";
 import { describe, it, expect } from "vitest";
 
-const cli_entry = path.resolve(__dirname, "../bin/gather_doctor");
+const cli_entry = path.resolve(__dirname, "../bin/gather");
 
 function run_cli(args, env_overrides = {}) {
   return new Promise((resolve, reject) => {
     execFile(
       process.execPath,
-      [cli_entry, ...args],
+      [cli_entry, "doctor", ...args],
       {
         env: { ...process.env, ...env_overrides, FORCE_COLOR: "0" },
         maxBuffer: 1024 * 1024,
@@ -40,6 +40,7 @@ describe("gather_doctor CLI", () => {
     expect(help.exit_code).toBe(0);
     expect(strip_ansi(help.stdout)).toContain("Usage");
     expect(strip_ansi(help.stdout)).toContain("fix");
+    expect(strip_ansi(help.stdout)).toContain("gather doctor");
 
     const version = await run_cli(["--version"]);
     expect(version.exit_code).toBe(0);
@@ -72,5 +73,14 @@ describe("gather_doctor CLI", () => {
     const combined = strip_ansi(`${result.stdout}\n${result.stderr}`);
     expect(combined).toMatch(/Dry-run|Fix plan|already ok|Nothing to fix/i);
     await expect(fs.access(runtime_path)).rejects.toBeTruthy();
+  });
+
+  it("rejects the retired setup command", async () => {
+    const result = await run_cli(["setup"]);
+    expect(result.exit_code).toBe(1);
+    const text = strip_ansi(`${result.stdout}\n${result.stderr}`);
+    expect(text).toMatch(/Unknown command "setup"/);
+    expect(text).toContain("gather doctor fix");
+    expect(text).not.toContain("gather_doctor fix");
   });
 });
