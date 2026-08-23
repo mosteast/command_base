@@ -25,11 +25,18 @@ const DEFAULT_CONFIG_PATH =
   "/Users/hailang/Library/Mobile Documents/com~apple~CloudDocs/main/saved/state/gather.config.yaml";
 const DEFAULT_STATE_FILE =
   "/Users/hailang/Library/Mobile Documents/com~apple~CloudDocs/main/saved/state/gather.state.json";
+const DEFAULT_RUNTIME_PATH =
+  "/Users/hailang/Library/Mobile Documents/com~apple~CloudDocs/main/saved/state/gather.runtime.yaml";
 const DEFAULT_F2_OUTPUT_DIR =
   "/Users/hailang/Library/Mobile Documents/com~apple~CloudDocs/main/saved/f2";
 const F2_COMPAT_COMMAND = "f2_compat";
 const F2_COMMANDS = new Set(["f2", F2_COMPAT_COMMAND]);
 const REPORT_CHILD_COMMANDS = new Set(["xsave_yt_dlp", "xsave_gallery_dl"]);
+const {
+  read_runtime_config,
+  get_cookies_from_browser,
+  get_cookies_file,
+} = require("../lib/gather_setup/runtime_config");
 const DEFAULT_CONFIG_LINES = [
   "# Gather config",
   "# Each source item requires a name and handle.",
@@ -1607,6 +1614,26 @@ function build_refresh_args(platform_key, refresh_mode, options) {
   return build_xsave_yt_dlp_refresh_args(refresh_mode, options);
 }
 
+function build_runtime_cookie_args(platform_key, command_name, options) {
+  const runtime_data = options && options.runtime_data;
+  if (!runtime_data) return [];
+
+  if (command_name === "xsave_yt_dlp") {
+    if (platform_key !== "youtube" && platform_key !== "bilibili") return [];
+    const browser_spec = get_cookies_from_browser(runtime_data, platform_key);
+    if (!browser_spec) return [];
+    return ["--cookies-from-browser", browser_spec];
+  }
+
+  if (command_name === "xsave_gallery_dl" && platform_key === "x_gallery_dl") {
+    const cookies_file = get_cookies_file(runtime_data, platform_key);
+    if (!cookies_file) return [];
+    return ["--cookies", cookies_file];
+  }
+
+  return [];
+}
+
 function build_platform_command(platform_key, url, refresh_mode, options) {
   const config = PLATFORM_COMMANDS[platform_key];
   if (!config) return null;
@@ -1619,7 +1646,17 @@ function build_platform_command(platform_key, url, refresh_mode, options) {
         )
       : [];
   const refresh_args = build_refresh_args(platform_key, refresh_mode, options);
-  const args = [...base_args, ...comment_args, ...refresh_args];
+  const runtime_cookie_args = build_runtime_cookie_args(
+    platform_key,
+    config.command,
+    options,
+  );
+  const args = [
+    ...base_args,
+    ...runtime_cookie_args,
+    ...comment_args,
+    ...refresh_args,
+  ];
   if (F2_COMMANDS.has(config.command)) {
     const f2_output_dir =
       options && typeof options.f2_output_dir === "string"
@@ -2670,6 +2707,17 @@ async function run_export_command() {
   });
   logger.debug("Step: register signal handlers");
   register_signal_handlers(logger);
+
+  logger.debug("Step: load gather runtime config");
+  const runtime_path =
+    process.env.GATHER_RUNTIME_PATH || DEFAULT_RUNTIME_PATH;
+  const runtime_loaded = await read_runtime_config(runtime_path);
+  options.runtime_data = runtime_loaded.data;
+  if (runtime_loaded.exists) {
+    logger.debug(`Using runtime config ${runtime_loaded.path}`);
+  } else {
+    logger.debug(`Runtime config not found at ${runtime_loaded.path}`);
+  }
 
   if (
     !options.run_source_jobs &&

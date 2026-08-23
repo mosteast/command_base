@@ -1242,3 +1242,43 @@ describe("xsave_yt_dlp channel library layout", () => {
     }
   });
 });
+
+describe("xsave_yt_dlp gather runtime cookies", () => {
+  it("uses gather runtime cookies-from-browser when flags are omitted", async () => {
+    const temp_root = await create_temp_dir();
+    const runtime_path = path.join(temp_root, "gather.runtime.yaml");
+    await fs.writeFile(
+      runtime_path,
+      [
+        "version: 1",
+        "platform:",
+        "  youtube:",
+        '    cookies_from_browser: "chrome:Profile 2"',
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const result = await run_cli(
+      [
+        "--dry-run",
+        "--debug",
+        "--channel",
+        "https://www.youtube.com/@user1",
+      ],
+      {
+        env: {
+          GATHER_RUNTIME_PATH: runtime_path,
+        },
+      },
+    );
+
+    const stdout_text = strip_ansi(result.stdout);
+    expect(result.exit_code).toBe(0);
+    expect(stdout_text).toMatch(/--cookies-from-browser chrome:Profile(\\ )?2/);
+    expect(stdout_text).toContain(
+      "Using gather runtime cookies-from-browser for youtube: chrome:Profile 2",
+    );
+    expect(stdout_text).not.toMatch(/SID=|auth_token=/i);
+  });
+});

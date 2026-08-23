@@ -770,6 +770,44 @@ resolve_python_binary() {
     return 1
 }
 
+apply_gather_runtime_cookie_defaults() {
+    local platform="$1"
+    local runtime_cli
+    local runtime_browser
+    local runtime_args
+
+    if [ "$use_youtube_cookies" != true ]; then
+        return 0
+    fi
+
+    if [ "$youtube_cookie_file_provided" = true ] || [ "$youtube_cookie_browser_provided" = true ]; then
+        return 0
+    fi
+
+    case "$platform" in
+        youtube|bilibili)
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+
+    runtime_cli="${script_dir}/../lib/gather_setup/read_runtime_cli.js"
+    if [ ! -f "$runtime_cli" ]; then
+        return 0
+    fi
+
+    runtime_args=(cookies-from-browser "$platform")
+    if [ -n "${GATHER_RUNTIME_PATH:-}" ]; then
+        runtime_args+=(--runtime "$GATHER_RUNTIME_PATH")
+    fi
+    runtime_browser=$(node "$runtime_cli" "${runtime_args[@]}" 2>/dev/null | head -n 1 | tr -d '\r')
+    if [ -n "$runtime_browser" ]; then
+        youtube_cookie_browser="$runtime_browser"
+        log_debug "Using gather runtime cookies-from-browser for ${platform}: ${youtube_cookie_browser}"
+    fi
+}
+
 resolve_cookie_mode_for_platform() {
     local platform="$1"
 
@@ -1902,6 +1940,7 @@ export_video_danmaku_if_enabled() {
         return 0
     fi
 
+    apply_gather_runtime_cookie_defaults "$platform"
     cookie_mode=$(resolve_cookie_mode_for_platform "$platform")
     run_danmaku_command "Danmaku export: ${url}" run_video_danmaku_yt_dlp \
         "$url" \
@@ -1920,6 +1959,7 @@ download_video_with_fallback() {
     local player_client=""
 
     if [ "$platform" = "youtube" ] || [ "$platform" = "bilibili" ]; then
+        apply_gather_runtime_cookie_defaults "$platform"
         cookie_mode=$(resolve_cookie_mode_for_platform "$platform")
     fi
 
@@ -1982,6 +2022,7 @@ download_video_metadata_with_fallback() {
     local player_client=""
 
     if [ "$platform" = "youtube" ] || [ "$platform" = "bilibili" ]; then
+        apply_gather_runtime_cookie_defaults "$platform"
         cookie_mode=$(resolve_cookie_mode_for_platform "$platform")
     fi
 
@@ -2568,6 +2609,7 @@ if [ -n "$CHANNEL_URL" ]; then
     channel_extractor_opts=()
     channel_cookie_fallback_extractor_opts=()
     channel_nocookie_fallback_extractor_opts=()
+    apply_gather_runtime_cookie_defaults "$channel_platform"
     channel_cookie_mode=$(resolve_cookie_mode_for_platform "$channel_platform")
     case "$channel_cookie_mode" in
         browser)
@@ -2943,6 +2985,7 @@ elif [ -n "$PLAYLIST_URL" ]; then
     playlist_extractor_opts=()
     playlist_cookie_fallback_extractor_opts=()
     playlist_nocookie_fallback_extractor_opts=()
+    apply_gather_runtime_cookie_defaults "$playlist_platform"
     playlist_cookie_mode=$(resolve_cookie_mode_for_platform "$playlist_platform")
     case "$playlist_cookie_mode" in
         browser)
@@ -3446,6 +3489,7 @@ else
         fi
 
         if [ "$only_danmaku" = true ]; then
+            apply_gather_runtime_cookie_defaults "$url_platform"
             url_cookie_mode=$(resolve_cookie_mode_for_platform "$url_platform")
             if run_danmaku_command "Danmaku export: ${url}" run_video_danmaku_yt_dlp "$url" "$manual_danmaku_archive_file" "$url_output_dir" "$url_cookie_mode" "$allow_insecure_ssl"; then
                 :

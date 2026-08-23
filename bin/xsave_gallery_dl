@@ -791,6 +791,20 @@ fi
 log_step "Prepare cookies"
 cookie_opts=()
 if [ "$use_cookies" = true ]; then
+    if [ "$cookies_file_provided" != true ]; then
+        runtime_cli="${script_dir}/../lib/gather_setup/read_runtime_cli.js"
+        if [ -f "$runtime_cli" ]; then
+            runtime_args=(cookies-file x_gallery_dl)
+            if [ -n "${GATHER_RUNTIME_PATH:-}" ]; then
+                runtime_args+=(--runtime "$GATHER_RUNTIME_PATH")
+            fi
+            runtime_cookies=$(node "$runtime_cli" "${runtime_args[@]}" 2>/dev/null | head -n 1 | tr -d '\r')
+            if [ -n "$runtime_cookies" ]; then
+                cookies_file="$runtime_cookies"
+                log_debug "Using gather runtime cookies file: ${cookies_file}"
+            fi
+        fi
+    fi
     if [ -n "$cookies_file" ]; then
         log_io "check cookies file ${cookies_file}"
         if [ -f "$cookies_file" ]; then

@@ -1154,4 +1154,45 @@ describe("gather CLI platform selection", () => {
       await fs.rm(temp_root, { recursive: true, force: true });
     }
   });
+
+  it("injects runtime cookies-from-browser into youtube xsave_yt_dlp commands", async () => {
+    const temp_root = await create_temp_dir();
+    const state_file = path.join(temp_root, "gather.state.json");
+    const runtime_path = path.join(temp_root, "gather.runtime.yaml");
+
+    try {
+      await fs.writeFile(
+        runtime_path,
+        [
+          "version: 1",
+          "platform:",
+          "  youtube:",
+          '    chrome_profile: "Profile 2"',
+          '    cookies_from_browser: "chrome:Profile 2"',
+          "",
+        ].join("\n"),
+        "utf8",
+      );
+      const config_path = await write_config_file(temp_root);
+      const result = await run_cli(
+        [
+          "--dry-run",
+          "--state-file",
+          state_file,
+          "--platform",
+          "youtube",
+          config_path,
+        ],
+        { GATHER_RUNTIME_PATH: runtime_path },
+      );
+
+      expect(result.exit_code).toBe(0);
+      expect(result.stdout).toMatch(
+        /--cookies-from-browser ["']?chrome:Profile 2["']?/,
+      );
+      expect(result.stdout).not.toMatch(/SID=|auth_token=/i);
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
+  });
 });

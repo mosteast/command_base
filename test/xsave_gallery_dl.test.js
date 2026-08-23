@@ -291,3 +291,49 @@ describe("xsave_gallery_dl report generation", () => {
     }
   });
 });
+
+describe("xsave_gallery_dl gather runtime cookies", () => {
+  it("prefers gather runtime cookies file when --cookies is omitted", async () => {
+    const temp_root = await create_temp_dir();
+    const runtime_path = path.join(temp_root, "gather.runtime.yaml");
+    const cookies_file = path.join(temp_root, "runtime-cookies.txt");
+    await fs.writeFile(
+      cookies_file,
+      "# Netscape\n.x.com\tTRUE\t/\tFALSE\t0\tauth_token\tvalue\n",
+      "utf8",
+    );
+    await fs.writeFile(
+      runtime_path,
+      [
+        "version: 1",
+        "platform:",
+        "  x_gallery_dl:",
+        `    cookies_file: "${cookies_file}"`,
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const fake_gallery_dl = await create_fake_gallery_dl_bin(
+      temp_root,
+      "1.31.10",
+    );
+    const fake_gallery_dl_log = path.join(temp_root, "gallery-dl.log");
+
+    const result = await run_cli(
+      ["--dry-run", "--debug", "--no-write-tags", "https://x.com/example"],
+      {
+        env: {
+          PATH: `${fake_gallery_dl.bin_dir}:${process.env.PATH || ""}`,
+          FAKE_GALLERY_DL_LOG: fake_gallery_dl_log,
+          GATHER_RUNTIME_PATH: runtime_path,
+        },
+      },
+    );
+
+    const stdout_text = strip_ansi(result.stdout);
+    expect(result.exit_code).toBe(0);
+    expect(stdout_text).toContain(`--cookies ${cookies_file}`);
+    expect(stdout_text).not.toContain("auth_token=value");
+  });
+});

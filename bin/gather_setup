@@ -1,0 +1,209 @@
+#!/usr/bin/env node
+
+"use strict";
+
+const chalk = require("chalk");
+const package_json = require("../package.json");
+const {
+  DEFAULT_CONFIG_PATH,
+  DEFAULT_RUNTIME_PATH,
+  PLATFORM_KEYS,
+} = require("../lib/gather_setup/constants");
+const {
+  normalize_platform_list,
+  select_platforms,
+} = require("../lib/gather_setup/platform");
+const { run_check } = require("../lib/gather_setup/check_runner");
+const { run_setup } = require("../lib/gather_setup/setup_runner");
+
+function build_help_text(script_name) {
+  return [
+    `${chalk.bold("Usage")}`,
+    `  ${script_name} [check] [options]`,
+    `  ${script_name} setup [options]`,
+    "",
+    `${chalk.bold("Description")}`,
+    "  Check and configure gather platform tooling, Chrome cookie profiles,",
+    "  and auth files so gather can run correctly.",
+    "  Default action is check (static + live probe).",
+    "  setup writes gather.runtime.yaml, exports cookies, and can brew install/upgrade.",
+    "",
+    `${chalk.bold("Options")}`,
+    `  -c, --config <path>          Gather YAML config (default: ${DEFAULT_CONFIG_PATH})`,
+    `      --runtime <path>         Runtime YAML path (default: ${DEFAULT_RUNTIME_PATH})`,
+    `  -p, --platform <name...>     Only these platforms (${PLATFORM_KEYS.join(", ")})`,
+    "      --exclude-platform <...> Skip these platforms",
+    "      --chrome-profile <name>  Limit Chrome scan to one profile directory/name",
+    "      --offline                Skip live network probes (check only)",
+    "  -y, --yes                    Skip setup confirmation",
+    "  -d, --dry-run                Preview setup without writing or installing",
+    "      --quiet                  Print only warnings and errors",
+    "      --debug                  Enable verbose debug output",
+    "  -v, --version                Show version number and exit",
+    "  -h, --help                   Show this help message",
+    "",
+    `${chalk.bold("Examples")}`,
+    "  # Check all platforms (static + probe)",
+    "  $0",
+    "",
+    "  # Offline check for youtube only",
+    "  $0 check --offline --platform youtube",
+    "",
+    "  # Preview setup for gallery-dl / X cookies",
+    "  $0 setup --platform x_gallery_dl --dry-run",
+    "",
+    "  # Apply setup without prompting",
+    "  $0 setup --yes --platform youtube bilibili",
+  ].join("\n");
+}
+
+function normalize_list(values) {
+  if (!values) return [];
+  const list = Array.isArray(values) ? values : [values];
+  const normalized = [];
+  for (const entry of list) {
+    const text = String(entry || "").trim();
+    if (!text) continue;
+    for (const part of text.split(",").map((item) => item.trim())) {
+      if (part) normalized.push(part);
+    }
+  }
+  return normalized;
+}
+
+function parse_arguments(argv) {
+  const yargs = require("yargs/yargs");
+  const args = [...argv];
+  let mode = "check";
+  if (args[0] === "check" || args[0] === "setup") {
+    mode = args.shift();
+  }
+
+  const parser = yargs(args)
+    .scriptName("gather_setup")
+    .help(false)
+    .version(false)
+    .parserConfiguration({
+      "camel-case-expansion": false,
+      "strip-dashed": false,
+    })
+    .option("config", {
+      alias: "c",
+      type: "string",
+      describe: `Gather YAML config path (default: ${DEFAULT_CONFIG_PATH})`,
+    })
+    .option("runtime", {
+      type: "string",
+      describe: `Runtime YAML path (default: ${DEFAULT_RUNTIME_PATH})`,
+    })
+    .option("platform", {
+      alias: "p",
+      type: "array",
+      describe: "Only these platforms",
+    })
+    .option("exclude-platform", {
+      type: "array",
+      describe: "Skip these platforms",
+    })
+    .option("chrome-profile", {
+      type: "string",
+      describe: "Limit Chrome scan to one profile",
+    })
+    .option("offline", {
+      type: "boolean",
+      default: false,
+      describe: "Skip live network probes",
+    })
+    .option("yes", {
+      alias: "y",
+      type: "boolean",
+      default: false,
+      describe: "Skip setup confirmation",
+    })
+    .option("dry-run", {
+      alias: "d",
+      type: "boolean",
+      default: false,
+      describe: "Preview without writing",
+    })
+    .option("quiet", {
+      type: "boolean",
+      default: false,
+      describe: "Print only warnings and errors",
+    })
+    .option("debug", {
+      type: "boolean",
+      default: false,
+      describe: "Enable verbose debug output",
+    })
+    .option("version", {
+      alias: "v",
+      type: "boolean",
+      describe: "Show version number and exit",
+    })
+    .option("help", {
+      alias: "h",
+      type: "boolean",
+      describe: "Show help message",
+    })
+    .strict(true)
+    .fail((message) => {
+      console.error(chalk.red(message));
+      console.log(build_help_text("gather_setup"));
+      process.exit(1);
+    });
+
+  const parsed = parser.parse();
+  if (parsed.help) {
+    console.log(build_help_text(parsed.$0 || "gather_setup"));
+    process.exit(0);
+  }
+  if (parsed.version) {
+    console.log(package_json.version);
+    process.exit(0);
+  }
+
+  let include_platforms = [];
+  let exclude_platforms = [];
+  try {
+    include_platforms = normalize_platform_list(normalize_list(parsed.platform));
+    exclude_platforms = normalize_platform_list(
+      normalize_list(parsed["exclude-platform"]),
+    );
+  } catch (error) {
+    console.error(chalk.red(error.message));
+    console.log(build_help_text(parsed.$0 || "gather_setup"));
+    process.exit(1);
+  }
+
+  return {
+    mode,
+    command_name: parsed.$0 || "gather_setup",
+    config_path: parsed.config ? String(parsed.config) : DEFAULT_CONFIG_PATH,
+    runtime_path: parsed.runtime ? String(parsed.runtime) : DEFAULT_RUNTIME_PATH,
+    platforms: select_platforms(include_platforms, exclude_platforms),
+    chrome_profile: parsed["chrome-profile"]
+      ? String(parsed["chrome-profile"])
+      : "",
+    offline: Boolean(parsed.offline),
+    yes: Boolean(parsed.yes),
+    dry_run: Boolean(parsed["dry-run"]),
+    quiet_mode: Boolean(parsed.quiet),
+    debug_mode: Boolean(parsed.debug),
+  };
+}
+
+async function main() {
+  const options = parse_arguments(process.argv.slice(2));
+  if (options.mode === "setup") {
+    const result = await run_setup(options);
+    process.exit(result.exit_code || 0);
+  }
+  const result = await run_check(options);
+  process.exit(result.exit_code || 0);
+}
+
+main().catch((error) => {
+  console.error(chalk.red(`gather_setup failed: ${error.message}`));
+  process.exit(1);
+});
