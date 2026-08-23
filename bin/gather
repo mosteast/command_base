@@ -30,7 +30,7 @@ const DEFAULT_RUNTIME_PATH =
 const DEFAULT_F2_OUTPUT_DIR =
   "/Users/hailang/Library/Mobile Documents/com~apple~CloudDocs/main/saved/f2";
 const F2_COMPAT_COMMAND = "f2_compat";
-const F2_COMMANDS = new Set(["f2", F2_COMPAT_COMMAND]);
+const F2_COMMANDS = new Set(["f2", F2_COMPAT_COMMAND, "xsave_douyin"]);
 const REPORT_CHILD_COMMANDS = new Set(["xsave_yt_dlp", "xsave_gallery_dl"]);
 const {
   read_runtime_config,
@@ -104,8 +104,8 @@ const PLATFORM_COMMANDS = {
     label: "bitchute",
   },
   douyin: {
-    command: F2_COMPAT_COMMAND,
-    build_args: (url) => ["dy", "-M", "post", "-u", url],
+    command: "xsave_douyin",
+    build_args: (url) => ["-M", "post", "-u", url],
     label: "douyin",
   },
   x_f2: {
@@ -1269,6 +1269,8 @@ function deduplicate_source_items_by_url(
 
 function rewrite_f2_command_text(command_text) {
   const text = String(command_text || "").trim();
+  const douyin_match = text.match(/^(?:f2_compat|f2)\s+dy\b(.*)$/);
+  if (douyin_match) return `xsave_douyin${douyin_match[1]}`;
   if (/^f2(\s|$)/.test(text)) return `f2_compat${text.slice(2)}`;
   return text;
 }
@@ -1289,6 +1291,7 @@ function infer_command_platform_keys(command_text) {
   }
 
   if (
+    /\bxsave_douyin\b/.test(normalized_command) ||
     /\b(?:f2|f2_compat)\s+dy\b/.test(normalized_command) ||
     normalized_command.includes("douyin.com") ||
     normalized_command.includes("v.douyin.com")

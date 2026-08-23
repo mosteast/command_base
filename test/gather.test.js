@@ -246,6 +246,9 @@ async function write_stub_f2_compat_command(temp_root) {
   await fs.mkdir(bin_dir, { recursive: true });
   await fs.writeFile(script_path, script_text, "utf8");
   await fs.chmod(script_path, 0o755);
+  const xsave_path = path.join(bin_dir, "xsave_douyin");
+  await fs.writeFile(xsave_path, script_text, "utf8");
+  await fs.chmod(xsave_path, 0o755);
   return { bin_dir, script_path };
 }
 
@@ -630,8 +633,9 @@ describe("gather CLI platform selection", () => {
       expect(result.exit_code).toBe(0);
       expect(extract_total_jobs(result.stdout)).toBe(1);
       expect(result.stdout).toContain(
-        "f2_compat dy -M post -u https://www.douyin.com/user/EXAMPLE_ID",
+        "xsave_douyin -M post -u https://www.douyin.com/user/EXAMPLE_ID",
       );
+      expect(result.stdout).not.toContain("f2_compat dy");
       expect(result.stdout).not.toContain("https://www.youtube.com/@example");
     } finally {
       await fs.rm(temp_root, { recursive: true, force: true });
@@ -786,8 +790,9 @@ describe("gather CLI platform selection", () => {
       expect(extract_total_jobs(result.stdout)).toBe(1);
       expect(extract_total_commands(result.stdout)).toBe(1);
       expect(result.stdout).toContain(
-        "f2_compat dy -M like -u https://v.douyin.com/EXAMPLE/",
+        "xsave_douyin -M like -u https://v.douyin.com/EXAMPLE/",
       );
+      expect(result.stdout).not.toContain("f2_compat dy");
       expect(result.stdout).not.toContain(
         "https://www.youtube.com/playlist?list=PLexample",
       );
@@ -796,7 +801,7 @@ describe("gather CLI platform selection", () => {
     }
   });
 
-  it("rewrites bare f2 Douyin like commands to f2_compat", async () => {
+  it("rewrites bare f2 Douyin like commands to xsave_douyin", async () => {
     const temp_root = await create_temp_dir();
     const state_file = path.join(temp_root, "gather.state.json");
     const config_path = path.join(temp_root, "gather.f2_like.yaml");
@@ -823,9 +828,10 @@ describe("gather CLI platform selection", () => {
 
       expect(result.exit_code).toBe(0);
       expect(result.stdout).toContain(
-        "f2_compat dy -M like -u https://v.douyin.com/kIg44MNOKz8/",
+        "xsave_douyin -M like -u https://v.douyin.com/kIg44MNOKz8/",
       );
       expect(result.stdout).not.toMatch(/(^|\s)f2 dy -M like/);
+      expect(result.stdout).not.toContain("f2_compat dy");
     } finally {
       await fs.rm(temp_root, { recursive: true, force: true });
     }

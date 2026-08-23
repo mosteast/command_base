@@ -8,6 +8,7 @@ const { douyin, x_f2 } = require("../lib/gather_doctor/adapter/f2_platforms");
 const brew_install = require("../lib/gather_doctor/brew_install");
 const cookie_export = require("../lib/gather_doctor/cookie_export");
 const f2_config = require("../lib/gather_doctor/f2_config");
+const chrome_client = require("../lib/xsave_douyin/chrome_client");
 
 async function create_temp_dir() {
   return fs.mkdtemp(path.join(os.tmpdir(), "gather-doctor-f2-"));
@@ -160,6 +161,34 @@ describe("f2 douyin API probe", () => {
     expect(env.PYTHONPATH).toMatch(/f2_compat/);
   });
 
+  it("accepts Chrome like after HTTP 403 without recommending fix", async () => {
+    const { run_douyin_api_probe } = require("../lib/gather_doctor/f2_douyin_probe");
+    vi.spyOn(cookie_export, "run_command").mockResolvedValue({
+      stdout: JSON.stringify({
+        ok: true,
+        post: { status: "empty", count: 0 },
+        like: { status: "http_error", http_status: 403, count: 0 },
+      }),
+      stderr: "",
+    });
+    try {
+      const result = await run_douyin_api_probe({
+        url: "https://v.douyin.com/kIg44MNOKz8/",
+        chrome_profile: "nori",
+        f2_path: "/tmp/f2",
+        probe_chrome_like: async () => ({
+          status_code: 0,
+          aweme_list: [{ aweme_id: "liked-1" }],
+        }),
+      });
+      expect(result.status).toMatch(/ok|warn/);
+      expect(result.next_command).toBe("");
+      expect(result.detail).not.toMatch(/cookie|msToken|a_bogus/i);
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
   it("classifies like HTTP 403 as fail", async () => {
     const { classify_douyin_api_probe } = require("../lib/gather_doctor/f2_douyin_probe");
     const classified = classify_douyin_api_probe({
@@ -213,6 +242,9 @@ describe("f2 douyin API probe", () => {
       }),
       stderr: "",
     });
+    vi.spyOn(chrome_client, "probe_chrome_like").mockRejectedValue(
+      new Error("chrome unavailable in test"),
+    );
     try {
       const result = await douyin.check({
         ...context,
