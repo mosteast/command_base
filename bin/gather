@@ -294,9 +294,11 @@ function build_help_text(script_name) {
   const example_cmd = "$0";
   return [
     `${chalk.bold("Usage")}`,
-    `  ${script_name} [options] <config...>`,
+    `  ${script_name} [start] [options] <config...>`,
     `  ${script_name} --config "source/*.yaml"`,
     `  ${script_name} init [options] [config...]`,
+    `  ${script_name} doctor [check] [options]`,
+    `  ${script_name} doctor fix [options]`,
     "",
     `${chalk.bold("Description")}`,
     "  Batch export channels/users across platforms by reading YAML configs and",
@@ -307,7 +309,9 @@ function build_help_text(script_name) {
     "  Platform filters apply to source jobs and custom commands with declared or inferred platforms.",
     "",
     `${chalk.bold("Commands")}`,
+    "  start                       Run the export (default when no subcommand is given).",
     "  init                        Create a scaffold config file if empty.",
+    "  doctor                      Diagnose and fix gather platform tooling and auth.",
     "",
     `${chalk.bold("Options")}`,
     `  -c, --config <path...>       YAML config path(s), supports glob patterns (default: ${chalk.gray(DEFAULT_CONFIG_PATH)})`,
@@ -332,6 +336,9 @@ function build_help_text(script_name) {
     `${chalk.bold("Examples")}`,
     "  # Export all sources from one config file",
     `  ${example_cmd} source/exporter.yaml`,
+    "",
+    "  # Same export via the explicit start subcommand",
+    `  ${example_cmd} start source/exporter.yaml`,
     "",
     "  # Export only YouTube entries from multiple configs",
     `  ${example_cmd} --platform youtube "source/*.yaml"`,
@@ -620,11 +627,11 @@ function format_handle_for_log(handle_text, url_text) {
   return `${trimmed_handle} (${trimmed_url})`;
 }
 
-function parse_cli_arguments() {
+function parse_cli_arguments(raw_argv = process.argv.slice(2)) {
   const yargs = require("yargs");
 
-  const parser = yargs(process.argv.slice(2))
-    .scriptName("batch_exporter")
+  const parser = yargs(raw_argv)
+    .scriptName("gather")
     .help(false)
     .version(false)
     .parserConfiguration({
@@ -711,14 +718,14 @@ function parse_cli_arguments() {
       describe: "Show help message",
     })
     .strict(false)
-    .usage(build_help_text("batch_exporter"))
+    .usage(build_help_text("gather"))
     .wrap(Math.min(yargs.terminalWidth(), 110));
 
   const argv = parser.parse();
 
   if (argv["max-comments"] !== undefined) {
     console.error(chalk.red("Unknown option: --max-comments"));
-    console.log(build_help_text(argv.$0 || "batch_exporter"));
+    console.log(build_help_text(argv.$0 || "gather"));
     process.exit(1);
   }
 
@@ -726,12 +733,12 @@ function parse_cli_arguments() {
     console.error(
       chalk.red("Unknown option: --skip-comment. Use --skip comment."),
     );
-    console.log(build_help_text(argv.$0 || "batch_exporter"));
+    console.log(build_help_text(argv.$0 || "gather"));
     process.exit(1);
   }
 
   if (argv.help) {
-    console.log(build_help_text(argv.$0 || "batch_exporter"));
+    console.log(build_help_text(argv.$0 || "gather"));
     process.exit(0);
   }
 
@@ -765,7 +772,7 @@ function parse_cli_arguments() {
     }
 
     console.error(chalk.red(`Invalid range value: ${raw_value}`));
-    console.log(build_help_text(argv.$0 || "batch_exporter"));
+    console.log(build_help_text(argv.$0 || "gather"));
     process.exit(1);
   }
   const range_result = normalize_range_selection(range_tokens);
@@ -782,7 +789,7 @@ function parse_cli_arguments() {
       exit_with_invalid_platform_value(
         "--platform",
         raw_value,
-        argv.$0 || "batch_exporter",
+        argv.$0 || "gather",
       );
     }
     include_platforms.push(normalized_platform);
@@ -800,7 +807,7 @@ function parse_cli_arguments() {
       exit_with_invalid_platform_value(
         "--exclude-platform",
         raw_value,
-        argv.$0 || "batch_exporter",
+        argv.$0 || "gather",
       );
     }
     exclude_platforms.push(normalized_platform);
@@ -819,7 +826,7 @@ function parse_cli_arguments() {
           `Invalid --skip value: ${raw_value}. Supported values: ${SKIP_VALUES.join(", ")}`,
         ),
       );
-      console.log(build_help_text(argv.$0 || "batch_exporter"));
+      console.log(build_help_text(argv.$0 || "gather"));
       process.exit(1);
     }
     skip_list.push(normalized_skip);
@@ -837,25 +844,25 @@ function parse_cli_arguments() {
 
   if (refresh_result.error) {
     console.error(chalk.red(refresh_result.error));
-    console.log(build_help_text(argv.$0 || "batch_exporter"));
+    console.log(build_help_text(argv.$0 || "gather"));
     process.exit(1);
   }
 
   if (range_result.error) {
     console.error(chalk.red(range_result.error));
-    console.log(build_help_text(argv.$0 || "batch_exporter"));
+    console.log(build_help_text(argv.$0 || "gather"));
     process.exit(1);
   }
 
   const max_comments_result = normalize_max_comments(argv["max-comment"]);
   if (max_comments_result.error) {
     console.error(chalk.red(max_comments_result.error));
-    console.log(build_help_text(argv.$0 || "batch_exporter"));
+    console.log(build_help_text(argv.$0 || "gather"));
     process.exit(1);
   }
 
   return {
-    command_name: argv.$0 || "batch_exporter",
+    command_name: argv.$0 || "gather",
     config_patterns,
     include_platforms,
     exclude_platforms,
@@ -935,7 +942,7 @@ function parse_init_arguments() {
   const argv = parser.parse();
 
   if (argv.help) {
-    console.log(build_init_help_text(argv.$0 || "batch_exporter"));
+    console.log(build_init_help_text(argv.$0 || "gather"));
     process.exit(0);
   }
 
@@ -950,7 +957,7 @@ function parse_init_arguments() {
   ];
 
   return {
-    command_name: argv.$0 || "batch_exporter",
+    command_name: argv.$0 || "gather",
     config_patterns,
     refresh: Boolean(argv.refresh),
     dry_run: Boolean(argv["dry-run"]),
@@ -2682,8 +2689,8 @@ async function run_custom_command_jobs(
   };
 }
 
-async function run_export_command() {
-  const options = parse_cli_arguments();
+async function run_export_command(argv = process.argv.slice(2)) {
+  const options = parse_cli_arguments(argv);
   const report_started_at = new Date().toISOString();
   const default_report_root = create_default_report_root();
   const default_report_batch_number = options.report_dir
@@ -3147,15 +3154,20 @@ async function run_init_command() {
 }
 
 async function main() {
-  const [command_name] = process.argv.slice(2);
+  const args = process.argv.slice(2);
+  const [command_name] = args;
   if (command_name === "init") {
     await run_init_command();
     return;
   }
-  await run_export_command();
+  if (command_name === "start") {
+    await run_export_command(args.slice(1));
+    return;
+  }
+  await run_export_command(args);
 }
 
 main().catch((error) => {
-  console.error(chalk.red(`batch_exporter failed: ${error.message}`));
+  console.error(chalk.red(`gather failed: ${error.message}`));
   process.exit(1);
 });

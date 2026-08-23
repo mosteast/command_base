@@ -1196,3 +1196,57 @@ describe("gather CLI platform selection", () => {
     }
   });
 });
+
+describe("gather CLI subcommands", () => {
+  it("lists start, init, and doctor in start help", async () => {
+    const help = await run_cli(["--help"]);
+    expect(help.exit_code).toBe(0);
+    const text = strip_ansi(help.stdout);
+    expect(text).toContain("Usage");
+    expect(text).toMatch(/\[start\]/);
+    expect(text).toMatch(/^\s+start\s+/m);
+    expect(text).toMatch(/^\s+init\s+/m);
+    expect(text).toMatch(/^\s+doctor\s+/m);
+
+    const start_help = await run_cli(["start", "--help"]);
+    expect(start_help.exit_code).toBe(0);
+    const start_text = strip_ansi(start_help.stdout);
+    expect(start_text).toContain("Usage");
+    expect(start_text).toMatch(/^\s+doctor\s+/m);
+  });
+
+  it("runs the same export when start is explicit", async () => {
+    const temp_root = await create_temp_dir();
+    const state_file = path.join(temp_root, "gather.state.json");
+    const report_dir = path.join(temp_root, "report");
+    const start_report_dir = path.join(temp_root, "report-start");
+
+    try {
+      const config_path = await write_config_file(temp_root);
+      const implicit = await run_cli([
+        "--dry-run",
+        "--report-dir",
+        report_dir,
+        "--state-file",
+        state_file,
+        config_path,
+      ]);
+      const explicit = await run_cli([
+        "start",
+        "--dry-run",
+        "--report-dir",
+        start_report_dir,
+        "--state-file",
+        state_file,
+        config_path,
+      ]);
+
+      expect(implicit.exit_code).toBe(0);
+      expect(explicit.exit_code).toBe(0);
+      expect(explicit.stdout).toContain("Dry-run mode");
+      expect(explicit.stderr).not.toMatch(/Unable to process config/);
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
+  });
+});
