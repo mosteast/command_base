@@ -285,12 +285,15 @@ def apply_patch():
     if PATCH_APPLIED:
         return
 
+    from f2.apps.douyin.crawler import DouyinCrawler
     from f2.apps.douyin.dl import DouyinDownloader
     from f2.apps.douyin.filter import FriendFeedFilter, PostDetailFilter, UserPostFilter
     from f2.apps.douyin.utils import format_file_name
     from f2.dl.base_downloader import BaseDownloader
+    from f2.exceptions.api_exceptions import APIResponseError
     from f2.i18n.translator import _
     from f2.log.logger import logger
+    import f2_douyin_like_browser
 
     def build_base_name(instance):
         return format_file_name(
@@ -480,5 +483,18 @@ def apply_patch():
     DouyinDownloader.download_article_cover = download_article_cover
     DouyinDownloader.download_article_images = download_article_images
     DouyinDownloader.handler_download = patched_handler_download
+
+    DouyinCrawler._original_fetch_user_like = DouyinCrawler.fetch_user_like
+
+    async def patched_fetch_user_like(self, params):
+        try:
+            return await DouyinCrawler._original_fetch_user_like(self, params)
+        except APIResponseError as error:
+            if getattr(error, "status_code", None) != 403:
+                raise
+            logger.warning(_("favorite API 403, falling back to Chrome like tab"))
+            return await f2_douyin_like_browser.fetch_like_via_browser(self, params)
+
+    DouyinCrawler.fetch_user_like = patched_fetch_user_like
 
     PATCH_APPLIED = True

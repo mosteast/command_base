@@ -1267,6 +1267,12 @@ function deduplicate_source_items_by_url(
   return deduplicated_items;
 }
 
+function rewrite_f2_command_text(command_text) {
+  const text = String(command_text || "").trim();
+  if (/^f2(\s|$)/.test(text)) return `f2_compat${text.slice(2)}`;
+  return text;
+}
+
 function infer_command_platform_keys(command_text) {
   const normalized_command = String(command_text || "")
     .trim()
@@ -1384,7 +1390,9 @@ function normalize_command_list(raw_config, logger, source_label) {
       return;
     }
 
-    const command_text = String(entry.command || entry.cmd || "").trim();
+    const command_text = rewrite_f2_command_text(
+      String(entry.command || entry.cmd || "").trim(),
+    );
     const name_text = String(entry.name || "").trim();
 
     if (!command_text) {

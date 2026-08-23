@@ -151,6 +151,15 @@ describe("f2 douyin API probe", () => {
     };
   }
 
+  it("builds a probe env that enables the Chrome like fallback", () => {
+    const { build_probe_env } = require("../lib/gather_doctor/f2_douyin_probe");
+    const env = build_probe_env({ chrome_profile: "nori" });
+    expect(env.COMMAND_BASE_F2_PATCH).toBe("1");
+    expect(env.COMMAND_BASE_F2_LIKE_LIMIT).toBe("20");
+    expect(env.COMMAND_BASE_F2_CHROME_PROFILE).toBe("nori");
+    expect(env.PYTHONPATH).toMatch(/f2_compat/);
+  });
+
   it("classifies like HTTP 403 as fail", async () => {
     const { classify_douyin_api_probe } = require("../lib/gather_doctor/f2_douyin_probe");
     const classified = classify_douyin_api_probe({
@@ -216,6 +225,10 @@ describe("f2 douyin API probe", () => {
       expect(argv.join(" ")).toMatch(/f2_douyin_probe\.py/);
       expect(argv.join(" ")).toMatch(/v\.douyin\.com\/kIg44MNOKz8/);
       expect(argv).not.toContain("-h");
+      const probe_env = spy.mock.calls[0][2] && spy.mock.calls[0][2].env;
+      expect(probe_env.COMMAND_BASE_F2_PATCH).toBe("1");
+      expect(probe_env.COMMAND_BASE_F2_LIKE_LIMIT).toBe("20");
+      expect(probe_env.PYTHONPATH).toMatch(/f2_compat/);
       expect(result.status).toBe("fail");
       expect(result.next_command).toBe("gather doctor fix --platform douyin");
       expect(JSON.stringify(result)).not.toMatch(/msToken|a_bogus|sessionid=/i);

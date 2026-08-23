@@ -796,6 +796,41 @@ describe("gather CLI platform selection", () => {
     }
   });
 
+  it("rewrites bare f2 Douyin like commands to f2_compat", async () => {
+    const temp_root = await create_temp_dir();
+    const state_file = path.join(temp_root, "gather.state.json");
+    const config_path = path.join(temp_root, "gather.f2_like.yaml");
+    await fs.writeFile(
+      config_path,
+      [
+        "command:",
+        "  - name: Douyin Likes",
+        '    command: "f2 dy -M like -u https://v.douyin.com/kIg44MNOKz8/"',
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    try {
+      const result = await run_cli([
+        "--dry-run",
+        "--state-file",
+        state_file,
+        "--range",
+        "command",
+        config_path,
+      ]);
+
+      expect(result.exit_code).toBe(0);
+      expect(result.stdout).toContain(
+        "f2_compat dy -M like -u https://v.douyin.com/kIg44MNOKz8/",
+      );
+      expect(result.stdout).not.toMatch(/(^|\s)f2 dy -M like/);
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
+  });
+
   it("infers x_f2 platform from f2_compat custom commands", async () => {
     const temp_root = await create_temp_dir();
     const state_file = path.join(temp_root, "gather.state.json");

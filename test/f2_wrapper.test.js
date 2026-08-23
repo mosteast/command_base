@@ -5,12 +5,13 @@ import { execFile } from "node:child_process";
 import { describe, expect, it } from "vitest";
 
 const cli_entry = path.resolve(__dirname, "../bin/f2_compat");
+const f2_entry = path.resolve(__dirname, "../bin/f2");
 const compat_dir = path.resolve(__dirname, "../utility/f2_compat");
 
-function run_cli(args, env = {}) {
+function run_cli(args, env = {}, entry = cli_entry) {
   return new Promise((resolve, reject) => {
     execFile(
-      cli_entry,
+      entry,
       args,
       {
         env: { ...process.env, ...env, FORCE_COLOR: "0" },
@@ -93,6 +94,34 @@ describe("f2_compat wrapper", () => {
         "post",
         "-u",
         "https://www.douyin.com/user/example",
+      ]);
+      expect(payload.patch).toBe("1");
+      expect(payload.pythonpath).toContain(compat_dir);
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
+  });
+
+  it("lets bin/f2 inject the Douyin compatibility patch", async () => {
+    const temp_root = await fs.mkdtemp(path.join(os.tmpdir(), "f2-wrapper-"));
+
+    try {
+      const fake_upstream = await create_fake_upstream(temp_root);
+      const result = await run_cli(
+        ["dy", "-M", "like", "-u", "https://v.douyin.com/example"],
+        {
+          COMMAND_BASE_F2_UPSTREAM: fake_upstream,
+        },
+        f2_entry,
+      );
+
+      const payload = JSON.parse(result.stdout);
+      expect(payload.args).toEqual([
+        "dy",
+        "-M",
+        "like",
+        "-u",
+        "https://v.douyin.com/example",
       ]);
       expect(payload.patch).toBe("1");
       expect(payload.pythonpath).toContain(compat_dir);

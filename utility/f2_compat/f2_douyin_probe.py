@@ -90,10 +90,19 @@ async def fetch_list(crawler, kind: str, sec_user_id: str) -> dict:
     return classify_response(payload)
 
 
+def apply_compat_patch() -> None:
+    try:
+        from f2_douyin_patch import apply_patch
+    except ImportError:
+        return
+    apply_patch()
+
+
 async def run_probe(url: str, config_path: str) -> dict:
     from f2.apps.douyin.crawler import DouyinCrawler
     from f2.apps.douyin.utils import ClientConfManager, SecUserIdFetcher
 
+    apply_compat_patch()
     cookie = load_cookie(config_path)
     if not cookie:
         return {
