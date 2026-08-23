@@ -3,12 +3,12 @@ import os from "os";
 import path from "path";
 import { describe, it, expect, vi } from "vitest";
 
-const youtube = require("../lib/gather_setup/adapter/youtube");
-const bilibili = require("../lib/gather_setup/adapter/bilibili");
-const brew_install = require("../lib/gather_setup/brew_install");
-const cookie_export = require("../lib/gather_setup/cookie_export");
+const youtube = require("../lib/gather_doctor/adapter/youtube");
+const bilibili = require("../lib/gather_doctor/adapter/bilibili");
+const brew_install = require("../lib/gather_doctor/brew_install");
+const cookie_export = require("../lib/gather_doctor/cookie_export");
 
-describe("gather_setup yt-dlp adapters", () => {
+describe("gather_doctor yt-dlp adapters", () => {
   it("youtube check fails when yt-dlp is missing", async () => {
     vi.spyOn(brew_install, "check_yt_dlp").mockResolvedValue({
       ok: false,
@@ -38,14 +38,14 @@ describe("gather_setup yt-dlp adapters", () => {
     vi.restoreAllMocks();
   });
 
-  it("bilibili setup writes runtime chrome profile mapping", async () => {
+  it("bilibili fix writes runtime chrome profile mapping", async () => {
     vi.spyOn(brew_install, "check_yt_dlp").mockResolvedValue({
       ok: true,
       present: true,
       needs_install: false,
       message: "yt-dlp present",
     });
-    const result = await bilibili.setup(
+    const result = await bilibili.fix(
       { dry_run: true, chrome_scans: [] },
       {
         selected_profile: {
@@ -61,7 +61,7 @@ describe("gather_setup yt-dlp adapters", () => {
   });
 });
 
-describe("gather_setup version helpers", () => {
+describe("gather_doctor version helpers", () => {
   it("detects gallery-dl versions below the minimum", () => {
     expect(brew_install.version_is_less_than("1.31.2", "1.31.10")).toBe(true);
     expect(brew_install.version_is_less_than("1.31.10", "1.31.10")).toBe(false);

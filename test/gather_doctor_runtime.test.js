@@ -9,13 +9,13 @@ const {
   get_cookies_from_browser,
   get_cookies_file,
   set_platform_runtime,
-} = require("../lib/gather_setup/runtime_config");
+} = require("../lib/gather_doctor/runtime_config");
 
 async function create_temp_dir() {
-  return fs.mkdtemp(path.join(os.tmpdir(), "gather-setup-runtime-"));
+  return fs.mkdtemp(path.join(os.tmpdir(), "gather-doctor-runtime-"));
 }
 
-describe("gather_setup runtime_config", () => {
+describe("gather_doctor runtime_config", () => {
   it("writes and reads platform cookie mappings without secrets", async () => {
     const temp_root = await create_temp_dir();
     const runtime_path = path.join(temp_root, "gather.runtime.yaml");

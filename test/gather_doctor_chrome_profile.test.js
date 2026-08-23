@@ -9,16 +9,16 @@ const {
   profiles_with_platform_hosts,
   pick_best_profile,
   read_cookie_hosts,
-} = require("../lib/gather_setup/chrome_profile");
+} = require("../lib/gather_doctor/chrome_profile");
 const {
   parse_netscape_cookie_header,
-} = require("../lib/gather_setup/cookie_export");
+} = require("../lib/gather_doctor/cookie_export");
 
 async function create_temp_dir() {
-  return fs.mkdtemp(path.join(os.tmpdir(), "gather-setup-chrome-"));
+  return fs.mkdtemp(path.join(os.tmpdir(), "gather-doctor-chrome-"));
 }
 
-describe("gather_setup chrome_profile", () => {
+describe("gather_doctor chrome_profile", () => {
   it("lists profiles from Local State ordered by active_time", async () => {
     const temp_root = await create_temp_dir();
     const local_state = {
@@ -83,7 +83,7 @@ describe("gather_setup chrome_profile", () => {
   });
 });
 
-describe("gather_setup cookie_export parsing", () => {
+describe("gather_doctor cookie_export parsing", () => {
   it("builds cookie headers from netscape rows for matching hosts only", () => {
     const netscape = [
       "# Netscape HTTP Cookie File",

@@ -4,7 +4,7 @@ import os from "os";
 import path from "path";
 import { describe, it, expect } from "vitest";
 
-const cli_entry = path.resolve(__dirname, "../bin/gather_setup");
+const cli_entry = path.resolve(__dirname, "../bin/gather_doctor");
 
 function run_cli(args, env_overrides = {}) {
   return new Promise((resolve, reject) => {
@@ -31,15 +31,15 @@ function strip_ansi(text) {
 }
 
 async function create_temp_dir() {
-  return fs.mkdtemp(path.join(os.tmpdir(), "gather-setup-cli-"));
+  return fs.mkdtemp(path.join(os.tmpdir(), "gather-doctor-cli-"));
 }
 
-describe("gather_setup CLI", () => {
+describe("gather_doctor CLI", () => {
   it("prints help and version", async () => {
     const help = await run_cli(["--help"]);
     expect(help.exit_code).toBe(0);
     expect(strip_ansi(help.stdout)).toContain("Usage");
-    expect(strip_ansi(help.stdout)).toContain("setup");
+    expect(strip_ansi(help.stdout)).toContain("fix");
 
     const version = await run_cli(["--version"]);
     expect(version.exit_code).toBe(0);
@@ -54,11 +54,11 @@ describe("gather_setup CLI", () => {
     );
   });
 
-  it("dry-run setup does not write runtime", async () => {
+  it("dry-run fix does not write runtime", async () => {
     const temp_root = await create_temp_dir();
     const runtime_path = path.join(temp_root, "gather.runtime.yaml");
     const result = await run_cli([
-      "setup",
+      "fix",
       "--dry-run",
       "--offline",
       "--platform",
@@ -70,7 +70,7 @@ describe("gather_setup CLI", () => {
     ]);
     expect(result.exit_code).toBe(0);
     const combined = strip_ansi(`${result.stdout}\n${result.stderr}`);
-    expect(combined).toMatch(/Dry-run|Setup plan|already ok|Nothing to set up/i);
+    expect(combined).toMatch(/Dry-run|Fix plan|already ok|Nothing to fix/i);
     await expect(fs.access(runtime_path)).rejects.toBeTruthy();
   });
 });

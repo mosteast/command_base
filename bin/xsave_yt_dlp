@@ -792,7 +792,7 @@ apply_gather_runtime_cookie_defaults() {
             ;;
     esac
 
-    runtime_cli="${script_dir}/../lib/gather_setup/read_runtime_cli.js"
+    runtime_cli="${script_dir}/../lib/gather_doctor/read_runtime_cli.js"
     if [ ! -f "$runtime_cli" ]; then
         return 0
     fi

@@ -36,7 +36,7 @@ const {
   read_runtime_config,
   get_cookies_from_browser,
   get_cookies_file,
-} = require("../lib/gather_setup/runtime_config");
+} = require("../lib/gather_doctor/runtime_config");
 const DEFAULT_CONFIG_LINES = [
   "# Gather config",
   "# Each source item requires a name and handle.",

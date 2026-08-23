@@ -3,15 +3,15 @@ import os from "os";
 import path from "path";
 import { describe, it, expect, vi } from "vitest";
 
-const x_gallery_dl = require("../lib/gather_setup/adapter/x_gallery_dl");
-const brew_install = require("../lib/gather_setup/brew_install");
-const cookie_export = require("../lib/gather_setup/cookie_export");
+const x_gallery_dl = require("../lib/gather_doctor/adapter/x_gallery_dl");
+const brew_install = require("../lib/gather_doctor/brew_install");
+const cookie_export = require("../lib/gather_doctor/cookie_export");
 
 async function create_temp_dir() {
-  return fs.mkdtemp(path.join(os.tmpdir(), "gather-setup-gallery-"));
+  return fs.mkdtemp(path.join(os.tmpdir(), "gather-doctor-gallery-"));
 }
 
-describe("gather_setup gallery-dl adapter", () => {
+describe("gather_doctor gallery-dl adapter", () => {
   it("fails when cookies file lacks x.com hosts", async () => {
     const temp_root = await create_temp_dir();
     const cookies_file = path.join(temp_root, "cookies.txt");
@@ -59,7 +59,7 @@ describe("gather_setup gallery-dl adapter", () => {
     vi.restoreAllMocks();
   });
 
-  it("setup exports cookies and records runtime path", async () => {
+  it("fix exports cookies and records runtime path", async () => {
     vi.spyOn(brew_install, "check_gallery_dl").mockResolvedValue({
       ok: true,
       present: true,
@@ -73,7 +73,7 @@ describe("gather_setup gallery-dl adapter", () => {
       output_path: "/tmp/cookies.txt",
     });
 
-    const result = await x_gallery_dl.setup(
+    const result = await x_gallery_dl.fix(
       { dry_run: true },
       {
         selected_profile: {

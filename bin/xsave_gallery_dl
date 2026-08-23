@@ -792,7 +792,7 @@ log_step "Prepare cookies"
 cookie_opts=()
 if [ "$use_cookies" = true ]; then
     if [ "$cookies_file_provided" != true ]; then
-        runtime_cli="${script_dir}/../lib/gather_setup/read_runtime_cli.js"
+        runtime_cli="${script_dir}/../lib/gather_doctor/read_runtime_cli.js"
         if [ -f "$runtime_cli" ]; then
             runtime_args=(cookies-file x_gallery_dl)
             if [ -n "${GATHER_RUNTIME_PATH:-}" ]; then

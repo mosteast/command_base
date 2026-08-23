@@ -8,25 +8,25 @@ const {
   DEFAULT_CONFIG_PATH,
   DEFAULT_RUNTIME_PATH,
   PLATFORM_KEYS,
-} = require("../lib/gather_setup/constants");
+} = require("../lib/gather_doctor/constants");
 const {
   normalize_platform_list,
   select_platforms,
-} = require("../lib/gather_setup/platform");
-const { run_check } = require("../lib/gather_setup/check_runner");
-const { run_setup } = require("../lib/gather_setup/setup_runner");
+} = require("../lib/gather_doctor/platform");
+const { run_check } = require("../lib/gather_doctor/check_runner");
+const { run_fix } = require("../lib/gather_doctor/fix_runner");
 
 function build_help_text(script_name) {
   return [
     `${chalk.bold("Usage")}`,
     `  ${script_name} [check] [options]`,
-    `  ${script_name} setup [options]`,
+    `  ${script_name} fix [options]`,
     "",
     `${chalk.bold("Description")}`,
-    "  Check and configure gather platform tooling, Chrome cookie profiles,",
+    "  Diagnose and fix gather platform tooling, Chrome cookie profiles,",
     "  and auth files so gather can run correctly.",
     "  Default action is check (static + live probe).",
-    "  setup writes gather.runtime.yaml, exports cookies, and can brew install/upgrade.",
+    "  fix writes gather.runtime.yaml, exports cookies, and can brew install/upgrade.",
     "",
     `${chalk.bold("Options")}`,
     `  -c, --config <path>          Gather YAML config (default: ${DEFAULT_CONFIG_PATH})`,
@@ -35,8 +35,8 @@ function build_help_text(script_name) {
     "      --exclude-platform <...> Skip these platforms",
     "      --chrome-profile <name>  Limit Chrome scan to one profile directory/name",
     "      --offline                Skip live network probes (check only)",
-    "  -y, --yes                    Skip setup confirmation",
-    "  -d, --dry-run                Preview setup without writing or installing",
+    "  -y, --yes                    Skip fix confirmation",
+    "  -d, --dry-run                Preview fix without writing or installing",
     "      --quiet                  Print only warnings and errors",
     "      --debug                  Enable verbose debug output",
     "  -v, --version                Show version number and exit",
@@ -49,11 +49,11 @@ function build_help_text(script_name) {
     "  # Offline check for youtube only",
     "  $0 check --offline --platform youtube",
     "",
-    "  # Preview setup for gallery-dl / X cookies",
-    "  $0 setup --platform x_gallery_dl --dry-run",
+    "  # Preview fix for gallery-dl / X cookies",
+    "  $0 fix --platform x_gallery_dl --dry-run",
     "",
-    "  # Apply setup without prompting",
-    "  $0 setup --yes --platform youtube bilibili",
+    "  # Apply fix without prompting",
+    "  $0 fix --yes --platform youtube bilibili",
   ].join("\n");
 }
 
@@ -75,12 +75,20 @@ function parse_arguments(argv) {
   const yargs = require("yargs/yargs");
   const args = [...argv];
   let mode = "check";
-  if (args[0] === "check" || args[0] === "setup") {
+  if (args[0] === "check" || args[0] === "fix") {
     mode = args.shift();
+  } else if (args[0] === "setup") {
+    console.error(
+      chalk.red(
+        'Unknown command "setup". Use "fix" instead (gather_doctor fix).',
+      ),
+    );
+    console.log(build_help_text("gather_doctor"));
+    process.exit(1);
   }
 
   const parser = yargs(args)
-    .scriptName("gather_setup")
+    .scriptName("gather_doctor")
     .help(false)
     .version(false)
     .parserConfiguration({
@@ -118,7 +126,7 @@ function parse_arguments(argv) {
       alias: "y",
       type: "boolean",
       default: false,
-      describe: "Skip setup confirmation",
+      describe: "Skip fix confirmation",
     })
     .option("dry-run", {
       alias: "d",
@@ -149,13 +157,13 @@ function parse_arguments(argv) {
     .strict(true)
     .fail((message) => {
       console.error(chalk.red(message));
-      console.log(build_help_text("gather_setup"));
+      console.log(build_help_text("gather_doctor"));
       process.exit(1);
     });
 
   const parsed = parser.parse();
   if (parsed.help) {
-    console.log(build_help_text(parsed.$0 || "gather_setup"));
+    console.log(build_help_text(parsed.$0 || "gather_doctor"));
     process.exit(0);
   }
   if (parsed.version) {
@@ -172,13 +180,13 @@ function parse_arguments(argv) {
     );
   } catch (error) {
     console.error(chalk.red(error.message));
-    console.log(build_help_text(parsed.$0 || "gather_setup"));
+    console.log(build_help_text(parsed.$0 || "gather_doctor"));
     process.exit(1);
   }
 
   return {
     mode,
-    command_name: parsed.$0 || "gather_setup",
+    command_name: parsed.$0 || "gather_doctor",
     config_path: parsed.config ? String(parsed.config) : DEFAULT_CONFIG_PATH,
     runtime_path: parsed.runtime ? String(parsed.runtime) : DEFAULT_RUNTIME_PATH,
     platforms: select_platforms(include_platforms, exclude_platforms),
@@ -195,8 +203,8 @@ function parse_arguments(argv) {
 
 async function main() {
   const options = parse_arguments(process.argv.slice(2));
-  if (options.mode === "setup") {
-    const result = await run_setup(options);
+  if (options.mode === "fix") {
+    const result = await run_fix(options);
     process.exit(result.exit_code || 0);
   }
   const result = await run_check(options);
@@ -204,6 +212,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error(chalk.red(`gather_setup failed: ${error.message}`));
+  console.error(chalk.red(`gather_doctor failed: ${error.message}`));
   process.exit(1);
 });

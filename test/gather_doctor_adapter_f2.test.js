@@ -4,16 +4,16 @@ import path from "path";
 import { describe, it, expect, vi } from "vitest";
 import YAML from "yaml";
 
-const { douyin, x_f2 } = require("../lib/gather_setup/adapter/f2_platforms");
-const brew_install = require("../lib/gather_setup/brew_install");
-const cookie_export = require("../lib/gather_setup/cookie_export");
-const f2_config = require("../lib/gather_setup/f2_config");
+const { douyin, x_f2 } = require("../lib/gather_doctor/adapter/f2_platforms");
+const brew_install = require("../lib/gather_doctor/brew_install");
+const cookie_export = require("../lib/gather_doctor/cookie_export");
+const f2_config = require("../lib/gather_doctor/f2_config");
 
 async function create_temp_dir() {
-  return fs.mkdtemp(path.join(os.tmpdir(), "gather-setup-f2-"));
+  return fs.mkdtemp(path.join(os.tmpdir(), "gather-doctor-f2-"));
 }
 
-describe("gather_setup f2 adapters", () => {
+describe("gather_doctor f2 adapters", () => {
   it("reports missing f2 cookie without printing cookie values", async () => {
     const temp_root = await create_temp_dir();
     const config_path = path.join(temp_root, "app.yaml");
@@ -45,7 +45,7 @@ describe("gather_setup f2 adapters", () => {
     vi.restoreAllMocks();
   });
 
-  it("writes f2 cookie into app.yaml on setup", async () => {
+  it("writes f2 cookie into app.yaml on fix", async () => {
     const temp_root = await create_temp_dir();
     const config_path = path.join(temp_root, "app.yaml");
     await fs.writeFile(
@@ -81,9 +81,9 @@ describe("gather_setup f2 adapters", () => {
     );
 
     // Call through module methods used by adapter after rewiring requires.
-    const adapter = require("../lib/gather_setup/adapter/f2_platforms");
+    const adapter = require("../lib/gather_doctor/adapter/f2_platforms");
     // Patch module-local bindings by stubbing helpers the adapter imports via f2_config/cookie_export objects.
-    const result = await adapter.x_f2.setup(
+    const result = await adapter.x_f2.fix(
       {
         dry_run: true,
         f2_options: { f2_config_path: config_path },

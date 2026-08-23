@@ -1,13 +1,13 @@
-# gather_setup Design
+# gather_doctor Design
 
 ## Summary
 
-Add a standalone `gather_setup` command that checks and configures the platforms `gather` depends on. Logic lives in per-platform adapters under `lib/gather_setup/`. A shared `gather.runtime.yaml` (next to existing gather state) records Chrome profile mappings and cookie file paths. `gather`, `xsave_yt_dlp`, and `xsave_gallery_dl` consume that runtime so exports use the right auth materials without re-prompting.
+Add a standalone `gather_doctor` command that checks and configures the platforms `gather` depends on. Logic lives in per-platform adapters under `lib/gather_doctor/`. A shared `gather.runtime.yaml` (next to existing gather state) records Chrome profile mappings and cookie file paths. `gather`, `xsave_yt_dlp`, and `xsave_gallery_dl` consume that runtime so exports use the right auth materials without re-prompting.
 
 ## Goals
 
 - Give one entry point to verify gather can run across youtube, bilibili, rumble, bitchute, douyin, x_f2, and x_gallery_dl.
-- Default to `check` (static + live probe); explicit `setup` writes config and can install/upgrade tools.
+- Default to `check` (static + live probe); explicit `fix` writes config and can install/upgrade tools.
 - Automate any step that can be automated or compressed (profile scan, cookie export, brew install/upgrade).
 - Keep secrets out of logs: report cookie host presence only, never cookie values.
 - Match existing CLI conventions: `--debug`, `--quiet`, `--dry-run`, unknown options fail, colorful output.
@@ -37,7 +37,7 @@ Why:
 Pros: smaller diff.  
 Cons: Chrome profile mapping is not a durable fact; gather keeps reading Default.
 
-### 2. Monolithic `bin/gather_setup` with all logic inline
+### 2. Monolithic `bin/gather_doctor` with all logic inline
 
 Pros: fastest first cut.  
 Cons: hard to test per platform; repeats the size problem already visible in `gather`.
@@ -45,8 +45,8 @@ Cons: hard to test per platform; repeats the size problem already visible in `ga
 ## Architecture
 
 ```
-bin/gather_setup
-└── lib/gather_setup/
+bin/gather_doctor
+└── lib/gather_doctor/
     ├── runtime_config.js      # read/write gather.runtime.yaml
     ├── chrome_profile.js      # list profiles; host scan via copied Cookies DB
     ├── cookie_export.js       # Netscape export from a profile
@@ -67,7 +67,7 @@ Consumers:
 - `gather` injects `--cookies-from-browser chrome:<profile>` for youtube/bilibili when building `xsave_yt_dlp` jobs.
 - `xsave_yt_dlp` reads runtime when the user did not pass cookie flags.
 - `xsave_gallery_dl` prefers the runtime cookie path over `~/Downloads/cookies.txt` when flags are omitted.
-- f2 platforms: setup writes cookies into f2’s existing conf (`~/.f2/conf.yaml` or current official path verified at implement time).
+- f2 platforms: fix writes cookies into f2’s existing conf (`~/.f2/conf.yaml` or current official path verified at implement time).
 
 ## Default paths
 
@@ -107,11 +107,11 @@ platform:
 ## CLI contract
 
 ```
-gather_setup [check] [options]
-gather_setup setup [options]
+gather_doctor [check] [options]
+gather_doctor fix [options]
 ```
 
-Shared flags: `--config`, `--platform`, `--exclude-platform`, `--chrome-profile`, `--offline` (check), `--yes` (setup), `--dry-run`, `--quiet`, `--debug`, `-h`, `-v`.
+Shared flags: `--config`, `--platform`, `--exclude-platform`, `--chrome-profile`, `--offline` (check), `--yes` (fix), `--dry-run`, `--quiet`, `--debug`, `-h`, `-v`.
 
 Platform aliases match gather (`yt`, `bili`, `dy`, `x`, …).
 
@@ -124,7 +124,7 @@ Platform aliases match gather (`yt`, `bili`, `dy`, `x`, …).
 5. Unless `--offline`: no-media probe using the first live handle from config when available.
 6. Per-platform `ok` / `warn` / `fail` plus next command. Any `fail` → non-zero exit.
 
-### setup
+### fix
 
 1. Same diagnosis as check.
 2. Print write/install plan; confirm unless `--yes`; `--dry-run` stops after the plan.
@@ -132,7 +132,7 @@ Platform aliases match gather (`yt`, `bili`, `dy`, `x`, …).
 4. Export Netscape cookies to tool-expected paths; write f2 conf for douyin / x_f2.
 5. Missing or old tools → brew install/upgrade (confirmed). Brew failure stops that platform; keep earlier writes.
 6. Locked Chrome Cookies DB → copy then read; on failure tell user to quit Chrome.
-7. Re-run check after setup.
+7. Re-run check after fix.
 
 ## Error handling
 
@@ -145,16 +145,16 @@ Platform aliases match gather (`yt`, `bili`, `dy`, `x`, …).
 
 Vitest, no live network:
 
-- `test/gather_setup_cli.test.js`
-- `test/gather_setup_chrome_profile.test.js`
-- `test/gather_setup_runtime.test.js`
-- `test/gather_setup_adapter_yt_dlp.test.js`
-- `test/gather_setup_adapter_gallery_dl.test.js`
-- `test/gather_setup_adapter_f2.test.js`
+- `test/gather_doctor_cli.test.js`
+- `test/gather_doctor_chrome_profile.test.js`
+- `test/gather_doctor_runtime.test.js`
+- `test/gather_doctor_adapter_yt_dlp.test.js`
+- `test/gather_doctor_adapter_gallery_dl.test.js`
+- `test/gather_doctor_adapter_f2.test.js`
 
 Also extend gather and xsave tests for runtime injection / fallback. Cover `--dry-run` and `--yes`.
 
 ## Implementation notes
 
 - Touching two or more repo-owned source files → task branch + isolated git worktree, then merge back.
-- New files only under `bin/`, `lib/gather_setup/`, `test/`, and this design doc under `docs/superpowers/specs/`.
+- New files only under `bin/`, `lib/gather_doctor/`, `test/`, and this design doc under `docs/superpowers/specs/`.
