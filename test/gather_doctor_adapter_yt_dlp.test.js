@@ -68,3 +68,12 @@ describe("gather_doctor version helpers", () => {
     expect(brew_install.version_is_less_than("1.32.0", "1.31.10")).toBe(false);
   });
 });
+
+describe("gather doctor next_command copy", () => {
+  it("points chrome cookie failure at gather doctor fix", () => {
+    const { chrome_check_for_platform } = require("../lib/gather_doctor/adapter/common");
+    const result = chrome_check_for_platform("youtube", { chrome_scans: [] });
+    expect(result.next_command).toBe("gather doctor fix --platform youtube");
+    expect(result.next_command).not.toContain("gather_doctor");
+  });
+});
