@@ -137,6 +137,50 @@ describe("xsave_douyin CLI", () => {
     }
   });
 
+  it("attaches like intercept before preparing the page", async () => {
+    const order = [];
+    const result = await run_export(
+      {
+        mode: "like",
+        url: "https://v.douyin.com/example/",
+        path: "/tmp",
+        dry_run: false,
+        max_comment: 1,
+        max_danmaku: 1,
+        chrome_profile: "Profile 9",
+      },
+      {
+        resolve_cookie: async () => "dummy",
+        open_session: async () => ({
+          page: {},
+          close: async () => {},
+        }),
+        attach_list_intercept: (_page, mode) => {
+          order.push(`attach:${mode}`);
+          return [
+            {
+              http: 200,
+              status_code: 0,
+              has_more: 0,
+              aweme_list: [],
+            },
+          ];
+        },
+        prepare_list_page: async () => {
+          order.push("prepare");
+        },
+        collect_list: async ({ intercepted_pages }) => {
+          order.push("collect");
+          expect(intercepted_pages).toHaveLength(1);
+          return [];
+        },
+        log: () => {},
+      },
+    );
+    expect(result.exit_code).toBe(0);
+    expect(order).toEqual(["attach:like", "prepare", "collect"]);
+  });
+
   it("uses gather runtime chrome-profile when the flag is omitted", async () => {
     const temp_root = await fs.mkdtemp(path.join(os.tmpdir(), "xsave-douyin-"));
     const runtime_path = path.join(temp_root, "gather.runtime.yaml");

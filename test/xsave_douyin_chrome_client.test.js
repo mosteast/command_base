@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 const {
+  attach_list_intercept,
   collect_list,
   fetch_comments,
   fetch_danmaku,
@@ -86,5 +87,90 @@ describe("xsave_douyin chrome_client", () => {
       max_danmaku: 500,
     });
     expect(danmaku).toEqual([]);
+  });
+
+  it("uses intercepted favorite pages instead of a blocked in-page fetch", async () => {
+    const evaluate = vi.fn(async () => ({
+      http: 403,
+      status_code: -1,
+      has_more: 0,
+      aweme_list: [],
+    }));
+    const pages = await collect_list({
+      page: { evaluate },
+      mode: "like",
+      intercepted_pages: [
+        {
+          http: 200,
+          status_code: 0,
+          has_more: 0,
+          max_cursor: 1,
+          aweme_list: [{ aweme_id: "liked-1" }],
+        },
+      ],
+    });
+    expect(pages[0].aweme_list[0].aweme_id).toBe("liked-1");
+    expect(evaluate).not.toHaveBeenCalled();
+  });
+
+  it("scrolls to load more intercepted like pages when fetch is blocked", async () => {
+    const intercepted = [
+      {
+        http: 200,
+        status_code: 0,
+        has_more: 1,
+        max_cursor: 10,
+        aweme_list: [{ aweme_id: "a" }],
+      },
+    ];
+    let scrolled = 0;
+    const pages = await collect_list({
+      page: {
+        evaluate: async () => ({
+          http: 403,
+          status_code: -1,
+          has_more: 0,
+          aweme_list: [],
+        }),
+      },
+      mode: "like",
+      limit: 2,
+      intercepted_pages: intercepted,
+      scroll_for_more: async () => {
+        scrolled += 1;
+        intercepted.push({
+          http: 200,
+          status_code: 0,
+          has_more: 0,
+          max_cursor: 20,
+          aweme_list: [{ aweme_id: "b" }],
+        });
+      },
+    });
+    expect(pages.map((page) => page.aweme_list[0].aweme_id)).toEqual(["a", "b"]);
+    expect(scrolled).toBe(1);
+  });
+
+  it("records Chrome favorite responses on the page", async () => {
+    let handler;
+    const intercepted = attach_list_intercept(
+      {
+        on: (event, fn) => {
+          if (event === "response") handler = fn;
+        },
+      },
+      "like",
+    );
+    await handler({
+      url: () => "https://www.douyin.com/aweme/v1/web/aweme/favorite/?x=1",
+      status: () => 200,
+      json: async () => ({
+        status_code: 0,
+        has_more: 0,
+        max_cursor: 1,
+        aweme_list: [{ aweme_id: "liked-1" }],
+      }),
+    });
+    expect(intercepted[0].aweme_list[0].aweme_id).toBe("liked-1");
   });
 });
