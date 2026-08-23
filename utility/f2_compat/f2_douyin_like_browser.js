@@ -58,30 +58,19 @@ async function fetch_in_page(page, sec_user_id, max_cursor) {
 
 async function collect_like_pages(options) {
   const cookie_header = await resolve_cookie_header(options);
-  const session = await chrome_client.open_session({ cookie_header });
-  const page = session.page;
-  const intercepted = [];
-  page.on("response", async (response) => {
-    if (!response.url().includes("/aweme/v1/web/aweme/favorite/")) return;
-    try {
-      const json = await response.json();
-      intercepted.push({
-        http: response.status(),
-        status_code: json.status_code,
-        has_more: json.has_more,
-        max_cursor: json.max_cursor,
-        aweme_list: Array.isArray(json.aweme_list) ? json.aweme_list : [],
-      });
-    } catch (_error) {
-      // ignore non-json favorite responses
-    }
+  const session = await chrome_client.open_session({
+    cookie_header,
+    chrome_profile: options.chrome_profile,
   });
+  const page = session.page;
+  const intercepted = chrome_client.attach_list_intercept(page, "like");
 
   try {
     await chrome_client.prepare_list_page(page, {
       mode: "like",
       url: options.url,
       sec_user_id: options.sec_user_id,
+      intercepted_pages: intercepted,
     });
     const pages = await chrome_client.collect_list({
       page,

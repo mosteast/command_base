@@ -151,10 +151,13 @@ describe("xsave_douyin CLI", () => {
       },
       {
         resolve_cookie: async () => "dummy",
-        open_session: async () => ({
-          page: {},
-          close: async () => {},
-        }),
+        open_session: async (session_options) => {
+          expect(session_options.chrome_profile).toBe("Profile 9");
+          return {
+            page: {},
+            close: async () => {},
+          };
+        },
         attach_list_intercept: (_page, mode) => {
           order.push(`attach:${mode}`);
           return [

@@ -1,3 +1,6 @@
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 const {
@@ -6,6 +9,8 @@ const {
   fetch_comments,
   fetch_danmaku,
   list_endpoint,
+  open_session,
+  prepare_list_page,
 } = require("../lib/xsave_douyin/chrome_client");
 
 function create_fake_page(handler) {
@@ -89,6 +94,71 @@ describe("xsave_douyin chrome_client", () => {
     expect(danmaku).toEqual([]);
   });
 
+  it("waits for in-flight intercept json before falling back to fetch", async () => {
+    let resolve_json;
+    const json_promise = new Promise((resolve) => {
+      resolve_json = resolve;
+    });
+    const evaluate = vi.fn(async () => ({
+      http: 403,
+      status_code: -1,
+      has_more: 0,
+      aweme_list: [],
+    }));
+    let handler;
+    const intercepted = attach_list_intercept(
+      {
+        on: (event, fn) => {
+          if (event === "response") handler = fn;
+        },
+      },
+      "like",
+    );
+    handler({
+      url: () => "https://www.douyin.com/aweme/v1/web/aweme/favorite/?x=1",
+      status: () => 200,
+      json: () => json_promise,
+    });
+    const collect_promise = collect_list({
+      page: { evaluate },
+      mode: "like",
+      intercepted_pages: intercepted,
+    });
+    await Promise.resolve();
+    expect(evaluate).not.toHaveBeenCalled();
+    resolve_json({
+      status_code: 0,
+      has_more: 0,
+      max_cursor: 1,
+      aweme_list: [{ aweme_id: "liked-1" }],
+    });
+    const pages = await collect_promise;
+    expect(pages[0].aweme_list[0].aweme_id).toBe("liked-1");
+    expect(evaluate).not.toHaveBeenCalled();
+  });
+
+  it("keeps intercepted pages when status_code is omitted", async () => {
+    const evaluate = vi.fn(async () => ({
+      http: 403,
+      status_code: -1,
+      aweme_list: [],
+    }));
+    const pages = await collect_list({
+      page: { evaluate },
+      mode: "like",
+      intercepted_pages: [
+        {
+          http: 200,
+          has_more: 0,
+          max_cursor: 1,
+          aweme_list: [{ aweme_id: "liked-1" }],
+        },
+      ],
+    });
+    expect(pages[0].aweme_list[0].aweme_id).toBe("liked-1");
+    expect(evaluate).not.toHaveBeenCalled();
+  });
+
   it("uses intercepted favorite pages instead of a blocked in-page fetch", async () => {
     const evaluate = vi.fn(async () => ({
       http: 403,
@@ -161,7 +231,7 @@ describe("xsave_douyin chrome_client", () => {
       },
       "like",
     );
-    await handler({
+    handler({
       url: () => "https://www.douyin.com/aweme/v1/web/aweme/favorite/?x=1",
       status: () => 200,
       json: async () => ({
@@ -171,6 +241,94 @@ describe("xsave_douyin chrome_client", () => {
         aweme_list: [{ aweme_id: "liked-1" }],
       }),
     });
+    await intercepted.wait_pending();
     expect(intercepted[0].aweme_list[0].aweme_id).toBe("liked-1");
+  });
+
+  it("opens a copied Chrome profile instead of a cookie-only context", async () => {
+    const temp_root = await fs.mkdtemp(path.join(os.tmpdir(), "xsave-profile-"));
+    const source_dir = path.join(temp_root, "Profile 9");
+    await fs.mkdir(source_dir, { recursive: true });
+    await fs.writeFile(path.join(source_dir, "Preferences"), "{}", "utf8");
+    const launched = [];
+    const page = { url: () => "about:blank" };
+    try {
+      const session = await open_session({
+        cookie_header: "sessionid=dummy",
+        chrome_profile: "Profile 9",
+        profile_source_dir: source_dir,
+        playwright: {
+          chromium: {
+            launchPersistentContext: async (user_data, options) => {
+              launched.push({
+                user_data,
+                channel: options.channel,
+                headless: options.headless,
+              });
+              return {
+                pages: () => [page],
+                newPage: async () => page,
+                close: async () => {},
+              };
+            },
+            launch: async () => {
+              throw new Error("should not use cookie-only launch");
+            },
+          },
+        },
+      });
+      expect(launched).toHaveLength(1);
+      expect(launched[0].channel).toBe("chrome");
+      expect(launched[0].headless).toBe(false);
+      expect(launched[0].user_data).not.toBe(source_dir);
+      await session.close();
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
+  });
+
+  it("opens the like tab with showTab and a force click", async () => {
+    const gotos = [];
+    const clicks = [];
+    const waits = [];
+    const page = {
+      url: () =>
+        "https://www.douyin.com/user/MS4wLjABAAAA/example",
+      goto: async (url) => {
+        gotos.push(url);
+      },
+      waitForTimeout: async () => {},
+      waitForResponse: async () => {
+        waits.push(gotos.length);
+      },
+      keyboard: { press: async () => {} },
+      evaluate: async () => {},
+      locator: (selector) => {
+        clicks.push(selector);
+        return {
+          first: () => ({
+            click: async (options) => {
+              clicks.push(options);
+            },
+            count: async () => 1,
+          }),
+          count: async () => 1,
+          filter: () => ({
+            first: () => ({
+              click: async () => {},
+              count: async () => 0,
+            }),
+          }),
+        };
+      },
+    };
+    await prepare_list_page(page, {
+      mode: "like",
+      url: "https://v.douyin.com/kIg44MNOKz8/",
+    });
+    expect(gotos.some((url) => String(url).includes("showTab=like"))).toBe(true);
+    expect(clicks).toContain("#semiTablike, [data-tabkey='semiTablike']");
+    expect(clicks.some((item) => item && item.force === true)).toBe(true);
+    expect(waits[0]).toBeLessThan(gotos.length);
   });
 });
