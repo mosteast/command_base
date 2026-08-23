@@ -135,6 +135,9 @@ describe("gather_doctor adapter probe classification", () => {
     vi.spyOn(cookie_export, "run_command").mockImplementation(
       async (command, args) => {
         expect(command).toBe("gallery-dl");
+        expect(args).toEqual(
+          expect.arrayContaining(["--simulate", "--no-input", "--range", "1", "--post-range", "1"]),
+        );
         expect(args.at(-1)).toBe("https://x.com/X");
         return {
           ok: false,

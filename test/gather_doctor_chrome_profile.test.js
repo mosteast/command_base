@@ -12,6 +12,7 @@ const {
 } = require("../lib/gather_doctor/chrome_profile");
 const {
   parse_netscape_cookie_header,
+  run_command,
 } = require("../lib/gather_doctor/cookie_export");
 
 async function create_temp_dir() {
@@ -99,5 +100,17 @@ describe("gather_doctor cookie_export parsing", () => {
     expect(header).toContain("SID=secret-a");
     expect(header).toContain("auth_token=secret-c");
     expect(header).not.toContain("OTHER=");
+  });
+
+  it("times out a stuck child process", async () => {
+    const started_at = Date.now();
+    const result = await run_command(
+      process.execPath,
+      ["-e", "setTimeout(() => {}, 30000)"],
+      { timeout_ms: 200 },
+    );
+    expect(Date.now() - started_at).toBeLessThan(5000);
+    expect(result.ok).toBe(false);
+    expect(result.timed_out).toBe(true);
   });
 });
