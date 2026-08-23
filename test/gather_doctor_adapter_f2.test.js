@@ -126,3 +126,125 @@ describe("gather_doctor f2 adapters", () => {
     expect(resolved).toBe(config_path);
   });
 });
+
+describe("f2 douyin API probe", () => {
+  async function mock_healthy_douyin_runtime(config_path) {
+    vi.spyOn(brew_install, "which_command").mockResolvedValue("/tmp/f2_compat");
+    vi.spyOn(brew_install, "check_f2").mockResolvedValue({
+      ok: true,
+      present: true,
+      path: "/tmp/f2",
+      message: "f2 present",
+    });
+    return {
+      offline: false,
+      f2_options: { f2_config_path: config_path },
+      chrome_scans: [
+        {
+          ok: true,
+          directory: "Default",
+          name: "Default",
+          active_time: 1,
+          hosts: ["douyin.com"],
+        },
+      ],
+    };
+  }
+
+  it("classifies like HTTP 403 as fail", async () => {
+    const { classify_douyin_api_probe } = require("../lib/gather_doctor/f2_douyin_probe");
+    const classified = classify_douyin_api_probe({
+      stdout: JSON.stringify({
+        ok: true,
+        post: { status: "empty", count: 0 },
+        like: { status: "http_error", http_status: 403, count: 0 },
+      }),
+    });
+    expect(classified.status).toBe("fail");
+    expect(classified.detail).toMatch(/403/);
+    expect(classified.next_command).toBe("gather doctor fix --platform douyin");
+    expect(classified.detail).not.toMatch(/cookie|msToken|a_bogus/i);
+  });
+
+  it("classifies fetched items as ok", async () => {
+    const { classify_douyin_api_probe } = require("../lib/gather_doctor/f2_douyin_probe");
+    const classified = classify_douyin_api_probe({
+      stdout: JSON.stringify({
+        ok: true,
+        post: { status: "ok", count: 1 },
+        like: { status: "ok", count: 1 },
+      }),
+    });
+    expect(classified.status).toBe("ok");
+  });
+
+  it("classifies empty lists as warn", async () => {
+    const { classify_douyin_api_probe } = require("../lib/gather_doctor/f2_douyin_probe");
+    const classified = classify_douyin_api_probe({
+      stdout: JSON.stringify({
+        ok: true,
+        post: { status: "empty", count: 0 },
+        like: { status: "empty", count: 0 },
+      }),
+    });
+    expect(classified.status).toBe("warn");
+    expect(classified.detail).toMatch(/empty|0 item/i);
+  });
+
+  it("uses a user URL and probe script instead of f2 -h", async () => {
+    const temp_root = await create_temp_dir();
+    const config_path = path.join(temp_root, "app.yaml");
+    await fs.writeFile(config_path, "douyin:\n  cookie: 'ttwid=dummy'\n", "utf8");
+    const context = await mock_healthy_douyin_runtime(config_path);
+    const spy = vi.spyOn(cookie_export, "run_command").mockResolvedValue({
+      stdout: JSON.stringify({
+        ok: true,
+        post: { status: "empty", count: 0 },
+        like: { status: "http_error", http_status: 403, count: 0 },
+      }),
+      stderr: "",
+    });
+    try {
+      const result = await douyin.check({
+        ...context,
+        probe_urls: {
+          douyin: "https://v.douyin.com/kIg44MNOKz8/",
+        },
+      });
+      expect(spy).toHaveBeenCalled();
+      const argv = spy.mock.calls[0][1];
+      expect(argv.join(" ")).toMatch(/f2_douyin_probe\.py/);
+      expect(argv.join(" ")).toMatch(/v\.douyin\.com\/kIg44MNOKz8/);
+      expect(argv).not.toContain("-h");
+      expect(result.status).toBe("fail");
+      expect(result.next_command).toBe("gather doctor fix --platform douyin");
+      expect(JSON.stringify(result)).not.toMatch(/msToken|a_bogus|sessionid=/i);
+    } finally {
+      spy.mockRestore();
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("warns when no Douyin user URL is available", async () => {
+    const temp_root = await create_temp_dir();
+    const config_path = path.join(temp_root, "app.yaml");
+    await fs.writeFile(config_path, "douyin:\n  cookie: 'ttwid=dummy'\n", "utf8");
+    const context = await mock_healthy_douyin_runtime(config_path);
+    const spy = vi.spyOn(cookie_export, "run_command").mockResolvedValue({
+      stdout: "",
+      stderr: "",
+    });
+    try {
+      const result = await douyin.check({
+        ...context,
+        probe_urls: { douyin: "https://www.douyin.com/" },
+      });
+      expect(spy).not.toHaveBeenCalled();
+      expect(result.status).toBe("warn");
+      expect(result.detail).toMatch(/user URL|probe URL/i);
+    } finally {
+      spy.mockRestore();
+      vi.restoreAllMocks();
+    }
+  });
+});
