@@ -221,6 +221,79 @@ describe("xsave_douyin chrome_client", () => {
     expect(scrolled).toBe(1);
   });
 
+  it("waits after scroll for a delayed intercepted like page", async () => {
+    const intercepted = Object.assign(
+      [
+        {
+          http: 200,
+          status_code: 0,
+          has_more: 1,
+          max_cursor: 10,
+          aweme_list: [{ aweme_id: "a" }],
+        },
+      ],
+      { wait_pending: async () => {} },
+    );
+    const evaluate = vi.fn(async () => {
+      throw new Error("should not fetch like pages in Chrome intercept mode");
+    });
+    let scrolled = 0;
+    const pages = await collect_list({
+      page: { evaluate },
+      mode: "like",
+      intercepted_pages: intercepted,
+      scroll_for_more: async () => {
+        scrolled += 1;
+        setTimeout(() => {
+          intercepted.push({
+            http: 200,
+            status_code: 0,
+            has_more: 0,
+            max_cursor: 20,
+            aweme_list: [{ aweme_id: "b" }],
+          });
+        }, 40);
+      },
+    });
+    expect(pages.map((page) => page.aweme_list[0].aweme_id)).toEqual(["a", "b"]);
+    expect(scrolled).toBe(1);
+    expect(evaluate).not.toHaveBeenCalled();
+  });
+
+  it("keeps scrolling a full like page when has_more is omitted", async () => {
+    const intercepted = Object.assign(
+      [
+        {
+          http: 200,
+          status_code: 0,
+          max_cursor: 10,
+          aweme_list: Array.from({ length: 20 }, (_, index) => ({
+            aweme_id: `a${index}`,
+          })),
+        },
+      ],
+      { wait_pending: async () => {} },
+    );
+    let scrolled = 0;
+    const pages = await collect_list({
+      page: { evaluate: async () => ({ http: 403, aweme_list: [] }) },
+      mode: "like",
+      intercepted_pages: intercepted,
+      scroll_for_more: async () => {
+        scrolled += 1;
+        intercepted.push({
+          http: 200,
+          status_code: 0,
+          has_more: 0,
+          max_cursor: 20,
+          aweme_list: [{ aweme_id: "b" }],
+        });
+      },
+    });
+    expect(pages.flatMap((page) => page.aweme_list).at(-1).aweme_id).toBe("b");
+    expect(scrolled).toBe(1);
+  });
+
   it("records Chrome favorite responses on the page", async () => {
     let handler;
     const intercepted = attach_list_intercept(
@@ -292,6 +365,7 @@ describe("xsave_douyin chrome_client", () => {
     const clicks = [];
     const waits = [];
     const page = {
+      title: async () => "甘的抖音 - 抖音",
       url: () =>
         "https://www.douyin.com/user/MS4wLjABAAAA/example",
       goto: async (url) => {
@@ -330,5 +404,71 @@ describe("xsave_douyin chrome_client", () => {
     expect(clicks).toContain("#semiTablike, [data-tabkey='semiTablike']");
     expect(clicks.some((item) => item && item.force === true)).toBe(true);
     expect(waits[0]).toBeLessThan(gotos.length);
+  });
+
+  it("waits for a captcha page to clear before clicking like", async () => {
+    const titles = ["验证码中间页", "验证码中间页", "甘的抖音 - 抖音"];
+    const clicks = [];
+    const page = {
+      title: async () => titles.shift() || "甘的抖音 - 抖音",
+      url: () => "https://www.douyin.com/user/MS4wLjABAAAA/example",
+      goto: async () => {},
+      waitForTimeout: async () => {},
+      waitForResponse: async () => {},
+      keyboard: { press: async () => {} },
+      evaluate: async () => {},
+      locator: () => ({
+        first: () => ({
+          click: async (options) => {
+            clicks.push(options);
+          },
+          count: async () => 1,
+        }),
+        count: async () => 1,
+        filter: () => ({
+          first: () => ({
+            click: async () => {},
+            count: async () => 0,
+          }),
+        }),
+      }),
+    };
+    await prepare_list_page(page, {
+      mode: "like",
+      url: "https://www.douyin.com/user/MS4wLjABAAAA/example",
+      captcha_timeout_ms: 5000,
+    });
+    expect(titles).toHaveLength(0);
+    expect(clicks.some((item) => item && item.force === true)).toBe(true);
+  });
+
+  it("attaches to an existing Chrome debug port when available", async () => {
+    const page = { url: () => "about:blank" };
+    let used_cdp = false;
+    const session = await open_session({
+      chrome_profile: "Profile 9",
+      playwright: {
+        chromium: {
+          connectOverCDP: async () => {
+            used_cdp = true;
+            return {
+              contexts: () => [
+                {
+                  pages: () => [],
+                  newPage: async () => page,
+                },
+              ],
+              close: async () => {},
+            };
+          },
+          launchPersistentContext: async () => {
+            throw new Error("should not copy the profile when CDP works");
+          },
+        },
+      },
+    });
+    expect(used_cdp).toBe(true);
+    expect(session.page).toBe(page);
+    await session.close();
   });
 });
