@@ -6,11 +6,13 @@ import { describe, expect, it, vi } from "vitest";
 const {
   attach_list_intercept,
   collect_list,
+  default_persistent_user_data_dir,
   fetch_comments,
   fetch_danmaku,
   list_endpoint,
   open_session,
   prepare_list_page,
+  prepare_persistent_user_data,
 } = require("../lib/xsave_douyin/chrome_client");
 
 function create_fake_page(handler) {
@@ -474,5 +476,105 @@ describe("xsave_douyin chrome_client", () => {
     expect(used_cdp).toBe(true);
     expect(session.page).toBe(page);
     await session.close();
+  });
+});
+
+describe("xsave_douyin persistent user-data", () => {
+  it("resolves the Application Support chrome dir from homedir", () => {
+    expect(default_persistent_user_data_dir()).toBe(
+      path.join(
+        os.homedir(),
+        "Library",
+        "Application Support",
+        "command_base",
+        "xsave_douyin",
+        "chrome",
+      ),
+    );
+  });
+
+  it("seeds a Chrome profile into Default and skips cache and locks", async () => {
+    const temp_root = await fs.mkdtemp(path.join(os.tmpdir(), "xsave-persist-"));
+    const source_dir = path.join(temp_root, "Profile 9");
+    const user_data = path.join(temp_root, "chrome");
+    try {
+      await fs.mkdir(path.join(source_dir, "Cache"), { recursive: true });
+      await fs.writeFile(path.join(source_dir, "Preferences"), "{}", "utf8");
+      await fs.writeFile(path.join(source_dir, "Cache", "blob"), "c", "utf8");
+      await fs.writeFile(path.join(source_dir, "SingletonLock"), "lock", "utf8");
+      const result = prepare_persistent_user_data({
+        source_dir,
+        persistent_user_data_dir: user_data,
+      });
+      expect(result).toBe(user_data);
+      expect(
+        await fs.readFile(path.join(user_data, "Default", "Preferences"), "utf8"),
+      ).toBe("{}");
+      await expect(fs.stat(path.join(user_data, "Preferences"))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+      await expect(
+        fs.stat(path.join(user_data, "Default", "Cache")),
+      ).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(
+        fs.stat(path.join(user_data, "Default", "SingletonLock")),
+      ).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not overwrite an existing Default profile", async () => {
+    const temp_root = await fs.mkdtemp(path.join(os.tmpdir(), "xsave-persist-"));
+    const source_dir = path.join(temp_root, "Profile 9");
+    const user_data = path.join(temp_root, "chrome");
+    try {
+      await fs.mkdir(source_dir, { recursive: true });
+      await fs.writeFile(path.join(source_dir, "Preferences"), "new", "utf8");
+      await fs.mkdir(path.join(user_data, "Default"), { recursive: true });
+      await fs.writeFile(path.join(user_data, "Default", "sentinel"), "keep", "utf8");
+      await fs.writeFile(path.join(user_data, "Default", "Preferences"), "old", "utf8");
+      prepare_persistent_user_data({
+        source_dir,
+        persistent_user_data_dir: user_data,
+      });
+      expect(
+        await fs.readFile(path.join(user_data, "Default", "sentinel"), "utf8"),
+      ).toBe("keep");
+      expect(
+        await fs.readFile(path.join(user_data, "Default", "Preferences"), "utf8"),
+      ).toBe("old");
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
+  });
+
+  it("removes leftover Singleton locks at the user-data root", async () => {
+    const temp_root = await fs.mkdtemp(path.join(os.tmpdir(), "xsave-persist-"));
+    const source_dir = path.join(temp_root, "Profile 9");
+    const user_data = path.join(temp_root, "chrome");
+    try {
+      await fs.mkdir(source_dir, { recursive: true });
+      await fs.writeFile(path.join(source_dir, "Preferences"), "{}", "utf8");
+      await fs.mkdir(path.join(user_data, "Default"), { recursive: true });
+      await fs.writeFile(path.join(user_data, "SingletonLock"), "old", "utf8");
+      await fs.writeFile(path.join(user_data, "SingletonCookie"), "old", "utf8");
+      await fs.writeFile(path.join(user_data, "SingletonSocket"), "old", "utf8");
+      prepare_persistent_user_data({
+        source_dir,
+        persistent_user_data_dir: user_data,
+      });
+      await expect(
+        fs.stat(path.join(user_data, "SingletonLock")),
+      ).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(
+        fs.stat(path.join(user_data, "SingletonCookie")),
+      ).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(
+        fs.stat(path.join(user_data, "SingletonSocket")),
+      ).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
   });
 });
