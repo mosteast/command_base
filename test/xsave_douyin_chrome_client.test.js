@@ -320,9 +320,10 @@ describe("xsave_douyin chrome_client", () => {
     expect(intercepted[0].aweme_list[0].aweme_id).toBe("liked-1");
   });
 
-  it("opens a copied Chrome profile instead of a cookie-only context", async () => {
+  it("seeds Default in a durable user-data dir and keeps it after close", async () => {
     const temp_root = await fs.mkdtemp(path.join(os.tmpdir(), "xsave-profile-"));
     const source_dir = path.join(temp_root, "Profile 9");
+    const user_data = path.join(temp_root, "chrome");
     await fs.mkdir(source_dir, { recursive: true });
     await fs.writeFile(path.join(source_dir, "Preferences"), "{}", "utf8");
     const launched = [];
@@ -332,11 +333,12 @@ describe("xsave_douyin chrome_client", () => {
         cookie_header: "sessionid=dummy",
         chrome_profile: "Profile 9",
         profile_source_dir: source_dir,
+        persistent_user_data_dir: user_data,
         playwright: {
           chromium: {
-            launchPersistentContext: async (user_data, options) => {
+            launchPersistentContext: async (launched_user_data, options) => {
               launched.push({
-                user_data,
+                user_data: launched_user_data,
                 channel: options.channel,
                 headless: options.headless,
                 chromiumSandbox: options.chromiumSandbox,
@@ -357,10 +359,69 @@ describe("xsave_douyin chrome_client", () => {
       expect(launched).toHaveLength(1);
       expect(launched[0].channel).toBe("chrome");
       expect(launched[0].headless).toBe(false);
-      expect(launched[0].user_data).not.toBe(source_dir);
+      expect(launched[0].user_data).toBe(user_data);
       expect(launched[0].chromiumSandbox).toBe(true);
       expect(launched[0].args || []).not.toContain("--no-sandbox");
+      expect(
+        await fs.readFile(path.join(user_data, "Default", "Preferences"), "utf8"),
+      ).toBe("{}");
       await session.close();
+      expect(
+        await fs.readFile(path.join(user_data, "Default", "Preferences"), "utf8"),
+      ).toBe("{}");
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not create persistent user-data when the source profile is missing", async () => {
+    const temp_root = await fs.mkdtemp(path.join(os.tmpdir(), "xsave-profile-"));
+    const user_data = path.join(temp_root, "chrome");
+    try {
+      await expect(
+        open_session({
+          chrome_profile: "Profile 9",
+          profile_source_dir: path.join(temp_root, "missing"),
+          persistent_user_data_dir: user_data,
+          playwright: {
+            chromium: {
+              launchPersistentContext: async () => {
+                throw new Error("should not launch");
+              },
+            },
+          },
+        }),
+      ).rejects.toThrow("chrome profile directory missing");
+      await expect(fs.stat(user_data)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the persistent user-data dir when Chrome fails to launch", async () => {
+    const temp_root = await fs.mkdtemp(path.join(os.tmpdir(), "xsave-profile-"));
+    const source_dir = path.join(temp_root, "Profile 9");
+    const user_data = path.join(temp_root, "chrome");
+    await fs.mkdir(source_dir, { recursive: true });
+    await fs.writeFile(path.join(source_dir, "Preferences"), "{}", "utf8");
+    try {
+      await expect(
+        open_session({
+          chrome_profile: "Profile 9",
+          profile_source_dir: source_dir,
+          persistent_user_data_dir: user_data,
+          playwright: {
+            chromium: {
+              launchPersistentContext: async () => {
+                throw new Error("chrome explode");
+              },
+            },
+          },
+        }),
+      ).rejects.toThrow("chrome explode");
+      expect(
+        await fs.readFile(path.join(user_data, "Default", "Preferences"), "utf8"),
+      ).toBe("{}");
     } finally {
       await fs.rm(temp_root, { recursive: true, force: true });
     }
@@ -449,33 +510,47 @@ describe("xsave_douyin chrome_client", () => {
   });
 
   it("attaches to an existing Chrome debug port when available", async () => {
+    const temp_root = await fs.mkdtemp(path.join(os.tmpdir(), "xsave-cdp-"));
+    const source_dir = path.join(temp_root, "Profile 9");
+    const user_data = path.join(temp_root, "chrome");
+    await fs.mkdir(source_dir, { recursive: true });
+    await fs.writeFile(path.join(source_dir, "Preferences"), "{}", "utf8");
     const page = { url: () => "about:blank" };
     let used_cdp = false;
-    const session = await open_session({
-      chrome_profile: "Profile 9",
-      playwright: {
-        chromium: {
-          connectOverCDP: async () => {
-            used_cdp = true;
-            return {
-              contexts: () => [
-                {
-                  pages: () => [],
-                  newPage: async () => page,
-                },
-              ],
-              close: async () => {},
-            };
-          },
-          launchPersistentContext: async () => {
-            throw new Error("should not copy the profile when CDP works");
+    try {
+      const session = await open_session({
+        chrome_profile: "Profile 9",
+        profile_source_dir: source_dir,
+        persistent_user_data_dir: user_data,
+        playwright: {
+          chromium: {
+            connectOverCDP: async () => {
+              used_cdp = true;
+              return {
+                contexts: () => [
+                  {
+                    pages: () => [],
+                    newPage: async () => page,
+                  },
+                ],
+                close: async () => {},
+              };
+            },
+            launchPersistentContext: async () => {
+              throw new Error("should not copy the profile when CDP works");
+            },
           },
         },
-      },
-    });
-    expect(used_cdp).toBe(true);
-    expect(session.page).toBe(page);
-    await session.close();
+      });
+      expect(used_cdp).toBe(true);
+      expect(session.page).toBe(page);
+      await expect(
+        fs.stat(path.join(user_data, "Default")),
+      ).rejects.toMatchObject({ code: "ENOENT" });
+      await session.close();
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
   });
 });
 
