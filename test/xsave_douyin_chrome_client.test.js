@@ -362,6 +362,9 @@ describe("xsave_douyin chrome_client", () => {
       expect(launched[0].user_data).toBe(user_data);
       expect(launched[0].chromiumSandbox).toBe(true);
       expect(launched[0].args || []).not.toContain("--no-sandbox");
+      expect(launched[0].args || []).not.toContain(
+        "--disable-blink-features=AutomationControlled",
+      );
       expect(
         await fs.readFile(path.join(user_data, "Default", "Preferences"), "utf8"),
       ).toBe("{}");
