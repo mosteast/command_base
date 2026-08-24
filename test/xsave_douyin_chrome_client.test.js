@@ -337,6 +337,8 @@ describe("xsave_douyin chrome_client", () => {
                 user_data,
                 channel: options.channel,
                 headless: options.headless,
+                chromiumSandbox: options.chromiumSandbox,
+                args: options.args,
               });
               return {
                 pages: () => [page],
@@ -354,6 +356,8 @@ describe("xsave_douyin chrome_client", () => {
       expect(launched[0].channel).toBe("chrome");
       expect(launched[0].headless).toBe(false);
       expect(launched[0].user_data).not.toBe(source_dir);
+      expect(launched[0].chromiumSandbox).toBe(true);
+      expect(launched[0].args || []).not.toContain("--no-sandbox");
       await session.close();
     } finally {
       await fs.rm(temp_root, { recursive: true, force: true });
