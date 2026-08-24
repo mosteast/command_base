@@ -40,6 +40,7 @@ describe("xsave_douyin CLI", () => {
     expect(result.stdout).toMatch(/gather runtime/);
     expect(result.stdout).not.toMatch(/default: nori/);
     expect(result.stdout).toMatch(/export paths/);
+    expect(result.stdout).toMatch(/After each run, print counts/);
     expect(result.stdout).toMatch(/# Download liked videos/);
     expect(result.stdout).toMatch(/\$0 -M like -u /);
   });
