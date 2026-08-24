@@ -1,9 +1,13 @@
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 
-const { describe_export_layout, run_export } = require(
-  "../lib/xsave_douyin/run_export",
-);
+const {
+  default_output_dir,
+  describe_export_layout,
+  resolve_output_dir,
+  run_export,
+} = require("../lib/xsave_douyin/run_export");
+const { DEFAULT_F2_OUTPUT_DIR } = require("../lib/gather_doctor/constants");
 
 describe("xsave_douyin export layout", () => {
   it("lists output locations for media and sidecars", () => {
@@ -63,5 +67,23 @@ describe("xsave_douyin export layout", () => {
         ? text.length
         : text.indexOf("Resolving Douyin cookie"),
     );
+  });
+
+  it("defaults like output to the f2 douyin/like library", () => {
+    expect(default_output_dir("like")).toBe(
+      path.join(DEFAULT_F2_OUTPUT_DIR, "douyin", "like"),
+    );
+    expect(default_output_dir("post", "/tmp/f2")).toBe(
+      path.join("/tmp/f2", "douyin", "post"),
+    );
+  });
+
+  it("uses an explicit path and otherwise the f2 library", () => {
+    expect(resolve_output_dir({ path: "/tmp/dy-out", mode: "like" })).toBe(
+      path.resolve("/tmp/dy-out"),
+    );
+    expect(
+      resolve_output_dir({ mode: "like", path: "" }, { f2_output_dir: "/tmp/f2" }),
+    ).toBe(path.join("/tmp/f2", "douyin", "like"));
   });
 });

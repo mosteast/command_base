@@ -43,6 +43,7 @@ describe("xsave_douyin CLI", () => {
     expect(result.stdout).toMatch(/After each run, print counts/);
     expect(result.stdout).toMatch(/# Download liked videos/);
     expect(result.stdout).toMatch(/\$0 -M like -u /);
+    expect(result.stdout).toMatch(/douyin\/<mode>/);
   });
 
   it("prints only the version number", async () => {
@@ -219,6 +220,79 @@ describe("xsave_douyin CLI", () => {
       expect(seen).toEqual(["Profile 9"]);
     } finally {
       await fs.rm(temp_root, { recursive: true, force: true });
+    }
+  });
+
+  it("fills sidecars beside library media when path is omitted", async () => {
+    const f2_root = await fs.mkdtemp(path.join(os.tmpdir(), "xsave-f2-lib-"));
+    const folder = path.join(f2_root, "douyin", "like", "甘");
+    const media_name = `"uid","9990001112223334444","name","2026-01-01","desc"_video.mp4`;
+    const stem_path = path.join(folder, `"uid","9990001112223334444","name","2026-01-01","desc"`);
+    await fs.mkdir(folder, { recursive: true });
+    await fs.writeFile(`${stem_path}_video.mp4`, "video");
+    try {
+      const result = await run_export(
+        {
+          mode: "like",
+          url: "https://v.douyin.com/example/",
+          path: "",
+          dry_run: false,
+          max_comment: 1,
+          max_danmaku: 1,
+          chrome_profile: "nori",
+        },
+        {
+          f2_output_dir: f2_root,
+          resolve_cookie: async () => "dummy",
+          open_session: async () => ({ page: {}, close: async () => {} }),
+          attach_list_intercept: () => [],
+          prepare_list_page: async () => {},
+          collect_list: async () => [
+            {
+              aweme_list: [
+                {
+                  aweme_id: "9990001112223334444",
+                  desc: "desc",
+                  author: { nickname: "name", uid: "uid" },
+                  video: {
+                    play_addr: { url_list: ["https://example.com/a.mp4"] },
+                  },
+                  statistics: {
+                    digg_count: 9,
+                    comment_count: 2,
+                    collect_count: 1,
+                    share_count: 0,
+                  },
+                },
+              ],
+            },
+          ],
+          fetch_comments: async () => [
+            {
+              cid: "c1",
+              text: "hi",
+              user: { nickname: "u" },
+              create_time: 1,
+              digg_count: 0,
+            },
+          ],
+          fetch_danmaku: async () => [],
+          download_media: async () => {
+            throw new Error("should not download library media");
+          },
+          log: () => {},
+        },
+      );
+      expect(result.exit_code).toBe(0);
+      expect(result.stats.fill).toBe(1);
+      const meta = JSON.parse(await fs.readFile(`${stem_path}_meta.json`, "utf8"));
+      expect(meta.digg_count).toBe(9);
+      const comments = JSON.parse(
+        await fs.readFile(`${stem_path}_comments.json`, "utf8"),
+      );
+      expect(comments).toHaveLength(1);
+    } finally {
+      await fs.rm(f2_root, { recursive: true, force: true });
     }
   });
 
