@@ -185,6 +185,116 @@ describe("xsave_douyin chrome_client", () => {
     expect(evaluate).not.toHaveBeenCalled();
   });
 
+  it("stops paging when should_stop matches a downloaded item", async () => {
+    const pages_by_cursor = {
+      0: {
+        http: 200,
+        status_code: 0,
+        has_more: 1,
+        max_cursor: 10,
+        aweme_list: [{ aweme_id: "new-1" }, { aweme_id: "old-1" }],
+      },
+      10: {
+        http: 200,
+        status_code: 0,
+        has_more: 0,
+        max_cursor: 20,
+        aweme_list: [{ aweme_id: "older-1" }],
+      },
+    };
+    let fetched = 0;
+    const page = create_fake_page((arg) => {
+      fetched += 1;
+      return pages_by_cursor[arg.cursor];
+    });
+    const seen_stop_ids = [];
+    const pages = await collect_list({
+      page,
+      mode: "like",
+      sec_user_id: "sec",
+      should_stop: async (items) => {
+        const ids = (items || []).map((item) => String(item.aweme_id));
+        seen_stop_ids.push(...ids);
+        return ids.includes("old-1");
+      },
+    });
+    expect(pages.flatMap((item) => item.aweme_list).map((item) => item.aweme_id)).toEqual([
+      "new-1",
+      "old-1",
+    ]);
+    expect(fetched).toBe(1);
+    expect(seen_stop_ids).toEqual(["new-1", "old-1"]);
+  });
+
+  it("keeps paging when should_stop does not match", async () => {
+    const pages_by_cursor = {
+      0: {
+        http: 200,
+        status_code: 0,
+        has_more: 1,
+        max_cursor: 10,
+        aweme_list: [{ aweme_id: "a" }],
+      },
+      10: {
+        http: 200,
+        status_code: 0,
+        has_more: 0,
+        max_cursor: 20,
+        aweme_list: [{ aweme_id: "b" }],
+      },
+    };
+    const page = create_fake_page((arg) => pages_by_cursor[arg.cursor]);
+    const pages = await collect_list({
+      page,
+      mode: "collection",
+      sec_user_id: "sec",
+      should_stop: async () => false,
+    });
+    expect(pages.map((item) => item.aweme_list[0].aweme_id)).toEqual(["a", "b"]);
+  });
+
+  it("stops scrolling intercepted pages when should_stop matches", async () => {
+    const intercepted = [
+      {
+        http: 200,
+        status_code: 0,
+        has_more: 1,
+        max_cursor: 10,
+        aweme_list: [{ aweme_id: "a" }, { aweme_id: "old-1" }],
+      },
+    ];
+    let scrolled = 0;
+    const pages = await collect_list({
+      page: {
+        evaluate: async () => ({
+          http: 403,
+          status_code: -1,
+          has_more: 0,
+          aweme_list: [],
+        }),
+      },
+      mode: "post",
+      intercepted_pages: intercepted,
+      should_stop: async (items) =>
+        (items || []).some((item) => item.aweme_id === "old-1"),
+      scroll_for_more: async () => {
+        scrolled += 1;
+        intercepted.push({
+          http: 200,
+          status_code: 0,
+          has_more: 0,
+          max_cursor: 20,
+          aweme_list: [{ aweme_id: "b" }],
+        });
+      },
+    });
+    expect(pages.flatMap((item) => item.aweme_list).map((item) => item.aweme_id)).toEqual([
+      "a",
+      "old-1",
+    ]);
+    expect(scrolled).toBe(0);
+  });
+
   it("scrolls to load more intercepted like pages when fetch is blocked", async () => {
     const intercepted = [
       {

@@ -41,8 +41,12 @@ describe("xsave_douyin CLI", () => {
     expect(result.stdout).not.toMatch(/default: nori/);
     expect(result.stdout).toMatch(/export paths/);
     expect(result.stdout).toMatch(/After each run, print counts/);
+    expect(result.stdout).toMatch(/--check-all/);
+    expect(result.stdout).toMatch(/already downloaded/);
     expect(result.stdout).toMatch(/# Download liked videos/);
     expect(result.stdout).toMatch(/\$0 -M like -u /);
+    expect(result.stdout).toMatch(/# Scan the entire list/);
+    expect(result.stdout).toMatch(/\$0 --check-all -M like -u /);
     expect(result.stdout).toMatch(/douyin\/<mode>/);
   });
 
@@ -88,6 +92,19 @@ describe("xsave_douyin CLI", () => {
       "https://v.douyin.com/example/",
     ]);
     expect(options.chrome_profile).toBe("");
+    expect(options.check_all).toBe(false);
+  });
+
+  it("parses --check-all to scan the entire list", () => {
+    const options = parse_cli([
+      "--check-all",
+      "-M",
+      "post",
+      "-u",
+      "https://www.douyin.com/user/MS4wLjABAAAA",
+    ]);
+    expect(options.check_all).toBe(true);
+    expect(options.mode).toBe("post");
   });
 
   it("dry-run prints fill and skip without downloading", async () => {
