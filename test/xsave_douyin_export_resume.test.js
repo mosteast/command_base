@@ -75,6 +75,69 @@ describe("xsave_douyin export resume", () => {
     }
   });
 
+  it("keeps paging until a later page reaches the downloaded item", async () => {
+    const temp_root = await fs.mkdtemp(path.join(os.tmpdir(), "xsave-resume-page-"));
+    const media_name = `"uid","old-1","name","2026-01-01","desc"_video.mp4`;
+    await fs.writeFile(path.join(temp_root, media_name), "video");
+    const pages_by_cursor = {
+      0: {
+        http: 200,
+        status_code: 0,
+        has_more: 0,
+        max_cursor: 10,
+        aweme_list: [visible_item("new-1")],
+      },
+      10: {
+        http: 200,
+        status_code: 0,
+        has_more: 0,
+        max_cursor: 20,
+        aweme_list: [visible_item("new-2"), visible_item("old-1")],
+      },
+      20: {
+        http: 200,
+        status_code: 0,
+        has_more: 0,
+        max_cursor: 30,
+        aweme_list: [visible_item("older-1")],
+      },
+    };
+    let stdout = "";
+    try {
+      const result = await run_export(
+        {
+          mode: "post",
+          url: "https://www.douyin.com/user/MS4wLjABAAAA",
+          path: temp_root,
+          dry_run: true,
+          max_comment: 1,
+          max_danmaku: 1,
+          chrome_profile: "nori",
+        },
+        {
+          page: page_by_cursor(pages_by_cursor),
+          resolve_cookie: async () => "dummy",
+          collect_list,
+          attach_list_intercept: () => [],
+          prepare_list_page: async () => {},
+          download_media: vi.fn(),
+          log: (text) => {
+            stdout += `${text}\n`;
+          },
+        },
+      );
+      expect(result.exit_code).toBe(0);
+      expect(result.items.map((item) => item.aweme_id)).toEqual([
+        "new-1",
+        "new-2",
+        "old-1",
+      ]);
+      expect(stdout).toMatch(/Resume at downloaded item old-1/);
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
+  });
+
   it("keeps collecting the whole list when --check-all is set", async () => {
     const temp_root = await fs.mkdtemp(path.join(os.tmpdir(), "xsave-check-all-"));
     const media_name = `"uid","old-1","name","2026-01-01","desc"_video.mp4`;

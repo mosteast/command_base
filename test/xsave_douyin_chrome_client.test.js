@@ -226,6 +226,105 @@ describe("xsave_douyin chrome_client", () => {
     expect(seen_stop_ids).toEqual(["new-1", "old-1"]);
   });
 
+  it("keeps paging until should_stop finds the resume item", async () => {
+    const pages_by_cursor = {
+      0: {
+        http: 200,
+        status_code: 0,
+        has_more: 0,
+        max_cursor: 10,
+        aweme_list: [{ aweme_id: "new-1" }, { aweme_id: "new-2" }],
+      },
+      10: {
+        http: 200,
+        status_code: 0,
+        has_more: 0,
+        max_cursor: 20,
+        aweme_list: [{ aweme_id: "new-3" }],
+      },
+      20: {
+        http: 200,
+        status_code: 0,
+        has_more: 0,
+        max_cursor: 30,
+        aweme_list: [{ aweme_id: "old-1" }, { aweme_id: "older-1" }],
+      },
+    };
+    let fetched = 0;
+    const page = create_fake_page((arg) => {
+      fetched += 1;
+      return pages_by_cursor[arg.cursor];
+    });
+    const pages = await collect_list({
+      page,
+      mode: "like",
+      sec_user_id: "sec",
+      should_stop: async (items) =>
+        (items || []).some((item) => item.aweme_id === "old-1"),
+    });
+    expect(pages.flatMap((item) => item.aweme_list).map((item) => item.aweme_id)).toEqual([
+      "new-1",
+      "new-2",
+      "new-3",
+      "old-1",
+      "older-1",
+    ]);
+    expect(fetched).toBe(3);
+  });
+
+  it("keeps scrolling intercepted pages until should_stop finds the resume item", async () => {
+    const intercepted = [
+      {
+        http: 200,
+        status_code: 0,
+        has_more: 0,
+        max_cursor: 10,
+        aweme_list: [{ aweme_id: "new-1" }],
+      },
+    ];
+    let scrolled = 0;
+    const pages = await collect_list({
+      page: {
+        evaluate: async () => ({
+          http: 403,
+          status_code: -1,
+          has_more: 0,
+          aweme_list: [],
+        }),
+      },
+      mode: "like",
+      intercepted_pages: intercepted,
+      should_stop: async (items) =>
+        (items || []).some((item) => item.aweme_id === "old-1"),
+      scroll_for_more: async () => {
+        scrolled += 1;
+        if (scrolled === 1) {
+          intercepted.push({
+            http: 200,
+            status_code: 0,
+            has_more: 0,
+            max_cursor: 20,
+            aweme_list: [{ aweme_id: "new-2" }],
+          });
+          return;
+        }
+        intercepted.push({
+          http: 200,
+          status_code: 0,
+          has_more: 0,
+          max_cursor: 30,
+          aweme_list: [{ aweme_id: "old-1" }],
+        });
+      },
+    });
+    expect(pages.flatMap((item) => item.aweme_list).map((item) => item.aweme_id)).toEqual([
+      "new-1",
+      "new-2",
+      "old-1",
+    ]);
+    expect(scrolled).toBe(2);
+  });
+
   it("keeps paging when should_stop does not match", async () => {
     const pages_by_cursor = {
       0: {
