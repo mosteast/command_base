@@ -41,9 +41,9 @@ describe("xsave_douyin export stats", () => {
     try {
       const result = await run_export(
         {
-          mode: "like",
+          source: "like",
           url: "https://v.douyin.com/example/",
-          path: temp_root,
+          output: temp_root,
           dry_run: true,
           max_comment: 500,
           max_danmaku: 500,

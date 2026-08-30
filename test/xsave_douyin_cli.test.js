@@ -192,9 +192,9 @@ describe("xsave_douyin CLI", () => {
     try {
       const result = await run_export(
         {
-          mode: "like",
+          source: "like",
           url: "https://v.douyin.com/example/",
-          path: temp_root,
+          output: temp_root,
           dry_run: true,
           max_comment: 500,
           max_danmaku: 500,
@@ -237,9 +237,9 @@ describe("xsave_douyin CLI", () => {
     const order = [];
     const result = await run_export(
       {
-        mode: "like",
+        source: "like",
         url: "https://v.douyin.com/example/",
-        path: "/tmp",
+        output: "/tmp",
         dry_run: false,
         max_comment: 1,
         max_danmaku: 1,
@@ -294,9 +294,9 @@ describe("xsave_douyin CLI", () => {
     try {
       await run_export(
         {
-          mode: "like",
+          source: "like",
           url: "https://v.douyin.com/example/",
-          path: temp_root,
+          output: temp_root,
           dry_run: true,
           chrome_profile: "",
           runtime_path,
@@ -326,9 +326,9 @@ describe("xsave_douyin CLI", () => {
     try {
       const result = await run_export(
         {
-          mode: "like",
+          source: "like",
           url: "https://v.douyin.com/example/",
-          path: "",
+          output: "",
           dry_run: false,
           max_comment: 1,
           max_danmaku: 1,
@@ -393,10 +393,10 @@ describe("xsave_douyin CLI", () => {
     let stderr = "";
     const result = await run_export(
       {
-        mode: "like",
+        source: "like",
         url: "https://v.douyin.com/example/",
         chrome_profile: "nori",
-        path: "/tmp",
+        output: "/tmp",
       },
       {
         resolve_cookie: async () => "",

@@ -46,9 +46,9 @@ describe("xsave_douyin export resume", () => {
     try {
       const result = await run_export(
         {
-          mode: "like",
+          source: "like",
           url: "https://v.douyin.com/example/",
-          path: temp_root,
+          output: temp_root,
           dry_run: true,
           max_comment: 1,
           max_danmaku: 1,
@@ -106,9 +106,9 @@ describe("xsave_douyin export resume", () => {
     try {
       const result = await run_export(
         {
-          mode: "post",
+          source: "post",
           url: "https://www.douyin.com/user/MS4wLjABAAAA",
-          path: temp_root,
+          output: temp_root,
           dry_run: true,
           max_comment: 1,
           max_danmaku: 1,
@@ -161,11 +161,11 @@ describe("xsave_douyin export resume", () => {
     try {
       const result = await run_export(
         {
-          mode: "collection",
+          source: "collection",
           url: "https://www.douyin.com/user/MS4wLjABAAAA",
-          path: temp_root,
+          output: temp_root,
           dry_run: true,
-          check_all: true,
+          full_scan: true,
           max_comment: 1,
           max_danmaku: 1,
           chrome_profile: "nori",
@@ -192,13 +192,13 @@ describe("xsave_douyin export resume", () => {
     }
   });
 
-  it("does not stop list collect for mode one", async () => {
+  it("does not stop list collect for source video", async () => {
     const seen = [];
     const result = await run_export(
       {
-        mode: "one",
+        source: "video",
         url: "https://www.douyin.com/video/123",
-        path: "/tmp",
+        output: "/tmp",
         dry_run: true,
         max_comment: 1,
         max_danmaku: 1,
@@ -215,5 +215,27 @@ describe("xsave_douyin export resume", () => {
     );
     expect(result.exit_code).toBe(0);
     expect(seen[0]).toBeUndefined();
+  });
+
+  it("maps source video to chrome_client mode one", async () => {
+    const seen = [];
+    await run_export(
+      {
+        source: "video",
+        url: "https://www.douyin.com/video/123",
+        output: "/tmp",
+        dry_run: true,
+        chrome_profile: "nori",
+      },
+      {
+        resolve_cookie: async () => "dummy",
+        collect_list: async (opts) => {
+          seen.push(opts.mode);
+          return [];
+        },
+        log: () => {},
+      },
+    );
+    expect(seen).toEqual(["one"]);
   });
 });
