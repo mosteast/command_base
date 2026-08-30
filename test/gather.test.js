@@ -633,7 +633,7 @@ describe("gather CLI platform selection", () => {
       expect(result.exit_code).toBe(0);
       expect(extract_total_jobs(result.stdout)).toBe(1);
       expect(result.stdout).toContain(
-        "xsave_douyin -M post -u https://www.douyin.com/user/EXAMPLE_ID",
+        "xsave_douyin post https://www.douyin.com/user/EXAMPLE_ID",
       );
       expect(result.stdout).not.toContain("f2_compat dy");
       expect(result.stdout).not.toContain("https://www.youtube.com/@example");
@@ -790,7 +790,7 @@ describe("gather CLI platform selection", () => {
       expect(extract_total_jobs(result.stdout)).toBe(1);
       expect(extract_total_commands(result.stdout)).toBe(1);
       expect(result.stdout).toContain(
-        "xsave_douyin -M like -u https://v.douyin.com/EXAMPLE/",
+        "xsave_douyin like https://v.douyin.com/EXAMPLE/",
       );
       expect(result.stdout).not.toContain("f2_compat dy");
       expect(result.stdout).not.toContain(
@@ -828,7 +828,7 @@ describe("gather CLI platform selection", () => {
 
       expect(result.exit_code).toBe(0);
       expect(result.stdout).toContain(
-        "xsave_douyin -M like -u https://v.douyin.com/kIg44MNOKz8/",
+        "xsave_douyin like https://v.douyin.com/kIg44MNOKz8/",
       );
       expect(result.stdout).not.toMatch(/(^|\s)f2 dy -M like/);
       expect(result.stdout).not.toContain("f2_compat dy");
@@ -1269,7 +1269,7 @@ describe("gather CLI platform selection", () => {
 
       expect(result.exit_code).toBe(0);
       expect(result.stdout).toContain(
-        "xsave_douyin -M post -u https://www.douyin.com/user/EXAMPLE_ID",
+        "xsave_douyin post https://www.douyin.com/user/EXAMPLE_ID",
       );
       expect(result.stdout).toMatch(/--chrome-profile ["']?Profile 9["']?/);
       expect(result.stdout).not.toContain("--chrome-profile nori");

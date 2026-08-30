@@ -106,7 +106,7 @@ const PLATFORM_COMMANDS = {
   },
   douyin: {
     command: "xsave_douyin",
-    build_args: (url) => ["-M", "post", "-u", url],
+    build_args: (url) => ["post", url],
     label: "douyin",
   },
   x_f2: {
@@ -1269,11 +1269,10 @@ function deduplicate_source_items_by_url(
 }
 
 function rewrite_f2_command_text(command_text) {
-  const text = String(command_text || "").trim();
-  const douyin_match = text.match(/^(?:f2_compat|f2)\s+dy\b(.*)$/);
-  if (douyin_match) return `xsave_douyin${douyin_match[1]}`;
-  if (/^f2(\s|$)/.test(text)) return `f2_compat${text.slice(2)}`;
-  return text;
+  const {
+    rewrite_xsave_douyin_command_text,
+  } = require("../lib/xsave_douyin/rewrite_command");
+  return rewrite_xsave_douyin_command_text(command_text);
 }
 
 function infer_command_platform_keys(command_text) {
