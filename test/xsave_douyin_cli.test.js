@@ -44,7 +44,11 @@ describe("xsave_douyin CLI", () => {
     expect(result.stdout).toMatch(/--limit/);
     expect(result.stdout).toMatch(/--refresh/);
     expect(result.stdout).toMatch(/--cookie-file/);
+    expect(result.stdout).toMatch(/--signer/);
     expect(result.stdout).toMatch(/# Download liked videos/);
+    expect(result.stdout).toMatch(/# Download the logged-in account's likes/);
+    expect(result.stdout).toMatch(/\$0 like --signer/);
+    expect(result.stdout).toMatch(/\$0 collection --signer/);
     expect(result.stdout).toMatch(/\$0 like /);
     expect(result.stdout).toMatch(/\$0 post /);
     expect(result.stdout).toMatch(/\$0 --full-scan like /);
@@ -87,6 +91,38 @@ describe("xsave_douyin CLI", () => {
     expect(options.refresh).toBe(false);
     expect(options.cookie_file).toBe("");
     expect(options.chrome_profile).toBe("");
+    expect(options.signer).toBe(false);
+  });
+
+  it("parses like --signer and collection --signer without a url", () => {
+    const like = parse_cli(["like", "--signer"]);
+    expect(like.source).toBe("like");
+    expect(like.url).toBe("");
+    expect(like.signer).toBe(true);
+    const collection = parse_cli(["--signer", "collection"]);
+    expect(collection.source).toBe("collection");
+    expect(collection.url).toBe("");
+    expect(collection.signer).toBe(true);
+  });
+
+  it("rejects --signer with an extra url or on post/video", () => {
+    expect(() =>
+      parse_cli(["like", "--signer", "https://www.douyin.com/user/MS4wLjABAAAA"]),
+    ).toThrow(/Unexpected argument https:\/\/www.douyin.com\/user\/MS4wLjABAAAA/);
+    expect(() =>
+      parse_cli(["post", "--signer", "https://www.douyin.com/user/MS4wLjABAAAA"]),
+    ).toThrow(/source post does not accept --signer/);
+    expect(() =>
+      parse_cli(["video", "https://www.douyin.com/video/123", "--signer"]),
+    ).toThrow(/source video does not accept --signer/);
+    expect(() => parse_cli(["--signer", "https://www.douyin.com/video/123"])).toThrow(
+      /source video does not accept --signer/,
+    );
+  });
+
+  it("does not infer like from --signer alone", () => {
+    expect(() => parse_cli(["--signer"])).toThrow(/Missing URL/);
+    expect(() => parse_cli(["like"])).toThrow(/Missing URL/);
   });
 
   it("infers video from a /video/<id> url", () => {
