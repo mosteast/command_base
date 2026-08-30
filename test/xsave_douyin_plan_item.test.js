@@ -52,4 +52,31 @@ describe("xsave_douyin plan_item", () => {
       write_danmaku: true,
     });
   });
+
+  it("re-downloads existing media when refresh is set", () => {
+    const planned = plan_item({
+      item: visible_item,
+      media: { media_path: "/tmp/a.mp4", stem_path: "/tmp/a" },
+      sidecar_exists: { comments: true, danmaku: true },
+      refresh: true,
+    });
+    expect(planned).toEqual({
+      action: "download",
+      reason: "refresh",
+      download: true,
+      write_meta: true,
+      write_comments: true,
+      write_danmaku: true,
+    });
+  });
+
+  it("still skips invisible items when refresh is set", () => {
+    const planned = plan_item({
+      item: { aweme_id: "1", is_prohibited: true },
+      media: { media_path: "/tmp/a.mp4", stem_path: "/tmp/a" },
+      refresh: true,
+    });
+    expect(planned.action).toBe("skip");
+    expect(planned.download).toBe(false);
+  });
 });

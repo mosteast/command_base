@@ -410,4 +410,58 @@ describe("xsave_douyin CLI", () => {
       /gather doctor fix --platform douyin --chrome-profile nori/,
     );
   });
+
+  it("refresh re-downloads existing library media", async () => {
+    const temp_root = await fs.mkdtemp(path.join(os.tmpdir(), "xsave-refresh-"));
+    const media_name = `"uid","1","name","2026-01-01","desc"_video.mp4`;
+    await fs.writeFile(path.join(temp_root, media_name), "video");
+    const download_media = vi.fn(async ({ target_path }) => {
+      await fs.writeFile(target_path, "new");
+      return { ok: true };
+    });
+    try {
+      const result = await run_export(
+        {
+          source: "like",
+          url: "https://v.douyin.com/example/",
+          output: temp_root,
+          refresh: true,
+          max_comment: 0,
+          max_danmaku: 0,
+          chrome_profile: "nori",
+        },
+        {
+          resolve_cookie: async () => "dummy",
+          collect_list: async () => [
+            {
+              aweme_list: [
+                {
+                  aweme_id: "1",
+                  video: {
+                    play_addr: { url_list: ["https://example.com/a.mp4"] },
+                  },
+                },
+              ],
+            },
+          ],
+          download_media,
+          fetch_comments: async () => {
+            throw new Error("should not fetch comments when max_comment is 0");
+          },
+          fetch_danmaku: async () => {
+            throw new Error("should not fetch danmaku when max_danmaku is 0");
+          },
+          open_session: async () => ({ page: {}, close: async () => {} }),
+          attach_list_intercept: () => [],
+          prepare_list_page: async () => {},
+          log: () => {},
+        },
+      );
+      expect(result.exit_code).toBe(0);
+      expect(download_media).toHaveBeenCalled();
+      expect(result.stats.download).toBe(1);
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
+  });
 });
