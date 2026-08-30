@@ -8,6 +8,7 @@ const {
   host_matches_patterns,
   profiles_with_platform_hosts,
   pick_best_profile,
+  match_chrome_profile,
   read_cookie_hosts,
 } = require("../lib/gather_doctor/chrome_profile");
 const {
@@ -73,6 +74,21 @@ describe("gather_doctor chrome_profile", () => {
     expect(matches[0].directory).toBe("Profile 1");
     expect(JSON.stringify(matches)).not.toMatch(/SID=|auth_token=/i);
     expect(pick_best_profile(matches).directory).toBe("Profile 1");
+  });
+
+  it("matches a Chrome profile by directory, name, or directory/name", () => {
+    const matches = [
+      { directory: "Profile 9", name: "nori", active_time: 30 },
+      { directory: "Default", name: "Zheng", active_time: 20 },
+      { directory: "Profile 8", name: "dev", active_time: 10 },
+    ];
+    expect(match_chrome_profile(matches, "Zheng").directory).toBe("Default");
+    expect(match_chrome_profile(matches, "default").directory).toBe("Default");
+    expect(match_chrome_profile(matches, "Default/Zheng").directory).toBe(
+      "Default",
+    );
+    expect(match_chrome_profile(matches, "nori").directory).toBe("Profile 9");
+    expect(match_chrome_profile(matches, "missing")).toBeNull();
   });
 
   it("reports missing Cookies DB clearly", async () => {

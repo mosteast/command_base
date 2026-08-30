@@ -41,6 +41,7 @@ describe("gather_doctor CLI", () => {
     expect(strip_ansi(help.stdout)).toContain("Usage");
     expect(strip_ansi(help.stdout)).toContain("fix");
     expect(strip_ansi(help.stdout)).toContain("gather doctor");
+    expect(strip_ansi(help.stdout)).toContain("--chrome-profile Default");
 
     const version = await run_cli(["--version"]);
     expect(version.exit_code).toBe(0);
