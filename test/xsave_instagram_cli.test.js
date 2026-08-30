@@ -267,5 +267,32 @@ describe("xsave_instagram CLI", () => {
       await fs.rm(temp_root, { recursive: true, force: true });
     }
   });
+
+  it("skips logged-in profile assert when signer is set", async () => {
+    const { run_export } = require("../lib/xsave_instagram/run_export");
+    let asserted = false;
+    const result = await run_export(
+      {
+        source: "like",
+        url: "",
+        signer: true,
+        dry_run: true,
+        output: "/tmp/xsave-ig-signer",
+        max_comment: 0,
+        chrome_profile: "nori",
+      },
+      {
+        resolve_cookie: async () => "dummy",
+        collect_list: async () => [],
+        assert_logged_in_profile: async () => {
+          asserted = true;
+          throw new Error("should not assert when signer");
+        },
+        log: () => {},
+      },
+    );
+    expect(result.exit_code).toBe(0);
+    expect(asserted).toBe(false);
+  });
 });
 

@@ -7,8 +7,10 @@ const {
   default_persistent_user_data_dir,
   extract_profile_username,
   harvest_items_from_payload,
+  list_page_urls,
   normalize_media_node,
   normalize_username,
+  prepare_list_page,
 } = require("../lib/xsave_instagram/chrome_client");
 
 describe("xsave_instagram chrome_client", () => {
@@ -67,6 +69,30 @@ describe("xsave_instagram chrome_client", () => {
       url: "https://www.instagram.com/nori/",
       source: "collection",
     });
+  });
+
+  it("opens likes on your_activity/interactions/likes", () => {
+    expect(list_page_urls("like", "")).toEqual([
+      "https://www.instagram.com/your_activity/interactions/likes/",
+    ]);
+    expect(
+      list_page_urls("like", "https://www.instagram.com/example_user/"),
+    ).toEqual(["https://www.instagram.com/your_activity/interactions/likes/"]);
+  });
+
+  it("builds collection saved url from the session username", () => {
+    expect(list_page_urls("collection", "", "Nori")).toEqual([
+      "https://www.instagram.com/nori/saved/all-posts/",
+    ]);
+  });
+
+  it("fails collection --signer when the session username is empty", async () => {
+    await expect(
+      prepare_list_page(
+        { evaluate: async () => "", goto: async () => {} },
+        { source: "collection", url: "" },
+      ),
+    ).rejects.toThrow(/source collection requires a logged-in Instagram session/);
   });
 
   it("uses a dedicated persistent user-data dir", () => {
