@@ -23,6 +23,17 @@ describe("xsave_instagram rewrite_command", () => {
     ).toBe("instagram_likes_export my_account --content-type liked");
   });
 
+  it("keeps like --signer without inventing a url", () => {
+    expect(
+      rewrite_xsave_instagram_command_text("xsave_instagram like --signer"),
+    ).toBe("xsave_instagram like --signer");
+    expect(
+      rewrite_xsave_instagram_command_text(
+        "xsave_instagram collection --signer --dry-run",
+      ),
+    ).toBe("xsave_instagram collection --signer --dry-run");
+  });
+
   it("leaves douyin commands unchanged", () => {
     expect(
       rewrite_xsave_instagram_command_text(

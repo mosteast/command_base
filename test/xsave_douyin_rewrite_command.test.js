@@ -45,6 +45,17 @@ describe("xsave_douyin rewrite_command", () => {
     );
   });
 
+  it("keeps like --signer without inventing a url", () => {
+    expect(rewrite_xsave_douyin_command_text("xsave_douyin like --signer")).toBe(
+      "xsave_douyin like --signer",
+    );
+    expect(
+      rewrite_xsave_douyin_command_text(
+        "xsave_douyin collection --signer --dry-run",
+      ),
+    ).toBe("xsave_douyin collection --signer --dry-run");
+  });
+
   it("leaves non-douyin f2 commands on f2_compat", () => {
     expect(rewrite_xsave_douyin_command_text("f2 x -M like -u https://x.com/a")).toBe(
       "f2_compat x -M like -u https://x.com/a",
