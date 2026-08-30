@@ -41,7 +41,11 @@ describe("xsave_instagram CLI", () => {
     expect(result.stdout).toMatch(/--limit/);
     expect(result.stdout).toMatch(/--refresh/);
     expect(result.stdout).toMatch(/--cookie-file/);
+    expect(result.stdout).toMatch(/--signer/);
     expect(result.stdout).toMatch(/# Download liked posts/);
+    expect(result.stdout).toMatch(/# Download the logged-in account's likes/);
+    expect(result.stdout).toMatch(/\$0 like --signer/);
+    expect(result.stdout).toMatch(/\$0 collection --signer/);
     expect(result.stdout).toMatch(/\$0 like /);
     expect(result.stdout).toMatch(/\$0 post /);
     expect(result.stdout).toMatch(/\$0 --full-scan like /);
@@ -90,6 +94,38 @@ describe("xsave_instagram CLI", () => {
     expect(options.cookie_file).toBe("");
     expect(options.chrome_profile).toBe("");
     expect(options.max_danmaku).toBeUndefined();
+    expect(options.signer).toBe(false);
+  });
+
+  it("parses like --signer and collection --signer without a url", () => {
+    const like = parse_cli(["like", "--signer"]);
+    expect(like.source).toBe("like");
+    expect(like.url).toBe("");
+    expect(like.signer).toBe(true);
+    const collection = parse_cli(["--signer", "collection"]);
+    expect(collection.source).toBe("collection");
+    expect(collection.url).toBe("");
+    expect(collection.signer).toBe(true);
+  });
+
+  it("rejects --signer with an extra url or on post/video", () => {
+    expect(() =>
+      parse_cli(["like", "--signer", "https://www.instagram.com/example_user/"]),
+    ).toThrow(/Unexpected argument https:\/\/www.instagram.com\/example_user\//);
+    expect(() =>
+      parse_cli(["post", "--signer", "https://www.instagram.com/example_user/"]),
+    ).toThrow(/source post does not accept --signer/);
+    expect(() =>
+      parse_cli(["video", "https://www.instagram.com/p/AbCdEfGhIjK/", "--signer"]),
+    ).toThrow(/source video does not accept --signer/);
+    expect(() =>
+      parse_cli(["--signer", "https://www.instagram.com/p/AbCdEfGhIjK/"]),
+    ).toThrow(/source video does not accept --signer/);
+  });
+
+  it("does not infer like from --signer alone", () => {
+    expect(() => parse_cli(["--signer"])).toThrow(/Missing URL/);
+    expect(() => parse_cli(["like"])).toThrow(/Missing URL/);
   });
 
   it("infers video from a /p/ url and a /reel/ url", () => {
