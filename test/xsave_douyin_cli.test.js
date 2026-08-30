@@ -36,18 +36,24 @@ describe("xsave_douyin CLI", () => {
     expect(result.stdout).toMatch(/Usage/);
     expect(result.stdout).toMatch(/Description/);
     expect(result.stdout).toMatch(/Options/);
-    expect(result.stdout).toMatch(/like, post, one, collection/);
+    expect(result.stdout).toMatch(/like, post, collection, video/);
     expect(result.stdout).toMatch(/gather runtime/);
-    expect(result.stdout).not.toMatch(/default: nori/);
     expect(result.stdout).toMatch(/export paths/);
-    expect(result.stdout).toMatch(/After each run, print counts/);
-    expect(result.stdout).toMatch(/--check-all/);
-    expect(result.stdout).toMatch(/already downloaded/);
+    expect(result.stdout).toMatch(/--full-scan/);
+    expect(result.stdout).toMatch(/--output/);
+    expect(result.stdout).toMatch(/--limit/);
+    expect(result.stdout).toMatch(/--refresh/);
+    expect(result.stdout).toMatch(/--cookie-file/);
     expect(result.stdout).toMatch(/# Download liked videos/);
-    expect(result.stdout).toMatch(/\$0 -M like -u /);
-    expect(result.stdout).toMatch(/# Scan the entire list/);
-    expect(result.stdout).toMatch(/\$0 --check-all -M like -u /);
-    expect(result.stdout).toMatch(/douyin\/<mode>/);
+    expect(result.stdout).toMatch(/\$0 like /);
+    expect(result.stdout).toMatch(/\$0 post /);
+    expect(result.stdout).toMatch(/\$0 --full-scan like /);
+    expect(result.stdout).toMatch(/\$0 --dry-run collection /);
+    expect(result.stdout).not.toMatch(/-M/);
+    expect(result.stdout).not.toMatch(/-u,/);
+    expect(result.stdout).not.toMatch(/--check-all/);
+    expect(result.stdout).not.toMatch(/, one|mode: one|-M one/);
+    expect(result.stdout).not.toMatch(/COMMAND_BASE_F2_LIKE_LIMIT/);
   });
 
   it("prints only the version number", async () => {
@@ -62,49 +68,119 @@ describe("xsave_douyin CLI", () => {
     expect(`${result.stdout}\n${result.stderr}`).toMatch(/Unknown option/);
   });
 
-  it("requires mode and url", async () => {
-    const result = await run_cli(["--dry-run"]);
-    expect(result.exit_code).not.toBe(0);
-    expect(`${result.stdout}\n${result.stderr}`).toMatch(/-M|--mode|-u|--url/);
-  });
-
-  it("parses max-comment and max-danmaku as numbers", () => {
+  it("parses source and url positionals", () => {
     const options = parse_cli([
-      "-M",
       "like",
-      "-u",
       "https://v.douyin.com/example/",
       "--max-comment",
       "12",
       "--max-danmaku",
       "34",
     ]);
+    expect(options.source).toBe("like");
+    expect(options.url).toBe("https://v.douyin.com/example/");
     expect(options.max_comment).toBe(12);
     expect(options.max_danmaku).toBe(34);
+    expect(options.output).toBe("");
+    expect(options.full_scan).toBe(false);
+    expect(options.limit).toBe(0);
+    expect(options.refresh).toBe(false);
+    expect(options.cookie_file).toBe("");
     expect(options.chrome_profile).toBe("");
   });
 
-  it("leaves chrome-profile empty so gather runtime is used", () => {
-    const options = parse_cli([
-      "-M",
-      "like",
-      "-u",
-      "https://v.douyin.com/example/",
-    ]);
-    expect(options.chrome_profile).toBe("");
-    expect(options.check_all).toBe(false);
+  it("infers video from a /video/<id> url", () => {
+    const options = parse_cli(["https://www.douyin.com/video/123"]);
+    expect(options.source).toBe("video");
+    expect(options.url).toBe("https://www.douyin.com/video/123");
   });
 
-  it("parses --check-all to scan the entire list", () => {
+  it("accepts explicit video with a short url", () => {
+    const options = parse_cli(["video", "https://v.douyin.com/AbCdEf/"]);
+    expect(options.source).toBe("video");
+    expect(options.url).toBe("https://v.douyin.com/AbCdEf/");
+  });
+
+  it("requires source for short and user urls", () => {
+    expect(() => parse_cli(["https://v.douyin.com/kIg44MNOKz8/"])).toThrow(
+      /Missing source/,
+    );
+    expect(() =>
+      parse_cli(["https://www.douyin.com/user/MS4wLjABAAAA"]),
+    ).toThrow(/Missing source/);
+  });
+
+  it("rejects unknown source, extra args, and mismatches", () => {
+    expect(() =>
+      parse_cli(["one", "https://www.douyin.com/video/123"]),
+    ).toThrow(/Invalid source one/);
+    expect(() =>
+      parse_cli(["like", "https://v.douyin.com/a/", "extra"]),
+    ).toThrow(/Unexpected argument extra/);
+    expect(() =>
+      parse_cli(["video", "https://www.douyin.com/user/MS4wLjABAAAA"]),
+    ).toThrow(/source video does not match user URL/);
+    expect(() =>
+      parse_cli(["like", "https://www.douyin.com/video/123"]),
+    ).toThrow(/source like does not match video URL/);
+  });
+
+  it("rejects removed F2 flags", () => {
+    expect(() =>
+      parse_cli(["-M", "like", "-u", "https://v.douyin.com/example/"]),
+    ).toThrow(/Unknown option/);
+    expect(() =>
+      parse_cli(["like", "https://v.douyin.com/example/", "--check-all"]),
+    ).toThrow(/Unknown option/);
+    expect(() =>
+      parse_cli(["like", "https://v.douyin.com/example/", "--path", "/tmp"]),
+    ).toThrow(/Unknown option/);
+  });
+
+  it("parses output full-scan limit refresh and cookie-file", () => {
     const options = parse_cli([
-      "--check-all",
-      "-M",
+      "--full-scan",
+      "--refresh",
+      "--limit",
+      "3",
+      "--output",
+      "/tmp/dy-out",
+      "--cookie-file",
+      "/tmp/cookies.txt",
       "post",
-      "-u",
       "https://www.douyin.com/user/MS4wLjABAAAA",
     ]);
-    expect(options.check_all).toBe(true);
-    expect(options.mode).toBe("post");
+    expect(options.source).toBe("post");
+    expect(options.output).toBe("/tmp/dy-out");
+    expect(options.full_scan).toBe(true);
+    expect(options.limit).toBe(3);
+    expect(options.refresh).toBe(true);
+    expect(options.cookie_file).toBe("/tmp/cookies.txt");
+  });
+
+  it("keeps --max-comment 0 and --max-danmaku 0", () => {
+    const options = parse_cli([
+      "like",
+      "https://v.douyin.com/example/",
+      "--max-comment",
+      "0",
+      "--max-danmaku",
+      "0",
+    ]);
+    expect(options.max_comment).toBe(0);
+    expect(options.max_danmaku).toBe(0);
+  });
+
+  it("rejects invalid --limit", () => {
+    expect(() =>
+      parse_cli(["like", "https://v.douyin.com/example/", "--limit", "0"]),
+    ).toThrow(/Invalid --limit/);
+  });
+
+  it("requires source and url", async () => {
+    const result = await run_cli(["--dry-run"]);
+    expect(result.exit_code).not.toBe(0);
+    expect(`${result.stdout}\n${result.stderr}`).toMatch(/Missing URL/);
   });
 
   it("dry-run prints fill and skip without downloading", async () => {
