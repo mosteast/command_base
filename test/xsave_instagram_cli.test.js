@@ -184,4 +184,52 @@ describe("xsave_instagram CLI", () => {
     expect(result.exit_code).not.toBe(0);
     expect(`${result.stdout}\n${result.stderr}`).toMatch(/Missing URL/);
   });
+
+  it("refresh re-downloads existing library media and skips comments at 0", async () => {
+    const fs = require("node:fs/promises");
+    const os = require("node:os");
+    const path = require("node:path");
+    const { run_export } = require("../lib/xsave_instagram/run_export");
+    const temp_root = await fs.mkdtemp(path.join(os.tmpdir(), "xsave-ig-refresh-"));
+    const media_name = `"nori","AbCdEfGhIjK","Nori","2026-01-01","desc"_video.mp4`;
+    await fs.writeFile(path.join(temp_root, media_name), "video");
+    const download_media = async ({ target_path }) => {
+      await fs.writeFile(target_path, "new");
+      return { ok: true };
+    };
+    try {
+      const result = await run_export(
+        {
+          source: "like",
+          url: "https://www.instagram.com/example_user/",
+          output: temp_root,
+          refresh: true,
+          max_comment: 0,
+          chrome_profile: "nori",
+        },
+        {
+          resolve_cookie: async () => "dummy",
+          collect_list: async () => [
+            {
+              shortcode: "AbCdEfGhIjK",
+              video_url: "https://example.com/a.mp4",
+              author: { username: "nori" },
+            },
+          ],
+          download_media,
+          fetch_comments: async () => {
+            throw new Error("should not fetch comments when max_comment is 0");
+          },
+          open_session: async () => ({ page: {}, close: async () => {} }),
+          assert_logged_in_profile: async () => {},
+          log: () => {},
+        },
+      );
+      expect(result.exit_code).toBe(0);
+      expect(result.stats.download).toBe(1);
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
+  });
 });
+
