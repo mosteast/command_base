@@ -13,6 +13,7 @@ const {
   open_session,
   prepare_list_page,
   prepare_persistent_user_data,
+  resolve_session_sec_user_id,
 } = require("../lib/xsave_douyin/chrome_client");
 
 function create_fake_page(handler) {
@@ -863,5 +864,20 @@ describe("xsave_douyin persistent user-data", () => {
     } finally {
       await fs.rm(temp_root, { recursive: true, force: true });
     }
+  });
+
+  it("resolves sec_user_id from the session homepage or a /user/ link", async () => {
+    const from_location = await resolve_session_sec_user_id({
+      goto: async () => {},
+      url: () => "https://www.douyin.com/user/MS4wLjSESSION",
+    });
+    expect(from_location).toBe("MS4wLjSESSION");
+    const from_link = await resolve_session_sec_user_id({
+      goto: async () => {},
+      url: () => "https://www.douyin.com/",
+      evaluate: async () => "https://www.douyin.com/user/MS4wLjLINK",
+    });
+    expect(from_link).toBe("MS4wLjLINK");
+    expect(await resolve_session_sec_user_id(null)).toBe("");
   });
 });

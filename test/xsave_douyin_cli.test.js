@@ -500,4 +500,69 @@ describe("xsave_douyin CLI", () => {
       await fs.rm(temp_root, { recursive: true, force: true });
     }
   });
+
+  it("uses session sec_user_id when signer is set and url is empty", async () => {
+    const seen = {};
+    const result = await run_export(
+      {
+        source: "like",
+        url: "",
+        signer: true,
+        dry_run: true,
+        output: "/tmp/xsave-dy-signer",
+        max_comment: 0,
+        max_danmaku: 0,
+        chrome_profile: "nori",
+      },
+      {
+        resolve_cookie: async () => "dummy",
+        open_session: async () => ({ page: { id: "session" }, close: async () => {} }),
+        resolve_session_sec_user_id: async (page) => {
+          seen.page = page;
+          return "MS4wLjFROMSESSION";
+        },
+        attach_list_intercept: () => [],
+        prepare_list_page: async (_page, args) => {
+          seen.prepare = args;
+        },
+        collect_list: async (args) => {
+          seen.collect = args;
+          return [];
+        },
+        log: () => {},
+      },
+    );
+    expect(result.exit_code).toBe(0);
+    expect(seen.page).toEqual({ id: "session" });
+    expect(seen.prepare.sec_user_id).toBe("MS4wLjFROMSESSION");
+    expect(seen.collect.sec_user_id).toBe("MS4wLjFROMSESSION");
+  });
+
+  it("fails signer export when session sec_user_id is missing", async () => {
+    const errors = [];
+    const result = await run_export(
+      {
+        source: "collection",
+        url: "",
+        signer: true,
+        dry_run: true,
+        output: "/tmp/xsave-dy-signer-miss",
+        max_comment: 0,
+        max_danmaku: 0,
+        chrome_profile: "nori",
+      },
+      {
+        resolve_cookie: async () => "dummy",
+        open_session: async () => ({ page: {}, close: async () => {} }),
+        resolve_session_sec_user_id: async () => "",
+        collect_list: async () => [],
+        log: () => {},
+        error: (text) => errors.push(String(text)),
+      },
+    );
+    expect(result.exit_code).toBe(1);
+    expect(errors.join("\n")).toMatch(
+      /source collection requires a logged-in Douyin session/,
+    );
+  });
 });
