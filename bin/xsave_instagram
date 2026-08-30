@@ -1,0 +1,53 @@
+#!/usr/bin/env node
+
+"use strict";
+
+const {
+  build_help_text,
+  parse_cli,
+} = require("../lib/xsave_instagram/parse_cli");
+
+async function main(argv) {
+  let options;
+  try {
+    options = parse_cli(argv);
+  } catch (error) {
+    process.stderr.write(`${error.message}\n`);
+    process.stderr.write(`${build_help_text("xsave_instagram")}\n`);
+    return 1;
+  }
+
+  if (options.help) {
+    process.stdout.write(`${build_help_text("xsave_instagram")}\n`);
+    return 0;
+  }
+  if (options.version) {
+    process.stdout.write(`${options.version_text}\n`);
+    return 0;
+  }
+
+  let run_export;
+  try {
+    run_export = require("../lib/xsave_instagram/run_export").run_export;
+  } catch (_error) {
+    process.stderr.write("xsave_instagram export runner is not implemented yet\n");
+    return 2;
+  }
+
+  const result = await run_export(options);
+  return result && Number.isFinite(result.exit_code) ? result.exit_code : 0;
+}
+
+if (require.main === module) {
+  main(process.argv.slice(2)).then(
+    (exit_code) => {
+      process.exit(exit_code);
+    },
+    (error) => {
+      process.stderr.write(`${error && error.stack ? error.stack : error}\n`);
+      process.exit(1);
+    },
+  );
+}
+
+module.exports = { main };
