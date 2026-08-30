@@ -78,6 +78,19 @@ async function write_douyin_config_file(temp_root) {
   return config_path;
 }
 
+async function write_instagram_config_file(temp_root) {
+  const config_path = path.join(temp_root, "gather.instagram.config.yaml");
+  const config_text = [
+    "source:",
+    "  instagram:",
+    "    - name: Example Instagram user",
+    "      handle: https://www.instagram.com/example_user/",
+    "",
+  ].join("\n");
+  await fs.writeFile(config_path, config_text, "utf8");
+  return config_path;
+}
+
 async function write_x_f2_config_file(temp_root) {
   const config_path = path.join(temp_root, "gather.x_f2.config.yaml");
   const config_text = [
@@ -637,6 +650,85 @@ describe("gather CLI platform selection", () => {
       );
       expect(result.stdout).not.toContain("f2_compat dy");
       expect(result.stdout).not.toContain("https://www.youtube.com/@example");
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
+  });
+
+  it("supports ig as an alias for instagram and builds xsave_instagram post", async () => {
+    const temp_root = await create_temp_dir();
+    try {
+      const config_path = await write_instagram_config_file(temp_root);
+      const result = await run_cli([
+        "--dry-run",
+        "--state-file",
+        path.join(temp_root, "gather.state.json"),
+        "--platform",
+        "ig",
+        config_path,
+      ]);
+      expect(result.exit_code).toBe(0);
+      expect(result.stdout).toContain(
+        "xsave_instagram post https://www.instagram.com/example_user/",
+      );
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not pass gather --refresh through to xsave_instagram", async () => {
+    const temp_root = await create_temp_dir();
+    try {
+      const config_path = await write_instagram_config_file(temp_root);
+      const result = await run_cli([
+        "--dry-run",
+        "--refresh",
+        "--state-file",
+        path.join(temp_root, "gather.state.json"),
+        "--platform",
+        "instagram",
+        config_path,
+      ]);
+      expect(result.exit_code).toBe(0);
+      expect(result.stdout).toContain("xsave_instagram post ");
+      expect(result.stdout).not.toMatch(/xsave_instagram[^\n]*--refresh/);
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
+  });
+
+  it("injects runtime chrome-profile into xsave_instagram commands", async () => {
+    const temp_root = await create_temp_dir();
+    const runtime_path = path.join(temp_root, "gather.runtime.yaml");
+    try {
+      await fs.writeFile(
+        runtime_path,
+        [
+          "version: 1",
+          "platform:",
+          "  instagram:",
+          '    chrome_profile: "Profile 9"',
+          "",
+        ].join("\n"),
+        "utf8",
+      );
+      const config_path = await write_instagram_config_file(temp_root);
+      const result = await run_cli(
+        [
+          "--dry-run",
+          "--state-file",
+          path.join(temp_root, "gather.state.json"),
+          "--platform",
+          "instagram",
+          config_path,
+        ],
+        { GATHER_RUNTIME_PATH: runtime_path },
+      );
+      expect(result.exit_code).toBe(0);
+      expect(result.stdout).toContain(
+        "xsave_instagram post https://www.instagram.com/example_user/",
+      );
+      expect(result.stdout).toMatch(/--chrome-profile ["']?Profile 9["']?/);
     } finally {
       await fs.rm(temp_root, { recursive: true, force: true });
     }

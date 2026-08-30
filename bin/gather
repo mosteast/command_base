@@ -30,7 +30,12 @@ const DEFAULT_RUNTIME_PATH =
 const DEFAULT_F2_OUTPUT_DIR =
   "/Users/hailang/Library/Mobile Documents/com~apple~CloudDocs/main/saved/f2";
 const F2_COMPAT_COMMAND = "f2_compat";
-const F2_COMMANDS = new Set(["f2", F2_COMPAT_COMMAND, "xsave_douyin"]);
+const F2_COMMANDS = new Set([
+  "f2",
+  F2_COMPAT_COMMAND,
+  "xsave_douyin",
+  "xsave_instagram",
+]);
 const REPORT_CHILD_COMMANDS = new Set(["xsave_yt_dlp", "xsave_gallery_dl"]);
 const {
   read_runtime_config,
@@ -64,6 +69,9 @@ const DEFAULT_CONFIG_LINES = [
   "  douyin:",
   "    - name: Example Douyin user",
   "      handle: https://www.douyin.com/user/EXAMPLE_ID",
+  "  instagram:",
+  "    - name: Example Instagram user",
+  "      handle: https://www.instagram.com/example_user/",
 ];
 const DEFAULT_CONFIG_TEMPLATE = `${DEFAULT_CONFIG_LINES.join("\n")}\n`;
 const RANGE_VALUES = ["all", "source", "command"];
@@ -77,6 +85,7 @@ const PLATFORM_ALIASES = {
   tw: "x_f2",
   x: "x_f2",
   yt: "youtube",
+  ig: "instagram",
 };
 
 const PLATFORM_COMMANDS = {
@@ -109,6 +118,11 @@ const PLATFORM_COMMANDS = {
     build_args: (url) => ["post", url],
     label: "douyin",
   },
+  instagram: {
+    command: "xsave_instagram",
+    build_args: (url) => ["post", url],
+    label: "instagram",
+  },
   x_f2: {
     command: F2_COMPAT_COMMAND,
     build_args: (url) => ["x", "-M", "post", "-u", url],
@@ -130,6 +144,7 @@ const PLATFORM_HANDLE_BASE_URLS = {
   x_f2: "https://x.com/",
   x_gallery_dl: "https://x.com/",
   douyin: "https://www.douyin.com/user/",
+  instagram: "https://www.instagram.com/",
 };
 
 const REFRESH_MODE_VALUES = ["media", "info", "all"];
@@ -1272,7 +1287,12 @@ function rewrite_f2_command_text(command_text) {
   const {
     rewrite_xsave_douyin_command_text,
   } = require("../lib/xsave_douyin/rewrite_command");
-  return rewrite_xsave_douyin_command_text(command_text);
+  const {
+    rewrite_xsave_instagram_command_text,
+  } = require("../lib/xsave_instagram/rewrite_command");
+  return rewrite_xsave_instagram_command_text(
+    rewrite_xsave_douyin_command_text(command_text),
+  );
 }
 
 function infer_command_platform_keys(command_text) {
@@ -1297,6 +1317,14 @@ function infer_command_platform_keys(command_text) {
     normalized_command.includes("v.douyin.com")
   ) {
     add_platform("douyin");
+  }
+
+  if (
+    /\bxsave_instagram\b/.test(normalized_command) ||
+    normalized_command.includes("instagram.com") ||
+    normalized_command.includes("instagr.am")
+  ) {
+    add_platform("instagram");
   }
 
   if (
@@ -1650,6 +1678,16 @@ function build_runtime_cookie_args(platform_key, command_name, options) {
   }
 
   if (command_name === "xsave_douyin" && platform_key === "douyin") {
+    const entry = get_platform_runtime(runtime_data, platform_key);
+    const profile =
+      entry && entry.chrome_profile
+        ? String(entry.chrome_profile).trim()
+        : "";
+    if (!profile) return [];
+    return ["--chrome-profile", profile];
+  }
+
+  if (command_name === "xsave_instagram" && platform_key === "instagram") {
     const entry = get_platform_runtime(runtime_data, platform_key);
     const profile =
       entry && entry.chrome_profile
