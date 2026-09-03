@@ -12,6 +12,50 @@ if [[ ! -x "$upstream_f2" ]]; then
   exit 1
 fi
 
+read_output_dir() {
+  local index=1
+  local arg
+  local next
+  while [[ "$index" -le $# ]]; do
+    arg="${!index}"
+    next=$((index + 1))
+    case "$arg" in
+      -p|--path)
+        if [[ "$next" -le $# ]]; then
+          printf '%s' "${!next}"
+          return 0
+        fi
+        ;;
+      -p=*|--path=*)
+        printf '%s' "${arg#*=}"
+        return 0
+        ;;
+    esac
+    index=$((index + 1))
+  done
+  return 1
+}
+
+cleanup_empty_files() {
+  local target_dir="$1"
+  if [[ -z "$target_dir" || "$target_dir" == "/" || "$target_dir" == "." ]]; then
+    return 0
+  fi
+  if [[ ! -d "$target_dir" ]]; then
+    return 0
+  fi
+
+  local file_path
+  while IFS= read -r -d '' file_path; do
+    rm -f -- "$file_path"
+  done < <(find "$target_dir" -type f -size 0 -print0 2>/dev/null)
+}
+
+output_dir=""
+if output_dir="$(read_output_dir "$@")"; then
+  cleanup_empty_files "$output_dir"
+fi
+
 if [[ $# -gt 0 ]]; then
   case "$1" in
     dy|douyin)

@@ -20,6 +20,10 @@ const {
   sanitize_report_path_component,
   write_download_report,
 } = require("../lib/download_report");
+const {
+  is_safe_cleanup_directory,
+  remove_empty_files,
+} = require("../lib/file/remove_empty_file");
 
 const DEFAULT_CONFIG_PATH =
   "/Users/hailang/Library/Mobile Documents/com~apple~CloudDocs/main/saved/state/gather.config.yaml";
@@ -2039,10 +2043,21 @@ function build_f2_cleanup_directories(command_config, options) {
   const command_args = Array.isArray(command_config.args)
     ? command_config.args
     : [];
-  const platform_directory = normalize_f2_platform_directory(command_args[0]);
-  const mode_directory = normalize_f2_path_part(
-    read_option_value(command_args, ["-M", "--mode"]),
-  );
+  const command_name = String(command_config.command || "").trim();
+  let platform_directory = "";
+  let mode_directory = "";
+  if (command_name === "xsave_douyin") {
+    platform_directory = "douyin";
+    mode_directory = normalize_f2_path_part(command_args[0]);
+  } else if (command_name === "xsave_instagram") {
+    platform_directory = "instagram";
+    mode_directory = normalize_f2_path_part(command_args[0]);
+  } else {
+    platform_directory = normalize_f2_platform_directory(command_args[0]);
+    mode_directory = normalize_f2_path_part(
+      read_option_value(command_args, ["-M", "--mode"]),
+    );
+  }
 
   const candidate_directories = [];
   if (platform_directory && mode_directory) {
@@ -2058,13 +2073,6 @@ function build_f2_cleanup_directories(command_config, options) {
   candidate_directories.push(resolved_output_dir);
 
   return Array.from(new Set(candidate_directories));
-}
-
-function is_safe_cleanup_directory(target_dir) {
-  const resolved_dir = path.resolve(String(target_dir || "").trim());
-  if (!resolved_dir) return false;
-  const root_dir = path.parse(resolved_dir).root;
-  return resolved_dir !== root_dir;
 }
 
 function format_error_message(error) {
@@ -2102,71 +2110,6 @@ async function find_first_existing_directory(candidate_directories, logger) {
   return "";
 }
 
-async function remove_zero_byte_files(target_dir, logger) {
-  const pending_directories = [target_dir];
-  let removed_count = 0;
-
-  while (pending_directories.length > 0) {
-    const current_directory = pending_directories.pop();
-    if (!current_directory) continue;
-
-    let entries = [];
-    try {
-      logger.debug(`IO: read directory ${current_directory}`);
-      entries = await fs.readdir(current_directory, { withFileTypes: true });
-    } catch (error) {
-      if (!error || error.code !== "ENOENT") {
-        logger.warn(
-          `Unable to read cleanup directory ${current_directory}: ${format_error_message(
-            error,
-          )}`,
-        );
-      }
-      continue;
-    }
-
-    for (const entry of entries) {
-      const entry_path = path.join(current_directory, entry.name);
-
-      if (entry.isDirectory()) {
-        pending_directories.push(entry_path);
-        continue;
-      }
-
-      if (!entry.isFile()) continue;
-
-      let entry_stat;
-      try {
-        logger.debug(`IO: stat file ${entry_path}`);
-        entry_stat = await fs.stat(entry_path);
-      } catch (error) {
-        if (!error || error.code !== "ENOENT") {
-          logger.warn(
-            `Unable to inspect file ${entry_path}: ${format_error_message(error)}`,
-          );
-        }
-        continue;
-      }
-
-      if (entry_stat.size !== 0) continue;
-
-      try {
-        logger.debug(`IO: remove empty file ${entry_path}`);
-        await fs.unlink(entry_path);
-        removed_count += 1;
-      } catch (error) {
-        if (!error || error.code !== "ENOENT") {
-          logger.warn(
-            `Unable to remove empty file ${entry_path}: ${format_error_message(error)}`,
-          );
-        }
-      }
-    }
-  }
-
-  return removed_count;
-}
-
 async function cleanup_empty_files_before_export(
   command_config,
   options,
@@ -2193,7 +2136,7 @@ async function cleanup_empty_files_before_export(
   }
 
   logger.debug(`Step: pre-export empty-file cleanup ${cleanup_directory}`);
-  const removed_count = await remove_zero_byte_files(cleanup_directory, logger);
+  const removed_count = await remove_empty_files(cleanup_directory, logger);
   if (removed_count > 0) {
     logger.info(
       `Removed ${removed_count} empty file(s) from ${palette.path(cleanup_directory)} before export.`,

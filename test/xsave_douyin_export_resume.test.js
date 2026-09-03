@@ -192,6 +192,117 @@ describe("xsave_douyin export resume", () => {
     }
   });
 
+  it("removes empty files before comparing local media", async () => {
+    const temp_root = await fs.mkdtemp(
+      path.join(os.tmpdir(), "xsave-empty-before-"),
+    );
+    const empty_path = path.join(
+      temp_root,
+      `"uid","old-empty","name","2026-01-01","desc"_video.mp4`,
+    );
+    const keep_path = path.join(
+      temp_root,
+      `"uid","old-1","name","2026-01-01","desc"_video.mp4`,
+    );
+    let collect_saw_empty = true;
+    let stdout = "";
+    try {
+      await fs.writeFile(empty_path, "");
+      await fs.writeFile(keep_path, "video");
+      const result = await run_export(
+        {
+          source: "like",
+          url: "https://v.douyin.com/example/",
+          output: temp_root,
+          dry_run: false,
+          max_comment: 0,
+          max_danmaku: 0,
+          chrome_profile: "nori",
+        },
+        {
+          page: {},
+          resolve_cookie: async () => "dummy",
+          attach_list_intercept: () => [],
+          prepare_list_page: async () => {},
+          collect_list: async () => {
+            collect_saw_empty = await fs
+              .stat(empty_path)
+              .then(() => true)
+              .catch((error) => error && error.code === "ENOENT" ? false : true);
+            return [visible_item("new-1")];
+          },
+          download_media: async () => ({ ok: true, reason: "" }),
+          fetch_comments: async () => [],
+          fetch_danmaku: async () => [],
+          log: (text) => {
+            stdout += `${text}\n`;
+          },
+        },
+      );
+      expect(result.exit_code).toBe(0);
+      expect(collect_saw_empty).toBe(false);
+      await expect(fs.stat(empty_path)).rejects.toMatchObject({ code: "ENOENT" });
+      expect(await fs.readFile(keep_path, "utf8")).toBe("video");
+      expect(stdout).toMatch(/Removed 1 empty file/);
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not treat a zero-byte file as already downloaded", async () => {
+    const temp_root = await fs.mkdtemp(
+      path.join(os.tmpdir(), "xsave-empty-resume-"),
+    );
+    const empty_name = `"uid","old-1","name","2026-01-01","desc"_video.mp4`;
+    await fs.writeFile(path.join(temp_root, empty_name), "");
+    const pages_by_cursor = {
+      0: {
+        http: 200,
+        status_code: 0,
+        has_more: 1,
+        max_cursor: 10,
+        aweme_list: [visible_item("new-1"), visible_item("old-1")],
+      },
+      10: {
+        http: 200,
+        status_code: 0,
+        has_more: 0,
+        max_cursor: 20,
+        aweme_list: [visible_item("older-1")],
+      },
+    };
+    try {
+      const result = await run_export(
+        {
+          source: "like",
+          url: "https://v.douyin.com/example/",
+          output: temp_root,
+          dry_run: true,
+          max_comment: 1,
+          max_danmaku: 1,
+          chrome_profile: "nori",
+        },
+        {
+          page: page_by_cursor(pages_by_cursor),
+          resolve_cookie: async () => "dummy",
+          collect_list,
+          attach_list_intercept: () => [],
+          prepare_list_page: async () => {},
+          download_media: vi.fn(),
+          log: () => {},
+        },
+      );
+      expect(result.exit_code).toBe(0);
+      expect(result.items.map((item) => item.aweme_id)).toEqual([
+        "new-1",
+        "old-1",
+        "older-1",
+      ]);
+    } finally {
+      await fs.rm(temp_root, { recursive: true, force: true });
+    }
+  });
+
   it("does not stop list collect for source video", async () => {
     const seen = [];
     const result = await run_export(
