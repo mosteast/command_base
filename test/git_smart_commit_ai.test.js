@@ -56,7 +56,7 @@ describe("git smart commit plan", () => {
     ]);
     expect(plan.platform).toBe("codex");
     expect(calls.map((call) => call.platform)).toEqual(["cursor-cli", "codex"]);
-    expect(calls[0].request.model).toBe("cursor-grok-4.5-high-fast");
+    expect(calls[0].request.model).toBe("cursor-grok-4.6-high-fast");
     expect(calls[0].request.disable_fallback).toBe(true);
     expect(calls[1].request.model).toBe("gpt-5.6-sol");
     expect(calls[1].request.disable_fallback).toBe(true);
