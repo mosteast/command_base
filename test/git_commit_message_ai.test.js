@@ -42,7 +42,7 @@ describe("git commit message ai helper", () => {
       label: "codex-cli",
     });
     expect(calls.map((call) => call.platform)).toEqual(["cursor-cli", "codex"]);
-    expect(calls[0].request.model).toBe("cursor-grok-4.6-high-fast");
+    expect(calls[0].request.model).toBe("cursor-grok-4.7-high-fast");
     expect(calls[0].request.disable_fallback).toBe(true);
     expect(calls[1].request.model).toBe("gpt-5.6-sol");
     expect(calls[1].request.reasoning).toBe("low");
@@ -105,7 +105,7 @@ Refine AI commit message formatting
       {
         label: "cursor-cli",
         platform: "cursor-cli",
-        model: "cursor-grok-4.6-high-fast",
+        model: "cursor-grok-4.7-high-fast",
       },
       {
         label: "codex-cli",

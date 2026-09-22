@@ -17,7 +17,7 @@ const default_ai_commit_attempts = Object.freeze([
   Object.freeze({
     label: "cursor-cli",
     platform: "cursor-cli",
-    model: "cursor-grok-4.6-high-fast",
+    model: "cursor-grok-4.7-high-fast",
   }),
   Object.freeze({
     label: "codex-cli",
