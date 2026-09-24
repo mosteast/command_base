@@ -1733,7 +1733,12 @@ function build_platform_command(platform_key, url, refresh_mode, options) {
         ? options.f2_output_dir
         : "";
     if (f2_output_dir) {
-      args.push("-p", f2_output_dir);
+      const output_flag =
+        config.command === "xsave_douyin" ||
+        config.command === "xsave_instagram"
+          ? "--output"
+          : "-p";
+      args.push(output_flag, f2_output_dir);
     }
   }
   return {

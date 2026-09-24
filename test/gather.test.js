@@ -729,6 +729,10 @@ describe("gather CLI platform selection", () => {
         "xsave_instagram post https://www.instagram.com/example_user/",
       );
       expect(result.stdout).toMatch(/--chrome-profile ["']?Profile 9["']?/);
+      expect(result.stdout).toContain(
+        '--output "/Users/hailang/Library/Mobile Documents/com~apple~CloudDocs/main/saved/f2"',
+      );
+      expect(result.stdout).not.toMatch(/\s-p\s/);
     } finally {
       await fs.rm(temp_root, { recursive: true, force: true });
     }
@@ -754,6 +758,9 @@ describe("gather CLI platform selection", () => {
       expect(result.stdout).toContain(
         "f2_compat x -M post -u https://x.com/example",
       );
+      expect(result.stdout).toContain(
+        '-p "/Users/hailang/Library/Mobile Documents/com~apple~CloudDocs/main/saved/f2"',
+      );
       expect(result.stdout).not.toContain("f2 x -M post -u");
     } finally {
       await fs.rm(temp_root, { recursive: true, force: true });
@@ -778,7 +785,8 @@ describe("gather CLI platform selection", () => {
       ]);
 
       expect(result.exit_code).toBe(0);
-      expect(result.stdout).toContain(`-p "${default_f2_output_dir}"`);
+      expect(result.stdout).toContain(`--output "${default_f2_output_dir}"`);
+      expect(result.stdout).not.toMatch(/\s-p\s/);
     } finally {
       await fs.rm(temp_root, { recursive: true, force: true });
     }
