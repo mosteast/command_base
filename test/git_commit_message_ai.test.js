@@ -3,8 +3,10 @@ import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
 const {
+  load_ai_commit_attempts,
+} = require("../utility/ai_commit_model_config");
+const {
   build_commit_message_prompt,
-  default_ai_commit_attempts,
   generate_ai_commit_message,
   normalize_commit_message,
 } = require("../utility/git_commit_message_ai");
@@ -42,9 +44,9 @@ describe("git commit message ai helper", () => {
       label: "codex-cli",
     });
     expect(calls.map((call) => call.platform)).toEqual(["cursor-cli", "codex"]);
-    expect(calls[0].request.model).toBe("cursor-grok-4.7-high-fast");
+    expect(calls[0].request.model).toBe(load_ai_commit_attempts()[0].model);
     expect(calls[0].request.disable_fallback).toBe(true);
-    expect(calls[1].request.model).toBe("gpt-5.6-sol");
+    expect(calls[1].request.model).toBe(load_ai_commit_attempts()[1].model);
     expect(calls[1].request.reasoning).toBe("low");
     expect(calls[1].request.disable_fallback).toBe(true);
   });
@@ -100,24 +102,21 @@ Refine AI commit message formatting
     );
   });
 
-  it("keeps the requested default fallback order explicit", () => {
-    expect(default_ai_commit_attempts).toEqual([
-      {
-        label: "cursor-cli",
-        platform: "cursor-cli",
-        model: "cursor-grok-4.7-high-fast",
-      },
-      {
-        label: "codex-cli",
-        platform: "codex",
-        model: "gpt-5.6-sol",
-        reasoning: "low",
-      },
-      {
-        label: "claude-code",
-        platform: "claude-code",
-        model: "auto",
-      },
+  it("loads the fallback order from the model config", () => {
+    const attempts = load_ai_commit_attempts();
+    expect(attempts.map((attempt) => attempt.platform)).toEqual([
+      "cursor-cli",
+      "codex",
+      "claude-code",
     ]);
+    expect(attempts.map((attempt) => attempt.label)).toEqual([
+      "cursor-cli",
+      "codex-cli",
+      "claude-code",
+    ]);
+    expect(attempts[1].reasoning).toBe("low");
+    for (const attempt of attempts) {
+      expect(attempt.model.trim().length).toBeGreaterThan(0);
+    }
   });
 });

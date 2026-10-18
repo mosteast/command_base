@@ -1,0 +1,17 @@
+# Model ids drift. Readers rewrite `model` when a provider rejects the
+# current id and lists a successor.
+version: 1
+attempt:
+  - id: cursor-cli
+    label: cursor-cli
+    platform: cursor-cli
+    model: grok-4.7-high-fast
+  - id: codex-cli
+    label: codex-cli
+    platform: codex
+    model: gpt-5.6-sol
+    reasoning: low
+  - id: claude-code
+    label: claude-code
+    platform: claude-code
+    model: auto

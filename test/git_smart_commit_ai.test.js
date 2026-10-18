@@ -3,6 +3,9 @@ import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
 const {
+  load_ai_commit_attempts,
+} = require("../utility/ai_commit_model_config");
+const {
   build_smart_commit_prompt,
   expand_group_paths,
   extract_json_object,
@@ -56,9 +59,9 @@ describe("git smart commit plan", () => {
     ]);
     expect(plan.platform).toBe("codex");
     expect(calls.map((call) => call.platform)).toEqual(["cursor-cli", "codex"]);
-    expect(calls[0].request.model).toBe("cursor-grok-4.7-high-fast");
+    expect(calls[0].request.model).toBe(load_ai_commit_attempts()[0].model);
     expect(calls[0].request.disable_fallback).toBe(true);
-    expect(calls[1].request.model).toBe("gpt-5.6-sol");
+    expect(calls[1].request.model).toBe(load_ai_commit_attempts()[1].model);
     expect(calls[1].request.disable_fallback).toBe(true);
   });
 

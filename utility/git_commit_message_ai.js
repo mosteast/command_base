@@ -4,6 +4,10 @@
 const { execFileSync } = require("child_process");
 
 const { execute_with_adapter } = require("./_ai_cli_utils");
+const {
+  invoke_ai_attempt,
+  resolve_ai_commit_attempts,
+} = require("./ai_commit_model_config");
 
 const script_version = "0.1.0";
 
@@ -13,30 +17,14 @@ const BLUE = "\x1b[34m";
 const RED = "\x1b[31m";
 const RESET = "\x1b[0m";
 
-const default_ai_commit_attempts = Object.freeze([
-  Object.freeze({
-    label: "cursor-cli",
-    platform: "cursor-cli",
-    model: "cursor-grok-4.7-high-fast",
-  }),
-  Object.freeze({
-    label: "codex-cli",
-    platform: "codex",
-    model: "gpt-5.6-sol",
-    reasoning: "low",
-  }),
-  Object.freeze({
-    label: "claude-code",
-    platform: "claude-code",
-    model: "auto",
-  }),
-]);
-
 function print_help() {
   console.log(`Usage: git_commit_message_ai [options]
 
 Description:
   Generate a concise Git commit message from the currently staged changes.
+  Model ids are read from config/ai_commit/models.yaml. When a provider
+  rejects the current id and lists replacements, the file is updated and
+  the attempt is retried once.
 
 Options:
   -h, --help        Show this help message and exit.
@@ -205,7 +193,10 @@ function build_commit_message_prompt(change_context) {
 async function generate_ai_commit_message(change_context, options) {
   const resolved_options = options || {};
   const logger = resolved_options.logger || create_logger({});
-  const attempts = resolved_options.attempts || default_ai_commit_attempts;
+  const { attempts, config_path } = resolve_ai_commit_attempts({
+    ...resolved_options,
+    logger,
+  });
   const invoke_adapter =
     resolved_options.invoke_adapter || execute_with_adapter;
   const user_prompt = build_commit_message_prompt(change_context);
@@ -218,25 +209,31 @@ async function generate_ai_commit_message(change_context, options) {
       `Trying ${attempt.label} for AI commit message (model: ${attempt.model}).`,
     );
     try {
-      const raw_output = await invoke_adapter(attempt.platform, {
-        model: attempt.model,
-        reasoning: attempt.reasoning,
-        system_prompt,
-        user_prompt,
-        temperature: 0.2,
-        max_tokens: 240,
-        logger,
-        disable_fallback: true,
-      });
+      const { output: raw_output, attempt: used_attempt } =
+        await invoke_ai_attempt(
+          attempt,
+          (active_attempt) =>
+            invoke_adapter(active_attempt.platform, {
+              model: active_attempt.model,
+              reasoning: active_attempt.reasoning,
+              system_prompt,
+              user_prompt,
+              temperature: 0.2,
+              max_tokens: 240,
+              logger,
+              disable_fallback: true,
+            }),
+          { logger, config_path },
+        );
       const message = normalize_commit_message(raw_output);
       if (!message) {
         throw new Error("AI response did not contain a usable commit message");
       }
       return {
         message,
-        platform: attempt.platform,
-        model: attempt.model,
-        label: attempt.label,
+        platform: used_attempt.platform,
+        model: used_attempt.model,
+        label: used_attempt.label,
       };
     } catch (error) {
       const error_message =
@@ -402,7 +399,6 @@ if (require.main === module) {
 }
 
 module.exports = {
-  default_ai_commit_attempts,
   build_commit_message_prompt,
   collect_staged_change_context,
   generate_ai_commit_message,

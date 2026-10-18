@@ -6,7 +6,10 @@ const readline = require("readline");
 
 const { execute_with_adapter } = require("./_ai_cli_utils");
 const {
-  default_ai_commit_attempts,
+  invoke_ai_attempt,
+  resolve_ai_commit_attempts,
+} = require("./ai_commit_model_config");
+const {
   generate_ai_commit_message,
   normalize_commit_message,
 } = require("./git_commit_message_ai");
@@ -25,6 +28,9 @@ Description:
   Inspect the current changes, ask AI whether they should be split into
   multiple logical commits, then create one commit per group. Changes are
   grouped at the file level. Pushing is left to the caller.
+  Model ids are read from config/ai_commit/models.yaml. When a provider
+  rejects the current id and lists replacements, the file is updated and
+  the attempt is retried once.
 
 Options:
   -h, --help        Show this help message and exit.
@@ -408,7 +414,10 @@ async function generate_smart_commit_plan(
 ) {
   const resolved_options = options || {};
   const logger = resolved_options.logger || create_logger({});
-  const attempts = resolved_options.attempts || default_ai_commit_attempts;
+  const { attempts, config_path } = resolve_ai_commit_attempts({
+    ...resolved_options,
+    logger,
+  });
   const invoke_adapter =
     resolved_options.invoke_adapter || execute_with_adapter;
   const user_prompt = build_smart_commit_prompt(change_context, changed_paths);
@@ -422,22 +431,28 @@ async function generate_smart_commit_plan(
       `Trying ${attempt.label} for the commit split plan (model: ${attempt.model})...`,
     );
     try {
-      const raw_output = await invoke_adapter(attempt.platform, {
-        model: attempt.model,
-        reasoning: attempt.reasoning,
-        system_prompt,
-        user_prompt,
-        temperature: 0.2,
-        max_tokens: 1500,
-        logger,
-        disable_fallback: true,
-      });
+      const { output: raw_output, attempt: used_attempt } =
+        await invoke_ai_attempt(
+          attempt,
+          (active_attempt) =>
+            invoke_adapter(active_attempt.platform, {
+              model: active_attempt.model,
+              reasoning: active_attempt.reasoning,
+              system_prompt,
+              user_prompt,
+              temperature: 0.2,
+              max_tokens: 1500,
+              logger,
+              disable_fallback: true,
+            }),
+          { logger, config_path },
+        );
       const plan = parse_smart_commit_plan(raw_output, changed_paths);
       return {
         ...plan,
-        platform: attempt.platform,
-        model: attempt.model,
-        label: attempt.label,
+        platform: used_attempt.platform,
+        model: used_attempt.model,
+        label: used_attempt.label,
       };
     } catch (error) {
       const error_message =
@@ -474,6 +489,7 @@ async function resolve_commit_plan(change_context, changed_paths, options) {
       logger,
       invoke_adapter: resolved_options.invoke_adapter,
       attempts: resolved_options.attempts,
+      config_path: resolved_options.config_path,
     });
     return {
       groups: [{ message: fallback.message, files: [...changed_paths] }],
