@@ -54,7 +54,7 @@ async function write_defaults(root, yaml_body) {
 describe("cleanup_disk CLI", () => {
   it("prints version only", async () => {
     const result = await run_cli(["-v"]);
-    expect(result.stdout.trim()).toBe("1.0.0");
+    expect(result.stdout.trim()).toBe("1.1.0");
   });
 
   it("fails on unknown options", async () => {
@@ -175,6 +175,86 @@ describe("cleanup_disk CLI", () => {
       expect(result.stdout).toMatch(/trashed/i);
       expect(await path_exists(cache_dir)).toBe(false);
       expect(await path_exists(trash_root)).toBe(true);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("snapshots then diffs growth for the same rules", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "cleanup-disk-cli-"));
+    const home = path.join(root, "home");
+    const cache_dir = path.join(home, "cache");
+    const snapshot_dir = path.join(root, "snapshots");
+    await fs.mkdir(cache_dir, { recursive: true });
+    await fs.writeFile(path.join(cache_dir, "a.bin"), "abc", "utf8");
+
+    const defaults_path = await write_defaults(
+      root,
+      [
+        "version: 1",
+        "rule:",
+        "  - id: cache",
+        '    path: "~/cache"',
+        "    kind: cache",
+        "    risk: low",
+        "    action: report",
+        "    enabled: true",
+      ].join("\n"),
+    );
+
+    const env = {
+      HOME: home,
+      COMMAND_BASE_CLEANUP_DISK_HOME: home,
+      COMMAND_BASE_CLEANUP_DISK_DEFAULTS: defaults_path,
+    };
+
+    try {
+      const snapshot = await run_cli(
+        ["snapshot", "--snapshot-dir", snapshot_dir],
+        { env },
+      );
+      expect(snapshot.stdout).toContain("Snapshot:");
+      expect(snapshot.stdout).toContain("items=1");
+
+      await fs.writeFile(
+        path.join(cache_dir, "b.bin"),
+        Buffer.alloc(256 * 1024),
+      );
+
+      const diff = await run_cli(["diff", "--snapshot-dir", snapshot_dir], {
+        env,
+      });
+      expect(diff.stdout).toContain("Diff baseline:");
+      expect(diff.stdout).toContain(cache_dir);
+      expect(diff.stdout).toMatch(/delta=\+/);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("warns when diff has no baseline snapshot", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "cleanup-disk-cli-"));
+    const home = path.join(root, "home");
+    await fs.mkdir(home, { recursive: true });
+
+    const defaults_path = await write_defaults(
+      root,
+      ["version: 1", "rule:", "  - id: none", "    path: \"~/none\"", "    kind: cache", "    risk: low", "    action: report", "    enabled: true"].join("\n"),
+    );
+
+    try {
+      const result = await run_cli(
+        ["diff", "--snapshot-dir", path.join(root, "empty")],
+        {
+          env: {
+            HOME: home,
+            COMMAND_BASE_CLEANUP_DISK_HOME: home,
+            COMMAND_BASE_CLEANUP_DISK_DEFAULTS: defaults_path,
+          },
+        },
+      );
+      expect(result.stderr + result.stdout).toMatch(/No baseline snapshot/);
+      expect(result.exit_code).toBe(0);
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }
