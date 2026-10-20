@@ -152,4 +152,29 @@ describe("cleanup_disk clean", () => {
     expect(typeof result.freed_bytes).toBe("number");
     expect(result.freed_bytes).toBeGreaterThanOrEqual(0);
   });
+
+  it("keeps unreadable and below-threshold rows out of the plan", () => {
+    const plan = plan_clean([
+      {
+        rule: { id: "locked", action: "delete", risk: "low" },
+        paths: ["/tmp/locked"],
+        status: "unreadable",
+        size_bytes: 0,
+      },
+      {
+        rule: { id: "small", action: "delete", risk: "low" },
+        paths: ["/tmp/small"],
+        status: "skipped_threshold",
+        size_bytes: 1,
+      },
+      {
+        rule: { id: "ok", action: "delete", risk: "low" },
+        paths: ["/tmp/ok"],
+        status: "ok",
+        size_bytes: 10,
+      },
+    ]);
+
+    expect(plan.map((item) => item.rule.id)).toEqual(["ok"]);
+  });
 });
