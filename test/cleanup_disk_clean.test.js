@@ -85,4 +85,96 @@ describe("cleanup_disk clean", () => {
     expect(await path_exists(target)).toBe(false);
     expect(await path_exists(trash_root)).toBe(true);
   });
+
+  it("counts deleted bytes separately from trashed bytes", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "cleanup-disk-clean-"));
+    const trash_root = path.join(root, "trash");
+    const delete_target = path.join(root, "delete_cache");
+    const trash_target = path.join(root, "trash_cache");
+    await fs.mkdir(delete_target, { recursive: true });
+    await fs.mkdir(trash_target, { recursive: true });
+    await fs.writeFile(path.join(delete_target, "big"), Buffer.alloc(300 * 1024));
+    await fs.writeFile(path.join(trash_target, "big"), Buffer.alloc(300 * 1024));
+
+    const plan = plan_clean([
+      {
+        rule: { id: "delete_cache", action: "delete", risk: "low" },
+        paths: [delete_target],
+        status: "ok",
+        size_bytes: 300 * 1024,
+      },
+      {
+        rule: { id: "trash_cache", action: "trash", risk: "low" },
+        paths: [trash_target],
+        status: "ok",
+        size_bytes: 300 * 1024,
+      },
+    ]);
+
+    const result = await execute_clean(plan, {
+      yes: true,
+      dry_run: false,
+      home: root,
+      trash_dir: trash_root,
+      measure_free_space: false,
+    });
+
+    expect(result.deleted_bytes).toBeGreaterThanOrEqual(300 * 1024);
+    expect(result.trashed_bytes).toBeGreaterThanOrEqual(300 * 1024);
+    expect(result.freed_bytes).toBe(null);
+    expect(await path_exists(delete_target)).toBe(false);
+    expect(await path_exists(trash_target)).toBe(false);
+    expect(await path_exists(trash_root)).toBe(true);
+  });
+
+  it("reports the free space delta of the probed volume", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "cleanup-disk-clean-"));
+    const target = path.join(root, "cache");
+    await fs.mkdir(target, { recursive: true });
+    await fs.writeFile(path.join(target, "big"), Buffer.alloc(1024 * 1024));
+
+    const plan = plan_clean([
+      {
+        rule: { id: "cache", action: "delete", risk: "low" },
+        paths: [target],
+        status: "ok",
+        size_bytes: 1024 * 1024,
+      },
+    ]);
+
+    const result = await execute_clean(plan, {
+      yes: true,
+      dry_run: false,
+      home: root,
+      probe_path: root,
+    });
+
+    expect(typeof result.freed_bytes).toBe("number");
+    expect(result.freed_bytes).toBeGreaterThanOrEqual(0);
+  });
+
+  it("keeps unreadable and below-threshold rows out of the plan", () => {
+    const plan = plan_clean([
+      {
+        rule: { id: "locked", action: "delete", risk: "low" },
+        paths: ["/tmp/locked"],
+        status: "unreadable",
+        size_bytes: 0,
+      },
+      {
+        rule: { id: "small", action: "delete", risk: "low" },
+        paths: ["/tmp/small"],
+        status: "skipped_threshold",
+        size_bytes: 1,
+      },
+      {
+        rule: { id: "ok", action: "delete", risk: "low" },
+        paths: ["/tmp/ok"],
+        status: "ok",
+        size_bytes: 10,
+      },
+    ]);
+
+    expect(plan.map((item) => item.rule.id)).toEqual(["ok"]);
+  });
 });

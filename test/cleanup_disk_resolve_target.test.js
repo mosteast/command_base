@@ -99,4 +99,34 @@ describe("cleanup_disk resolve_target", () => {
       ),
     ).rejects.toThrow(/dangerous path/i);
   });
+
+  it("marks a rule unreadable instead of throwing when measurement fails", async () => {
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), "cleanup-disk-home-"));
+    const locked_dir = path.join(home, "locked");
+    await fs.mkdir(locked_dir, { recursive: true });
+
+    try {
+      const resolved = await resolve_rule(
+        {
+          id: "locked",
+          path: "~/locked",
+          kind: "cache",
+          risk: "low",
+          action: "delete",
+          enabled: true,
+        },
+        {
+          home,
+          get_size_bytes: async () => {
+            throw Object.assign(new Error("denied"), { code: "EACCES" });
+          },
+        },
+      );
+
+      expect(resolved.status).toBe("unreadable");
+      expect(resolved.size_bytes).toBe(0);
+    } finally {
+      await fs.rm(home, { recursive: true, force: true });
+    }
+  });
 });

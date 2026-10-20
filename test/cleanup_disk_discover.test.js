@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { discover_hotspots } from "../lib/cleanup_disk/discover.js";
+import fs from "fs/promises";
+import os from "os";
+import path from "path";
+import {
+  discover_hotspots,
+  classify_path,
+  enrich_mdfind_sizes,
+} from "../lib/cleanup_disk/discover.js";
 
 describe("cleanup_disk discover", () => {
   it("suggests cache rules and skips existing paths", async () => {
@@ -63,5 +70,65 @@ describe("cleanup_disk discover", () => {
     expect(hprof).toBeTruthy();
     expect(hprof.kind).toBe("artifact");
     expect(hprof.action).toBe("trash");
+  });
+
+  it("only treats real cache containers as low-risk", () => {
+    expect(classify_path("/Users/demo/Library/Caches/NewTool").action).toBe(
+      "trash",
+    );
+    expect(classify_path("/Users/demo/.cache/hyperframes").action).toBe("trash");
+    expect(classify_path("/Users/demo/Documents/cache").action).toBe("report");
+    expect(classify_path("/Users/demo/project/cache").action).toBe("report");
+  });
+
+  it("replaces the mdfind threshold with the real file size", async () => {
+    const items = [
+      { path: "/data/big.bin", size_bytes: 1024 },
+      { path: "/data/missing.bin", size_bytes: 1024 },
+    ];
+
+    await enrich_mdfind_sizes(items, {
+      min_size_bytes: 1024,
+      read_file_bytes: async (target_path) => {
+        if (target_path === "/data/big.bin") return 4096;
+        throw new Error("ENOENT");
+      },
+    });
+
+    expect(items[0].size_bytes).toBe(4096);
+    expect(items[1].size_bytes).toBe(1024);
+  });
+
+  it("scans Application Support and Containers for hotspots", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "cleanup-disk-disc-"));
+    const app_support = path.join(root, "Library", "Application Support");
+    await fs.mkdir(app_support, { recursive: true });
+
+    const scanned = [];
+    try {
+      const result = await discover_hotspots({
+        root,
+        home: root,
+        top: 5,
+        min_size_bytes: 1024,
+        run_command: async (command, args) => {
+          if (command === "gdu-go") {
+            scanned.push(args[args.length - 1]);
+            return `  5.0G  ${path.join(args[args.length - 1], "HotApp")}`;
+          }
+          return "";
+        },
+        read_file_bytes: async () => null,
+      });
+
+      expect(scanned.some((entry) => entry.includes("Application Support"))).toBe(
+        true,
+      );
+      expect(result.items.some((item) => item.path.endsWith("HotApp"))).toBe(
+        true,
+      );
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
   });
 });

@@ -4,7 +4,7 @@ rule:
     path: "~/Library/Caches/JetBrains"
     kind: cache
     risk: low
-    action: trash
+    action: delete
     min_size: 100M
     enabled: true
     note: "IDE rebuildable cache"
@@ -13,7 +13,7 @@ rule:
     path: "~/Library/Caches/CocoaPods"
     kind: cache
     risk: low
-    action: trash
+    action: delete
     min_size: 100M
     enabled: true
     note: "CocoaPods cache"
@@ -22,7 +22,7 @@ rule:
     path: "~/Library/Caches/Google"
     kind: cache
     risk: low
-    action: trash
+    action: delete
     min_size: 100M
     enabled: true
     note: "Google app cache"
@@ -31,7 +31,7 @@ rule:
     path: "~/Library/Caches/ms-playwright"
     kind: cache
     risk: low
-    action: trash
+    action: delete
     min_size: 100M
     enabled: true
     note: "Playwright browser cache"
@@ -40,7 +40,7 @@ rule:
     path: "~/Library/Caches/pip"
     kind: cache
     risk: low
-    action: trash
+    action: delete
     min_size: 50M
     enabled: true
     note: "pip download cache"
@@ -49,7 +49,7 @@ rule:
     path: "~/Library/Caches/Yarn"
     kind: cache
     risk: low
-    action: trash
+    action: delete
     min_size: 50M
     enabled: true
     note: "Yarn cache"
@@ -58,19 +58,64 @@ rule:
     path: "~/Library/Caches/Homebrew"
     kind: cache
     risk: low
-    action: trash
+    action: delete
     min_size: 50M
     enabled: true
     note: "Homebrew bottle cache"
 
+  - id: npm_cache
+    path: "~/.npm/_cacache"
+    kind: cache
+    risk: low
+    action: delete
+    min_size: 100M
+    enabled: true
+    note: "npm content-addressed cache; refills on demand"
+
+  - id: npm_npx
+    path: "~/.npm/_npx"
+    kind: cache
+    risk: low
+    action: delete
+    min_size: 100M
+    enabled: true
+    note: "npx transient package installs"
+
+  - id: gradle_cache
+    path: "~/.gradle/caches"
+    kind: cache
+    risk: low
+    action: delete
+    min_size: 100M
+    enabled: true
+    note: "Gradle build cache; re-downloaded on next build"
+
+  - id: dot_cache_uv
+    path: "~/.cache/uv"
+    kind: cache
+    risk: low
+    action: delete
+    min_size: 100M
+    enabled: true
+    note: "uv package cache"
+
   - id: dot_cache
     path: "~/.cache"
     kind: cache
-    risk: low
-    action: trash
+    risk: medium
+    action: report
     min_size: 100M
     enabled: true
-    note: "User ~/.cache directory"
+    note: "Umbrella for ~/.cache; holds model weights, inspect before deleting"
+
+  - id: dot_cache_whisper
+    path: "~/.cache/whisper"
+    kind: artifact
+    risk: medium
+    action: report
+    min_size: 100M
+    enabled: true
+    note: "Whisper model weights; deleting forces a re-download"
 
   - id: idea_hprof
     glob: "~/java_error_in_idea.hprof"
@@ -80,6 +125,24 @@ rule:
     enabled: true
     note: "IntelliJ crash dump"
 
+  - id: xcode_device_support
+    path: "~/Library/Developer/Xcode/iOS DeviceSupport"
+    kind: cache
+    risk: low
+    action: delete
+    min_size: 1G
+    enabled: true
+    note: "Symbols for iOS versions you no longer debug"
+
+  - id: simulator_devices
+    path: "~/Library/Developer/CoreSimulator/Devices"
+    kind: large_file
+    risk: high
+    action: report
+    min_size: 1G
+    enabled: true
+    note: "Simulator app data; prefer cleanup_xcode --sim-unavailable"
+
   - id: docker_raw
     path: "~/Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw"
     kind: large_file
@@ -87,7 +150,7 @@ rule:
     action: report
     min_size: 1G
     enabled: true
-    note: "Docker VM disk image; prune manually"
+    note: "Docker VM disk; reclaim with: docker system prune -a -f && docker builder prune -f"
 
   - id: cursor_state_vscdb
     path: "~/Library/Application Support/Cursor/User/globalStorage/state.vscdb"
@@ -96,7 +159,7 @@ rule:
     action: report
     min_size: 500M
     enabled: true
-    note: "Cursor state database"
+    note: "Cursor state database; quit Cursor before removing"
 
   - id: cursor_state_vscdb_backup
     path: "~/Library/Application Support/Cursor/User/globalStorage/state.vscdb.backup"
@@ -106,6 +169,51 @@ rule:
     min_size: 500M
     enabled: true
     note: "Cursor state database backup"
+
+  - id: cursor_snapshots
+    path: "~/Library/Application Support/Cursor/snapshots"
+    kind: artifact
+    risk: medium
+    action: trash
+    min_size: 1G
+    enabled: true
+    note: "Cursor local timeline snapshots; safe to drop when Cursor is closed"
+
+  - id: claude_vm_bundle
+    path: "~/Library/Application Support/Claude-3p/vm_bundles"
+    kind: large_file
+    risk: high
+    action: report
+    min_size: 1G
+    enabled: true
+    note: "Claude local VM images; removed with the app"
+
+  - id: wechat_container
+    path: "~/Library/Containers/com.tencent.xinWeChat"
+    kind: large_file
+    risk: high
+    action: report
+    min_size: 1G
+    enabled: true
+    note: "WeChat data and caches; clear from the app settings"
+
+  - id: ios_simulator_runtime
+    path: "/System/Volumes/Data/System/Library/AssetsV2/com_apple_MobileAsset_iOSSimulatorRuntime"
+    kind: large_file
+    risk: high
+    action: report
+    min_size: 1G
+    enabled: true
+    note: "iOS simulator runtimes; remove old versions in Xcode Settings > Platforms"
+
+  - id: system_developer_library
+    path: "/Library/Developer"
+    kind: large_file
+    risk: high
+    action: report
+    min_size: 1G
+    enabled: true
+    note: "Shared Xcode/CommandLineTools support; needs sudo to clean"
 
   - id: icloud_saved_video
     path: "~/Library/Mobile Documents/com~apple~CloudDocs/main/saved/video"
@@ -123,7 +231,7 @@ rule:
     action: report
     min_size: 1G
     enabled: true
-    note: "Local code workspace; report only"
+    note: "Local code workspace; check duplicated worktree node_modules"
 
   - id: dev_cache_bundle
     kind: delegate
