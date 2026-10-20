@@ -222,7 +222,7 @@ rule:
     action: report
     min_size: 1G
     enabled: true
-    note: "iCloud saved video library"
+    note: "iCloud saved video library; counts on-disk bytes only, most entries are dataless placeholders"
 
   - id: code_base_home
     path: "~/code_base"

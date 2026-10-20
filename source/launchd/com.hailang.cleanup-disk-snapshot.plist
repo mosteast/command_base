@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Daily cleanup_disk snapshot.
+
+  Install (this file is the source of truth; re-copy after editing):
+    mkdir -p ~/Library/LaunchAgents
+    cp source/launchd/com.hailang.cleanup-disk-snapshot.plist ~/Library/LaunchAgents/
+    launchctl bootout gui/$(id -u)/com.hailang.cleanup-disk-snapshot 2>/dev/null
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.hailang.cleanup-disk-snapshot.plist
+
+  Verify / run once now:
+    launchctl kickstart -k gui/$(id -u)/com.hailang.cleanup-disk-snapshot
+    tail -n 20 logs/cleanup_disk/launchd.log
+
+  Inspect growth later:
+    ./bin/cleanup_disk diff --since 30d
+-->
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+	</dict>
+	<key>Label</key>
+	<string>com.hailang.cleanup-disk-snapshot</string>
+	<key>LowPriorityIO</key>
+	<true/>
+	<key>Nice</key>
+	<integer>10</integer>
+	<key>ProcessType</key>
+	<string>Background</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/local/bin/node</string>
+		<string>/Users/hailang/code_base/command_base/bin/cleanup_disk</string>
+		<string>snapshot</string>
+	</array>
+	<key>RunAtLoad</key>
+	<false/>
+	<key>StandardErrorPath</key>
+	<string>/Users/hailang/code_base/command_base/logs/cleanup_disk/launchd-error.log</string>
+	<key>StandardOutPath</key>
+	<string>/Users/hailang/code_base/command_base/logs/cleanup_disk/launchd.log</string>
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Hour</key>
+		<integer>3</integer>
+		<key>Minute</key>
+		<integer>30</integer>
+	</dict>
+	<key>WorkingDirectory</key>
+	<string>/Users/hailang/code_base/command_base</string>
+</dict>
+</plist>
