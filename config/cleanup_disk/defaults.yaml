@@ -4,7 +4,7 @@ rule:
     path: "~/Library/Caches/JetBrains"
     kind: cache
     risk: low
-    action: trash
+    action: delete
     min_size: 100M
     enabled: true
     note: "IDE rebuildable cache"
@@ -13,7 +13,7 @@ rule:
     path: "~/Library/Caches/CocoaPods"
     kind: cache
     risk: low
-    action: trash
+    action: delete
     min_size: 100M
     enabled: true
     note: "CocoaPods cache"
@@ -22,7 +22,7 @@ rule:
     path: "~/Library/Caches/Google"
     kind: cache
     risk: low
-    action: trash
+    action: delete
     min_size: 100M
     enabled: true
     note: "Google app cache"
@@ -31,7 +31,7 @@ rule:
     path: "~/Library/Caches/ms-playwright"
     kind: cache
     risk: low
-    action: trash
+    action: delete
     min_size: 100M
     enabled: true
     note: "Playwright browser cache"
@@ -40,7 +40,7 @@ rule:
     path: "~/Library/Caches/pip"
     kind: cache
     risk: low
-    action: trash
+    action: delete
     min_size: 50M
     enabled: true
     note: "pip download cache"
@@ -49,7 +49,7 @@ rule:
     path: "~/Library/Caches/Yarn"
     kind: cache
     risk: low
-    action: trash
+    action: delete
     min_size: 50M
     enabled: true
     note: "Yarn cache"
@@ -58,7 +58,7 @@ rule:
     path: "~/Library/Caches/Homebrew"
     kind: cache
     risk: low
-    action: trash
+    action: delete
     min_size: 50M
     enabled: true
     note: "Homebrew bottle cache"
@@ -67,7 +67,7 @@ rule:
     path: "~/.cache"
     kind: cache
     risk: low
-    action: trash
+    action: delete
     min_size: 100M
     enabled: true
     note: "User ~/.cache directory"
